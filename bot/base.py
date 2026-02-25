@@ -8,6 +8,7 @@ import ipaddress
 import os
 import re
 import socket
+import time
 from collections.abc import Coroutine
 from datetime import UTC, datetime
 from typing import Any
@@ -16,6 +17,12 @@ from urllib.parse import urlparse
 from aiohttp import web
 from discord import Forbidden, Guild, HTTPException
 from discord.ext import commands
+
+try:
+    from bot_core.boot_profile import log_event
+except Exception:  # pragma: no cover - fallback if master package not in path
+    def log_event(step: str, duration: float, detail: str | None = None) -> None:  # type: ignore
+        return
 
 from . import storage
 from .api.token_manager import TwitchBotTokenManager
@@ -197,10 +204,7 @@ class TwitchBaseCog(commands.Cog):
 
         if self.api:
             # Rehydrate offene Streams/Sessions nach einem Neustart
-            try:
-                self._rehydrate_active_sessions()
-            except Exception:
-                log.debug("Konnte aktive Twitch-Sessions nicht rehydrieren", exc_info=True)
+            self._spawn_bg_task(self._startup_db_warmup(), "twitch.db_warmup")
 
         # Raid-Bot initialisieren
         self._raid_bot: RaidBot | None = None
@@ -244,9 +248,6 @@ class TwitchBaseCog(commands.Cog):
                 self._raid_bot.set_cog(self)  # For dynamic EventSub subscriptions
                 log.debug("Raid-Bot initialisiert (redirect_uri: %s)", redirect_uri)
 
-                # Persistente Views registrieren (Button-Callbacks überleben Bot-Neustart)
-                self._register_persistent_raid_auth_views()
-
                 # Twitch Chat Bot starten (falls Token vorhanden)
                 if self._twitch_bot_token:
                     self._spawn_bg_task(self._init_twitch_chat_bot(), "twitch.chat_bot")
@@ -277,6 +278,9 @@ class TwitchBaseCog(commands.Cog):
         if self.api:
             self._spawn_bg_task(self._sync_missing_user_ids(), "twitch.sync_user_ids")
             self._spawn_bg_task(self._scout_deadlock_channels(), "twitch.scout_deadlock")
+
+        # Persistente Views und Session-Rehydrate nach Bot-Ready erledigen
+        self._spawn_bg_task(self._register_views_after_ready(), "twitch.views_warmup")
 
         # Social Media Clip Management
         self.clip_manager = None
@@ -506,6 +510,40 @@ class TwitchBaseCog(commands.Cog):
             log.debug("Persistente RaidAuthViews registriert: %d Streamer", count)
         except Exception:
             log.exception("Fehler beim Registrieren persistenter RaidAuthViews")
+
+    async def _startup_db_warmup(self) -> None:
+        """Lightweight Warmup: DB-Verbindung + Active Sessions erst nach Bot-Ready herstellen."""
+        try:
+            await self.bot.wait_until_ready()
+        except Exception:
+            log.debug("Warmup wait_until_ready fehlgeschlagen", exc_info=True)
+            return
+
+        t0 = time.perf_counter()
+        try:
+            self._rehydrate_active_sessions()
+            duration = time.perf_counter() - t0
+            log_event("twitch.db_warmup", duration, "rehydrate_active_sessions")
+            log.debug("Warmup: _rehydrate_active_sessions in %.3fs", duration)
+        except Exception:
+            log.debug("Warmup: aktive Sessions konnten nicht rehydriert werden", exc_info=True)
+
+    async def _register_views_after_ready(self) -> None:
+        """Register persistent views after the bot is ready to avoid blocking startup."""
+        try:
+            await self.bot.wait_until_ready()
+        except Exception:
+            log.debug("View-Warmup wait_until_ready fehlgeschlagen", exc_info=True)
+            return
+
+        t0 = time.perf_counter()
+        try:
+            self._register_persistent_raid_auth_views()
+            duration = time.perf_counter() - t0
+            log_event("twitch.views_warmup", duration, "raid_auth_views")
+            log.debug("Warmup: RaidAuthViews registriert in %.3fs", duration)
+        except Exception:
+            log.debug("Warmup: RaidAuthViews konnten nicht registriert werden", exc_info=True)
 
     # -------------------------------------------------------
     # Lifecycle

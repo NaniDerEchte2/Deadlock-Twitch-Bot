@@ -352,11 +352,28 @@ def get_conn():
     try:
         _ensure_compat_functions(conn)
         if not getattr(get_conn, "_schema_ok", False):
+            schema_version_exists = False
             try:
-                ensure_schema(conn)
+                row = conn.execute(
+                    """
+                    SELECT 1
+                      FROM information_schema.tables
+                     WHERE table_schema = 'public'
+                       AND table_name = 'schema_version'
+                    """
+                ).fetchone()
+                schema_version_exists = bool(row)
+            except Exception as exc:  # pragma: no cover - lightweight check only
+                log.debug("schema_version existence check failed: %s", exc)
+
+            if schema_version_exists:
                 get_conn._schema_ok = True
-            except Exception as exc:  # pragma: no cover - best effort
-                log.warning("Schema initialization failed: %s", exc, exc_info=True)
+            else:
+                try:
+                    ensure_schema(conn)
+                    get_conn._schema_ok = True
+                except Exception as exc:  # pragma: no cover - best effort
+                    log.warning("Schema initialization failed: %s", exc, exc_info=True)
         yield _CompatConnection(conn)
     finally:
         conn.close()
