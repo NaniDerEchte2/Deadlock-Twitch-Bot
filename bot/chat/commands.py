@@ -1,4 +1,5 @@
 import logging
+import secrets
 from datetime import UTC, datetime
 
 from ..storage import get_conn
@@ -318,7 +319,7 @@ if TWITCHIO_AVAILABLE:
 
         @twitchio_commands.command(name="clip", aliases=["createclip"])
         async def cmd_clip(self, ctx: twitchio_commands.Context, *, description: str = ""):
-            """!clip [beschreibung] - Erstellt einen Clip aus dem aktuellen Stream-Buffer und postet den Link."""
+            """!clip [titel] - Erstellt einen ca. 60s Clip aus dem aktuellen Stream-Buffer und nutzt den angegebenen Text als Titel."""
             channel_name = ctx.channel.name
             streamer_data = self._get_streamer_by_channel(channel_name)
             if not streamer_data:
@@ -378,6 +379,22 @@ if TWITCHIO_AVAILABLE:
                 )
                 return
 
+            clip_title = description.strip()
+            if not clip_title:
+                clip_title = secrets.choice(
+                    [
+                        "Clip des Streams",
+                        "Highlight des Tages",
+                        "Das müssen wir teilen",
+                        "Unfassbarer Moment",
+                        "Clip it!",
+                    ]
+                )
+            max_title_len = 60
+            if len(clip_title) > max_title_len:
+                clip_title = clip_title[: max_title_len - 3].rstrip() + "..."
+            requested_duration = 60.0
+
             try:
                 from ..api.twitch_api import (
                     TwitchAPI,
@@ -391,6 +408,8 @@ if TWITCHIO_AVAILABLE:
                 clip = await api.create_clip(
                     str(twitch_user_id),
                     user_token=str(access_token),
+                    title=clip_title,
+                    duration=requested_duration,
                     has_delay=False,
                 )
             except Exception:
@@ -413,9 +432,9 @@ if TWITCHIO_AVAILABLE:
                 )
                 return
 
-            desc_part = f' – "{description.strip()}"' if description.strip() else ""
+            desc_part = f' – "{clip_title}"' if clip_title else ""
             await ctx.send(
-                f"@{ctx.author.name} 🎬 Clip erstellt{desc_part} (letzte ~Minute): {clip_url}"
+                f"@{ctx.author.name} 🎬 Clip erstellt{desc_part} (ca. letzte {int(requested_duration)}s): {clip_url}"
             )
             log.info(
                 "Clip command successful: %s in #%s (clip_id=%s)",
@@ -427,14 +446,12 @@ if TWITCHIO_AVAILABLE:
         @twitchio_commands.command(name="ping", aliases=["health", "status", "bot"])
         async def cmd_ping(self, ctx: twitchio_commands.Context):
             """!ping - Zeigt ob der Bot online ist."""
-            import secrets
-
             responses = [
                 f"@{ctx.author.name} Eure Majestät! 👑 Der Bot steht zu Euren Diensten. Was kann ich für Euch tun?",
                 f"@{ctx.author.name} Bin da! Ausgeschlafen, aufgewärmt und bereit für Chaos. 🤖✅",
-                f"@{ctx.author.name} Ja ich lebe noch, keine Sorge. Puls: 📶 Signal: 🟢 Kaffee: ☕ alles gut.",
+                f"@{ctx.author.name} Ja ich lebe noch, keine Sorge. Puls: 🟢 Signal: 📶 Kaffee: ☕ alles gut.",
                 f"@{ctx.author.name} Bot online! Bereit für Euren Befehl, oh weiser Chatter. 🫡",
-                f"@{ctx.author.name} 🟢 Ich atme noch! Und ich hab sogar alle meine Kabel dran.",
+                f"@{ctx.author.name} Ich atme noch! Und ich hab sogar alle meine Kabel dran.",
                 f"@{ctx.author.name} Natürlich bin ich online – wer soll sonst die Clips machen? 😏🎬",
             ]
             await ctx.send(secrets.choice(responses))

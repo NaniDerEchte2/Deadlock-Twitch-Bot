@@ -645,7 +645,7 @@ class TwitchLeaderboardMixin:
                AVG(viewer_count) AS avg_viewers,
                MAX(viewer_count) AS max_viewers,
                COUNT(*)          AS samples,
-               MAX(is_partner)   AS is_partner
+               MAX(CASE WHEN is_partner THEN 1 ELSE 0 END) AS is_partner
           FROM source_rows
          WHERE source_key = ?
            AND ts_utc >= datetime('now', '-30 days')
@@ -763,7 +763,7 @@ class TwitchLeaderboardMixin:
                AVG(viewer_count) AS avg_viewers,
                MAX(viewer_count) AS max_viewers,
                COUNT(*)          AS samples,
-               MAX(is_partner)   AS is_partner
+               MAX(CASE WHEN is_partner THEN 1 ELSE 0 END) AS is_partner
           FROM source_rows
          WHERE source_key = ?
            AND ts_utc >= datetime('now', '-30 days')

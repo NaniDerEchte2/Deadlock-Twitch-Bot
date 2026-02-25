@@ -461,12 +461,17 @@ class TwitchAPI:
         broadcaster_id: str,
         *,
         user_token: str,
+        title: str | None = None,
+        duration: float | int | None = None,
         has_delay: bool = False,
     ) -> dict | None:
         """Create a clip for a broadcaster using a user OAuth token.
 
-        Note: Twitch determines the final segment from the stream buffer
-        (typically the most recent ~90 seconds).
+        Optional parameters:
+        - title: clip title/description (trimmed to 60 chars for safety)
+        - duration: requested clip length in seconds (clamped to Twitch limits 15–60s)
+
+        Note: Twitch still determines the final segment from the stream buffer.
         """
         if not broadcaster_id or not user_token:
             return None
@@ -481,10 +486,30 @@ class TwitchAPI:
         assert self._session is not None
 
         url = f"{TWITCH_API_BASE}/clips"
+
+        cleaned_title = (title or "").strip()
+        if cleaned_title:
+            max_len = 60
+            if len(cleaned_title) > max_len:
+                cleaned_title = cleaned_title[: max_len - 3].rstrip() + "..."
+
+        duration_value: float | None = None
+        if duration is not None:
+            try:
+                duration_value = float(duration)
+            except (TypeError, ValueError):
+                duration_value = None
+            if duration_value is not None:
+                duration_value = max(15.0, min(60.0, duration_value))
+
         params = {
             "broadcaster_id": str(broadcaster_id),
             "has_delay": "true" if has_delay else "false",
         }
+        if cleaned_title:
+            params["title"] = cleaned_title
+        if duration_value is not None:
+            params["duration"] = f"{duration_value:.1f}".rstrip("0").rstrip(".")
         headers = {
             "Client-ID": self.client_id,
             "Authorization": f"Bearer {token}",
