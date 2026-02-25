@@ -47,6 +47,11 @@ class _AnalyticsOverviewMixin:
         router.add_get("/twitch/api/v2/title-performance", self._api_v2_title_performance)
         router.add_get("/twitch/api/v2/audience-insights", self._api_v2_audience_insights)
         router.add_get("/twitch/api/v2/audience-demographics", self._api_v2_audience_demographics)
+        # Lurker / Raid Retention / Viewer Profiles / Audience Sharing
+        router.add_get("/twitch/api/v2/lurker-analysis", self._api_v2_lurker_analysis)
+        router.add_get("/twitch/api/v2/raid-retention", self._api_v2_raid_retention)
+        router.add_get("/twitch/api/v2/viewer-profiles", self._api_v2_viewer_profiles)
+        router.add_get("/twitch/api/v2/audience-sharing", self._api_v2_audience_sharing)
         # Stats-Data Endpoints (from twitch_stats_tracked / twitch_stats_category)
         router.add_get("/twitch/api/v2/viewer-timeline", self._api_v2_viewer_timeline)
         router.add_get("/twitch/api/v2/category-leaderboard", self._api_v2_category_leaderboard)
@@ -68,6 +73,7 @@ class _AnalyticsOverviewMixin:
         from .demo_data import (
             get_audience_demographics,
             get_audience_insights,
+            get_audience_sharing,
             get_auth_status,
             get_calendar_heatmap,
             get_category_activity_series,
@@ -78,15 +84,18 @@ class _AnalyticsOverviewMixin:
             get_coaching,
             get_follower_funnel,
             get_hourly_heatmap,
+            get_lurker_analysis,
             get_monetization,
             get_monthly_stats,
             get_overview,
+            get_raid_retention,
             get_rankings,
             get_streamers,
             get_tag_analysis,
             get_tag_analysis_extended,
             get_title_performance,
             get_viewer_overlap,
+            get_viewer_profiles,
             get_viewer_timeline,
             get_watch_time_distribution,
             get_weekday_stats,
@@ -140,6 +149,10 @@ class _AnalyticsOverviewMixin:
         router.add_get(f"{base}/monetization", _j(get_monetization))
         router.add_get(f"{base}/category-timings", _j(get_category_timings))
         router.add_get(f"{base}/category-activity-series", _j(get_category_activity_series))
+        router.add_get(f"{base}/lurker-analysis", _j(get_lurker_analysis))
+        router.add_get(f"{base}/raid-retention", _j(get_raid_retention))
+        router.add_get(f"{base}/viewer-profiles", _j(get_viewer_profiles))
+        router.add_get(f"{base}/audience-sharing", _j(get_audience_sharing))
         # Demo dashboard HTML
         router.add_get("/twitch/demo/", self._serve_demo_dashboard)
         router.add_get("/twitch/demo", self._serve_demo_dashboard)
@@ -722,3 +735,248 @@ class _AnalyticsOverviewMixin:
             "durationVsViewers": corr(durations, viewers),
             "chatVsRetention": corr(chatters, retention),
         }
+
+    async def _api_v2_lurker_analysis(self, request: web.Request) -> web.Response:
+        """Return basic lurker metrics for a streamer or fall back to demo data."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip() or None
+        days = min(max(int(request.query.get("days", "30")), 7), 365)
+
+        if not streamer:
+            return web.json_response(
+                {"dataAvailable": False, "message": "Streamer required"}, status=400
+            )
+
+        since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        try:
+            with storage.get_conn() as conn:
+                agg_row = conn.execute(
+                    """
+                    WITH sessions AS (
+                        SELECT id
+                        FROM twitch_stream_sessions
+                        WHERE started_at >= ?
+                          AND ended_at IS NOT NULL
+                          AND LOWER(streamer_login) = ?
+                    ),
+                    chatter AS (
+                        SELECT
+                            COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id) AS viewer_id,
+                            COUNT(DISTINCT sc.session_id) AS session_count,
+                            SUM(COALESCE(sc.messages, 0)) AS msg_sum,
+                            MIN(sc.first_message_at) AS first_seen,
+                            MAX(sc.last_seen_at) AS last_seen
+                        FROM twitch_session_chatters sc
+                        JOIN sessions s ON s.id = sc.session_id
+                        GROUP BY 1
+                    )
+                    SELECT
+                        COUNT(*) AS total_viewers,
+                        COUNT(*) FILTER (WHERE msg_sum = 0) AS lurker_count,
+                        AVG(session_count) FILTER (WHERE msg_sum = 0) AS avg_sessions_lurkers
+                    FROM chatter
+                    """,
+                    [since_date, streamer.lower()],
+                ).fetchone()
+
+                total_viewers = int(agg_row[0]) if agg_row and agg_row[0] else 0
+                lurker_count = int(agg_row[1]) if agg_row and agg_row[1] else 0
+                avg_sessions_lurkers = float(agg_row[2]) if agg_row and agg_row[2] else 0.0
+
+                if total_viewers == 0:
+                    return web.json_response(
+                        {"dataAvailable": False, "message": "Keine Daten für den Zeitraum"},
+                        status=200,
+                    )
+
+                top_rows = conn.execute(
+                    """
+                    WITH sessions AS (
+                        SELECT id
+                        FROM twitch_stream_sessions
+                        WHERE started_at >= ?
+                          AND ended_at IS NOT NULL
+                          AND LOWER(streamer_login) = ?
+                    ),
+                    chatter AS (
+                        SELECT
+                            COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id) AS viewer_id,
+                            COUNT(DISTINCT sc.session_id) AS session_count,
+                            SUM(COALESCE(sc.messages, 0)) AS msg_sum,
+                            MIN(sc.first_message_at) AS first_seen,
+                            MAX(sc.last_seen_at) AS last_seen
+                        FROM twitch_session_chatters sc
+                        JOIN sessions s ON s.id = sc.session_id
+                        GROUP BY 1
+                    )
+                    SELECT viewer_id, session_count, first_seen, last_seen
+                    FROM chatter
+                    WHERE msg_sum = 0
+                    ORDER BY session_count DESC
+                    LIMIT 25
+                    """,
+                    [since_date, streamer.lower()],
+                ).fetchall()
+
+                def _iso(val):
+                    if not val:
+                        return None
+                    return val.isoformat() if hasattr(val, "isoformat") else str(val)
+
+                regular_lurkers = [
+                    {
+                        "login": r[0] or "",
+                        "lurkSessions": int(r[1]) if r[1] else 0,
+                        "firstSeen": _iso(r[2]),
+                        "lastSeen": _iso(r[3]),
+                    }
+                    for r in top_rows
+                ]
+
+                return web.json_response(
+                    {
+                        "dataAvailable": True,
+                        "regularLurkers": regular_lurkers,
+                        "lurkerStats": {
+                            "ratio": lurker_count / total_viewers if total_viewers else 0.0,
+                            "avgSessions": avg_sessions_lurkers,
+                            "totalLurkers": lurker_count,
+                            "totalViewers": total_viewers,
+                        },
+                        # Conversion von still zu aktiv ist schwer sauber zu messen; wir belassen sie vorerst bei 0.
+                        "conversionStats": {
+                            "rate": 0.0,
+                            "eligible": lurker_count,
+                            "converted": 0,
+                        },
+                    }
+                )
+        except Exception:
+            log.exception("Error in lurker analysis API")
+            from .demo_data import get_lurker_analysis
+
+            demo = get_lurker_analysis()
+            demo["message"] = "Fallback: Demo-Daten wegen Fehler"
+            return web.json_response(demo, status=200)
+
+    async def _api_v2_raid_retention(self, request: web.Request) -> web.Response:
+        """Return retention stats for outgoing raids for a streamer."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip().lower() or None
+        days = min(max(int(request.query.get("days", "90")), 7), 365)
+
+        if not streamer:
+            return web.json_response(
+                {"dataAvailable": False, "message": "Streamer required"}, status=400
+            )
+
+        since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        try:
+            with storage.get_conn() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        raid_id,
+                        to_broadcaster_login,
+                        viewer_count_sent,
+                        executed_at,
+                        chatters_at_plus5m,
+                        chatters_at_plus15m,
+                        chatters_at_plus30m,
+                        new_chatters,
+                        known_from_raider
+                    FROM twitch_raid_retention
+                    WHERE executed_at >= ?
+                      AND LOWER(from_broadcaster_login) = ?
+                    ORDER BY executed_at DESC
+                    LIMIT 100
+                    """,
+                    [since_date, streamer],
+                ).fetchall()
+
+            if not rows:
+                return web.json_response(
+                    {"dataAvailable": False, "message": "Keine Raids im Zeitraum"}, status=200
+                )
+
+            raids = []
+            retention_values: list[float] = []
+            conversion_values: list[float] = []
+            total_new_chatters = 0
+
+            for r in rows:
+                viewers_sent = int(r[2]) if r[2] else 0
+                chat30 = r[6] if len(r) > 6 else None
+                new_chatters = r[7] if len(r) > 7 else None
+
+                ret_pct = (float(chat30) / viewers_sent * 100) if viewers_sent and chat30 else 0.0
+                conv_pct = (
+                    float(new_chatters) / viewers_sent * 100 if viewers_sent and new_chatters else 0.0
+                )
+
+                retention_values.append(ret_pct)
+                conversion_values.append(conv_pct)
+                total_new_chatters += int(new_chatters or 0)
+
+                raids.append(
+                    {
+                        "raidId": int(r[0]),
+                        "toBroadcaster": r[1],
+                        "viewersSent": viewers_sent,
+                        "executedAt": r[3].isoformat() if hasattr(r[3], "isoformat") else str(r[3]),
+                        "chattersAt5m": r[4],
+                        "chattersAt15m": r[5],
+                        "chattersAt30m": chat30,
+                        "retention30mPct": round(ret_pct, 1),
+                        "newChatters": new_chatters,
+                        "chatterConversionPct": round(conv_pct, 1),
+                        "knownFromRaider": r[8],
+                    }
+                )
+
+            def _avg(values: list[float]) -> float:
+                return round(sum(values) / len(values), 1) if values else 0.0
+
+            summary = {
+                "avgRetentionPct": _avg(retention_values),
+                "avgConversionPct": _avg(conversion_values),
+                "totalNewChatters": total_new_chatters,
+                "raidCount": len(raids),
+            }
+
+            return web.json_response({"dataAvailable": True, "summary": summary, "raids": raids})
+        except Exception:
+            log.exception("Error in raid retention API")
+            from .demo_data import get_raid_retention
+
+            demo = get_raid_retention()
+            demo["message"] = "Fallback: Demo-Daten wegen Fehler"
+            return web.json_response(demo, status=200)
+
+    async def _api_v2_viewer_profiles(self, request: web.Request) -> web.Response:
+        """Placeholder viewer profile endpoint until full implementation is ready."""
+        self._require_v2_auth(request)
+        return web.json_response(
+            {
+                "dataAvailable": False,
+                "message": "Viewer-Profile sind noch nicht berechnet.",
+                "profiles": {},
+                "exclusivityDistribution": [],
+            }
+        )
+
+    async def _api_v2_audience_sharing(self, request: web.Request) -> web.Response:
+        """Placeholder audience sharing endpoint until full implementation is ready."""
+        self._require_v2_auth(request)
+        return web.json_response(
+            {
+                "dataAvailable": False,
+                "message": "Audience-Sharing ist noch nicht berechnet.",
+                "current": [],
+                "timeline": [],
+                "totalUniqueViewers": 0,
+                "dataQuality": {"months": 0, "minSharedFilter": 0},
+            }
+        )

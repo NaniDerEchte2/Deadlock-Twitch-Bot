@@ -103,8 +103,8 @@ if TWITCHIO_AVAILABLE:
             # Aktivieren
             with get_conn() as conn:
                 conn.execute(
-                    "UPDATE twitch_raid_auth SET raid_enabled = 1 WHERE twitch_user_id = ?",
-                    (twitch_user_id,),
+                    "UPDATE twitch_raid_auth SET raid_enabled = ? WHERE twitch_user_id = ?",
+                    (True, twitch_user_id),
                 )
                 conn.execute(
                     "UPDATE twitch_streamers SET raid_bot_enabled = 1 WHERE twitch_user_id = ?",
@@ -144,8 +144,8 @@ if TWITCHIO_AVAILABLE:
 
             with get_conn() as conn:
                 conn.execute(
-                    "UPDATE twitch_raid_auth SET raid_enabled = 0 WHERE twitch_user_id = ?",
-                    (twitch_user_id,),
+                    "UPDATE twitch_raid_auth SET raid_enabled = ? WHERE twitch_user_id = ?",
+                    (False, twitch_user_id),
                 )
                 conn.execute(
                     "UPDATE twitch_streamers SET raid_bot_enabled = 0 WHERE twitch_user_id = ?",

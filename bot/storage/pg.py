@@ -477,6 +477,133 @@ def _seed_default_templates_pg(conn) -> None:
 def ensure_schema(conn) -> None:
     """Create/update all non-auth Twitch tables in PostgreSQL. Idempotent."""
 
+    def _timescale_compression_enabled(table: str) -> bool:
+        """Return True when the table is a Timescale hypertable with compression on."""
+        try:
+            row = conn.execute(
+                "SELECT compression_enabled "
+                "FROM timescaledb_information.hypertables "
+                "WHERE hypertable_name = %s",
+                (table,),
+            ).fetchone()
+            return bool(row and row[0])
+        except Exception:
+            return False
+
+    def _index_exists(index_name: str) -> bool:
+        """Check for an index in the current schema."""
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = %s",
+                (index_name,),
+            ).fetchone()
+            return bool(row)
+        except Exception:
+            return False
+
+    def _has_unique_constraint(table: str, columns: Sequence[str]) -> bool:
+        """
+        Return True when there is a PRIMARY KEY or UNIQUE constraint that matches the
+        provided column list exactly (order-sensitive). Prevents false positives when a
+        non-unique index with the same name already exists.
+        """
+        try:
+            row = conn.execute(
+                """
+                SELECT 1
+                  FROM information_schema.table_constraints tc
+                  JOIN information_schema.key_column_usage kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                   AND tc.table_schema = kcu.table_schema
+                 WHERE tc.table_schema = current_schema()
+                   AND tc.table_name = %s
+                   AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+                 GROUP BY tc.constraint_name
+                HAVING array_agg(kcu.column_name ORDER BY kcu.ordinal_position) = %s
+                 LIMIT 1
+                """,
+                (table, list(columns)),
+            ).fetchone()
+            return bool(row)
+        except Exception as exc:
+            log.debug(
+                "Could not inspect unique constraint on %s(%s): %s",
+                table,
+                ",".join(columns),
+                exc,
+            )
+            return False
+
+    def _decompress_compressed_chunks(table: str) -> bool:
+        """Decompress all compressed chunks for a hypertable. Returns success flag."""
+        try:
+            conn.execute(
+                """
+                SELECT decompress_chunk(format('%I.%I', chunk_schema, chunk_name)::regclass)
+                FROM timescaledb_information.chunks
+                WHERE hypertable_name = %s AND is_compressed
+                """,
+                (table,),
+            )
+            return True
+        except Exception as exc:
+            log.warning("Could not decompress compressed chunks on %s: %s", table, exc)
+            return False
+
+    def _set_timescale_compression(table: str, enable: bool) -> bool:
+        """Best-effort toggle for Timescale compression; returns success flag."""
+        action = "enable" if enable else "disable"
+        try:
+            conn.execute(
+                f"ALTER TABLE {table} SET (timescaledb.compress = {'true' if enable else 'false'})"
+            )
+            return True
+        except psycopg.errors.FeatureNotSupported as exc:
+            # Disabling fails when compressed chunks exist; try to decompress once.
+            if enable:
+                log.warning("Could not %s compression on %s: %s", action, table, exc)
+                return False
+            log.warning("Could not disable compression on %s: %s", table, exc)
+            if not _decompress_compressed_chunks(table):
+                log.warning("Unable to disable compression on %s because chunks could not be decompressed.", table)
+                return False
+            try:
+                conn.execute(f"ALTER TABLE {table} SET (timescaledb.compress = false)")
+                return True
+            except Exception as exc2:  # pragma: no cover - defensive
+                log.warning("Disabling compression on %s still failed after decompressing chunks: %s", table, exc2)
+                return False
+        except Exception as exc:
+            log.warning("Could not %s compression on %s: %s", action, table, exc)
+            return False
+
+    def _create_index_allowing_compressed_hypertable(table: str, sql: str) -> bool:
+        """
+        Try to create an index even if the hypertable has compression enabled.
+        Timescale refuses DDL while compression is on, so we disable it temporarily.
+        """
+        try:
+            conn.execute(sql)
+            return True
+        except psycopg.errors.FeatureNotSupported:
+            if not _timescale_compression_enabled(table):
+                raise
+            log.warning(
+                "Compression detected on %s; disabling temporarily to create missing index.",
+                table,
+            )
+            if not _set_timescale_compression(table, False):
+                log.warning("Index skipped because compression could not be disabled on %s.", table)
+                return False
+            try:
+                conn.execute(sql)
+                return True
+            except Exception as exc:
+                log.warning("Creating index on %s failed even after disabling compression: %s", table, exc)
+            finally:
+                _set_timescale_compression(table, True)
+            return False
+
     # 1) twitch_streamers
     conn.execute(
         """
@@ -781,6 +908,22 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_twitch_raid_history_executed ON twitch_raid_history(executed_at)"
     )
+    # Ältere Deployments hatten auf twitch_raid_history kein Primary/Unique-Key.
+    # Der FK von twitch_raid_retention -> twitch_raid_history(id) schlägt dann fehl.
+    raid_history_has_unique_index = _has_unique_constraint("twitch_raid_history", ["id"])
+    if not raid_history_has_unique_index:
+        created_unique_index = _create_index_allowing_compressed_hypertable(
+            "twitch_raid_history",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_raid_history_id ON twitch_raid_history(id)",
+        )
+        # Re-check to ensure the constraint is actually unique (IF NOT EXISTS may keep a legacy non-unique index).
+        raid_history_has_unique_index = _has_unique_constraint("twitch_raid_history", ["id"]) if created_unique_index else False
+        if _index_exists("idx_twitch_raid_history_id") and not raid_history_has_unique_index:
+            log.warning(
+                "Index idx_twitch_raid_history_id already exists but is not UNIQUE; "
+                "twitch_raid_retention will be created without a foreign key. "
+                "Consider decompressing old chunks and recreating the unique index."
+            )
 
     conn.execute(
         """
@@ -792,6 +935,65 @@ def ensure_schema(conn) -> None:
         )
         """
     )
+
+    # 6b) Raid retention rollup (computed)
+    if not raid_history_has_unique_index:
+        log.warning(
+            "twitch_raid_history(id) is still missing a unique index; twitch_raid_retention will be created without FK. "
+            "Consider manually decompressing old chunks and adding the unique index to restore cascading deletes."
+        )
+
+    raid_id_fk_sql = (
+        "raid_id                INTEGER PRIMARY KEY REFERENCES twitch_raid_history(id) ON DELETE CASCADE"
+        if raid_history_has_unique_index
+        else "raid_id                INTEGER PRIMARY KEY"
+    )
+
+    try:
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS twitch_raid_retention (
+                {raid_id_fk_sql},
+                from_broadcaster_login TEXT NOT NULL,
+                to_broadcaster_login   TEXT NOT NULL,
+                viewer_count_sent      INTEGER NOT NULL,
+                executed_at            TEXT NOT NULL,
+                target_session_id      INTEGER REFERENCES twitch_stream_sessions(id),
+                chatters_at_plus5m     INTEGER,
+                chatters_at_plus15m    INTEGER,
+                chatters_at_plus30m    INTEGER,
+                known_from_raider      INTEGER,
+                new_to_target          INTEGER,
+                new_chatters           INTEGER,
+                computed_at            TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    except psycopg.errors.InvalidForeignKey as exc:
+        log.warning(
+            "Creating twitch_raid_retention with FK failed because twitch_raid_history(id) lacks a unique constraint: %s",
+            exc,
+        )
+        # Fallback: ensure the table exists without the FK so schema init completes.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS twitch_raid_retention (
+                raid_id                INTEGER PRIMARY KEY,
+                from_broadcaster_login TEXT NOT NULL,
+                to_broadcaster_login   TEXT NOT NULL,
+                viewer_count_sent      INTEGER NOT NULL,
+                executed_at            TEXT NOT NULL,
+                target_session_id      INTEGER REFERENCES twitch_stream_sessions(id),
+                chatters_at_plus5m     INTEGER,
+                chatters_at_plus15m    INTEGER,
+                chatters_at_plus30m    INTEGER,
+                known_from_raider      INTEGER,
+                new_to_target          INTEGER,
+                new_chatters           INTEGER,
+                computed_at            TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
 
     # 7) Token blacklist
     conn.execute(
@@ -1291,13 +1493,13 @@ def ensure_schema(conn) -> None:
             scopes               TEXT NOT NULL,
             authorized_at        TEXT DEFAULT CURRENT_TIMESTAMP,
             last_refreshed_at    TEXT,
-            raid_enabled         INTEGER DEFAULT 1,
+            raid_enabled         BOOLEAN DEFAULT TRUE,
             created_at           TEXT DEFAULT CURRENT_TIMESTAMP,
             legacy_access_token  TEXT,
             legacy_refresh_token TEXT,
             legacy_scopes        TEXT,
             legacy_saved_at      TEXT,
-            needs_reauth         INTEGER DEFAULT 0,
+            needs_reauth         BOOLEAN DEFAULT FALSE,
             reauth_notified_at   TEXT,
             access_token_enc     BYTEA,
             refresh_token_enc    BYTEA,

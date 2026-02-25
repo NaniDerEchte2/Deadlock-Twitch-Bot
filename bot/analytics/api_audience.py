@@ -868,3 +868,4 @@ class _AnalyticsAudienceMixin:
         except Exception as exc:
             log.exception("Error in audience demographics API")
             return web.json_response({"error": str(exc)}, status=500)
+

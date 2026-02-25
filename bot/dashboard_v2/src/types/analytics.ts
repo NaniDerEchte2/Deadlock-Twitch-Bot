@@ -570,6 +570,101 @@ export interface CoachingData {
 export type TimeRange = 7 | 30 | 90 | 365;
 export type { TabId } from '@/components/layout/TabNavigation';
 
+// --- Lurker Analysis ---
+export interface LurkerEntry {
+  login: string;
+  lurkSessions: number;
+  firstSeen: string | null;
+  lastSeen: string | null;
+}
+
+export interface LurkerAnalysis {
+  dataAvailable: boolean;
+  message?: string;
+  regularLurkers: LurkerEntry[];
+  lurkerStats: {
+    ratio: number;
+    avgSessions: number;
+    totalLurkers: number;
+    totalViewers: number;
+  };
+  conversionStats: {
+    rate: number;
+    eligible: number;
+    converted: number;
+  };
+}
+
+// --- Viewer Profiles ---
+export interface ViewerProfiles {
+  dataAvailable: boolean;
+  message?: string;
+  profiles: {
+    exclusive: number;
+    loyalMulti: number;
+    casual: number;
+    explorer: number;
+    passive: number;
+    total: number;
+  };
+  exclusivityDistribution: Array<{
+    streamerCount: number;
+    viewerCount: number;
+  }>;
+}
+
+// --- Audience Sharing ---
+export interface AudienceSharingEntry {
+  streamer: string;
+  sharedViewers: number;
+  inflow: number;
+  outflow: number;
+  jaccardSimilarity: number;
+}
+
+export interface AudienceSharing {
+  dataAvailable: boolean;
+  message?: string;
+  current: AudienceSharingEntry[];
+  timeline: Array<{
+    month: string;
+    streamer: string;
+    sharedViewers: number;
+  }>;
+  totalUniqueViewers: number;
+  dataQuality: {
+    months: number;
+    minSharedFilter: number;
+  };
+}
+
+// --- Raid Retention ---
+export interface RaidRetentionEntry {
+  raidId: number;
+  toBroadcaster: string;
+  viewersSent: number;
+  executedAt: string;
+  chattersAt5m: number | null;
+  chattersAt15m: number | null;
+  chattersAt30m: number | null;
+  retention30mPct: number;
+  newChatters: number | null;
+  chatterConversionPct: number;
+  knownFromRaider: number | null;
+}
+
+export interface RaidRetention {
+  dataAvailable: boolean;
+  message?: string;
+  summary: {
+    avgRetentionPct: number;
+    avgConversionPct: number;
+    totalNewChatters: number;
+    raidCount: number;
+  };
+  raids: RaidRetentionEntry[];
+}
+
 // Category Timings (Median-basiert)
 export interface TimingSlot {
   median: number | null;

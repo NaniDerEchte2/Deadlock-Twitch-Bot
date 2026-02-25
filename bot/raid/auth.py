@@ -453,14 +453,14 @@ class RaidAuthManager:
         """
         refreshed_count = 0
         with get_conn() as conn:
-            # Hole alle User mit raid_enabled=1
+            # Hole alle User mit raid_enabled=TRUE
             rows = conn.execute(
                 """
                 SELECT twitch_user_id, twitch_login,
                        refresh_token_enc,
                        enc_version, token_expires_at
                 FROM twitch_raid_auth
-                WHERE raid_enabled = 1
+                WHERE raid_enabled IS TRUE
                 """
             ).fetchall()
 
@@ -588,7 +588,7 @@ class RaidAuthManager:
                     legacy_refresh_token = NULL,
                     legacy_scopes        = scopes,
                     legacy_saved_at      = CURRENT_TIMESTAMP,
-                    needs_reauth         = 1,
+                    needs_reauth         = TRUE,
                     access_token         = 'ENC',
                     refresh_token        = 'ENC'
                 WHERE access_token <> 'ENC'
@@ -613,7 +613,7 @@ class RaidAuthManager:
                        legacy_refresh_token = NULL,
                        legacy_scopes        = NULL,
                        legacy_saved_at      = NULL
-                 WHERE needs_reauth = 0
+                 WHERE needs_reauth IS FALSE
                    AND (
                        legacy_access_token IS NOT NULL
                     OR legacy_refresh_token IS NOT NULL
@@ -670,7 +670,7 @@ class RaidAuthManager:
                 (twitch_user_id, twitch_login, access_token, refresh_token,
                  access_token_enc, refresh_token_enc, enc_version, enc_kid,
                  token_expires_at, scopes, authorized_at, raid_enabled)
-                VALUES (?, ?, 'ENC', 'ENC', ?, ?, 1, 'v1', ?, ?, ?, 1)
+                VALUES (?, ?, 'ENC', 'ENC', ?, ?, 1, 'v1', ?, ?, ?, ?)
                 ON CONFLICT (twitch_user_id) DO UPDATE SET
                     twitch_login      = EXCLUDED.twitch_login,
                     access_token_enc  = EXCLUDED.access_token_enc,
@@ -690,6 +690,7 @@ class RaidAuthManager:
                     expires_at_iso,
                     " ".join(scopes),
                     authorized_at,
+                    True,
                 ),
             )
             # Aktivieren, damit Auto-Raid unmittelbar nach OAuth freigeschaltet ist
@@ -727,7 +728,7 @@ class RaidAuthManager:
             conn.execute(
                 """
                 UPDATE twitch_raid_auth
-                   SET needs_reauth = 0,
+                   SET needs_reauth = FALSE,
                        legacy_access_token = NULL,
                        legacy_refresh_token = NULL,
                        legacy_scopes = NULL,
@@ -913,7 +914,7 @@ class RaidAuthManager:
                 SELECT access_token_enc, refresh_token_enc,
                        enc_version, token_expires_at, twitch_login
                 FROM twitch_raid_auth
-                WHERE twitch_user_id = ? AND raid_enabled = 1
+                WHERE twitch_user_id = ? AND raid_enabled IS TRUE
                 """,
                 (twitch_user_id,),
             ).fetchone()
@@ -1099,7 +1100,7 @@ class RaidAuthManager:
         with get_conn() as conn:
             conn.execute(
                 "UPDATE twitch_raid_auth SET raid_enabled = ? WHERE twitch_user_id = ?",
-                (1 if enabled else 0, twitch_user_id),
+                (bool(enabled), twitch_user_id),
             )
             # Flag im Streamer-Datensatz spiegeln, damit der Auto-Raid-Check konsistent bleibt
             conn.execute(

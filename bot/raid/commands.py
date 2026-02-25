@@ -123,8 +123,8 @@ class RaidCommandsMixin:
         # Aktivieren
         with get_conn() as conn:
             conn.execute(
-                "UPDATE twitch_raid_auth SET raid_enabled = 1 WHERE twitch_user_id = ?",
-                (twitch_user_id,),
+                "UPDATE twitch_raid_auth SET raid_enabled = ? WHERE twitch_user_id = ?",
+                (True, twitch_user_id),
             )
             # autocommit – no explicit commit needed
         with get_conn() as conn:
@@ -162,8 +162,8 @@ class RaidCommandsMixin:
 
         with get_conn() as conn:
             conn.execute(
-                "UPDATE twitch_raid_auth SET raid_enabled = 0 WHERE twitch_user_id = ?",
-                (twitch_user_id,),
+                "UPDATE twitch_raid_auth SET raid_enabled = ? WHERE twitch_user_id = ?",
+                (False, twitch_user_id),
             )
             # autocommit – no explicit commit needed
         with get_conn() as conn:
@@ -421,7 +421,7 @@ class RaidCommandsMixin:
         # Alle Streamer mit needs_reauth=1 und Discord-User-ID holen
         with get_conn() as conn:
             _auth_rows = conn.execute(
-                "SELECT twitch_user_id, twitch_login FROM twitch_raid_auth WHERE needs_reauth = 1"
+                "SELECT twitch_user_id, twitch_login FROM twitch_raid_auth WHERE needs_reauth IS TRUE"
             ).fetchall()
         rows = []
         if _auth_rows:

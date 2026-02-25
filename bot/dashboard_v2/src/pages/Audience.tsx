@@ -1,10 +1,13 @@
 import { motion } from 'framer-motion';
 import { Users, AlertCircle, Loader2, TrendingUp, TrendingDown, Target, Clock, UserPlus } from 'lucide-react';
-import { useWatchTimeDistribution, useFollowerFunnel, useTagAnalysisExtended, useTitlePerformance, useAudienceDemographics } from '@/hooks/useAnalytics';
+import { useWatchTimeDistribution, useFollowerFunnel, useTagAnalysisExtended, useTitlePerformance, useAudienceDemographics, useLurkerAnalysis, useViewerProfiles, useAudienceSharing } from '@/hooks/useAnalytics';
 import { WatchTimeDistribution } from '@/components/charts/WatchTimeDistribution';
 import { FollowerFunnel } from '@/components/charts/FollowerFunnel';
 import { TagPerformanceChart } from '@/components/charts/TagPerformance';
 import { AudienceDemographics } from '@/components/charts/AudienceDemographics';
+import { LurkerAnalysis } from '@/components/charts/LurkerAnalysis';
+import { ViewerProfiles } from '@/components/charts/ViewerProfiles';
+import { AudienceSharing } from '@/components/charts/AudienceSharing';
 import type { TimeRange } from '@/types/analytics';
 
 interface AudienceProps {
@@ -48,6 +51,9 @@ export function Audience({ streamer, days }: AudienceProps) {
     error: demographicsErrorDetail,
     refetch: refetchDemographics,
   } = useAudienceDemographics(streamer, days);
+  const { data: lurkerData } = useLurkerAnalysis(streamer, days);
+  const { data: viewerProfilesData } = useViewerProfiles(streamer, days);
+  const { data: audienceSharingData } = useAudienceSharing(streamer, days);
 
   const isLoading = loadingWatchTime || loadingFunnel || loadingTags || loadingTitles || loadingDemographics;
   const failedQueries = [
@@ -185,6 +191,24 @@ export function Audience({ streamer, days }: AudienceProps) {
 
           {/* Audience Demographics */}
           {demographicsData && <AudienceDemographics data={demographicsData} />}
+
+          {/* Lurker Analysis */}
+          <div>
+            <h2 className="text-lg font-semibold text-white mb-4">Lurker-Analyse</h2>
+            <LurkerAnalysis data={lurkerData} />
+          </div>
+
+          {/* Viewer Profiles */}
+          <div>
+            <h2 className="text-lg font-semibold text-white mb-4">Zuschauer-Profile</h2>
+            <ViewerProfiles data={viewerProfilesData} />
+          </div>
+
+          {/* Audience Sharing */}
+          <div>
+            <h2 className="text-lg font-semibold text-white mb-4">Zuschauer-Netzwerk</h2>
+            <AudienceSharing data={audienceSharingData} />
+          </div>
 
           {/* Audience Insights Summary */}
           {(watchTimeData || funnelData || (tagData && tagData.length > 0)) && (

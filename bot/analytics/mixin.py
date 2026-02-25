@@ -8,8 +8,12 @@ from datetime import UTC, datetime
 
 from discord.ext import tasks
 
-from .. import storage as storage_sqlite
-from ..storage import pg as storage
+from .. import storage as storage_oauth  # SQLite — OAuth tokens & raid auth state
+from ..storage import pg as storage  # PostgreSQL — analytics data
+
+# NOTE: analytics:read:games scope is requested but intentionally unused.
+# It provides global Twitch game metrics (not streamer-specific), which are
+# not actionable for individual streamers and therefore not queried.
 
 log = logging.getLogger("TwitchStreams.Analytics")
 
@@ -26,11 +30,13 @@ class TwitchAnalyticsMixin:
         self._chatters_scope_warned: set[tuple[str, int]] = set()
         self._analytics_task = self.collect_analytics_data.start()
         self._chatters_task = self.collect_chatters_data.start()
+        self._retention_task = self.compute_raid_retention.start()
 
     async def cog_unload(self):
         await super().cog_unload()
         self.collect_analytics_data.cancel()
         self.collect_chatters_data.cancel()
+        self.compute_raid_retention.cancel()
 
     @tasks.loop(hours=6)
     async def collect_analytics_data(self):
@@ -52,12 +58,12 @@ class TwitchAnalyticsMixin:
         # Note: We should actually check if they have the specific scope,
         # but for now we assume the new scope set is used if they re-authed.
         try:
-            with storage_sqlite.get_conn() as conn:
+            with storage_oauth.get_conn() as conn:
                 rows = conn.execute(
                     """
                     SELECT twitch_user_id, twitch_login
                     FROM twitch_raid_auth
-                    WHERE raid_enabled = 1
+                    WHERE raid_enabled IS TRUE
                     """
                 ).fetchall()
         except Exception:
@@ -303,9 +309,9 @@ class TwitchAnalyticsMixin:
 
             # OAuth/Permissions bleiben in SQLite (canonical raid_auth)
             auth_ids: set[str] = set()
-            with storage_sqlite.get_conn() as conn_sqlite:
+            with storage_oauth.get_conn() as conn_sqlite:
                 auth_rows = conn_sqlite.execute(
-                    "SELECT twitch_user_id FROM twitch_raid_auth WHERE raid_enabled = 1"
+                    "SELECT twitch_user_id FROM twitch_raid_auth WHERE raid_enabled IS TRUE"
                 ).fetchall()
                 auth_ids = {
                     (r["twitch_user_id"] if hasattr(r, "keys") else r[0]) for r in auth_rows
@@ -781,3 +787,165 @@ class TwitchAnalyticsMixin:
                 broadcaster_user_id,
                 direction,
             )
+
+    @tasks.loop(hours=1)
+    async def compute_raid_retention(self):
+        """Hourly: compute retention metrics for recent outgoing raids into twitch_raid_retention."""
+        try:
+            with storage_oauth.get_conn() as conn_oauth:
+                raids = conn_oauth.execute(
+                    """
+                    SELECT id, from_broadcaster_login, to_broadcaster_login,
+                           viewer_count, executed_at
+                    FROM twitch_raid_history
+                    WHERE executed_at >= datetime('now', '-7 days')
+                    ORDER BY executed_at DESC
+                    """
+                ).fetchall()
+        except Exception:
+            log.exception("compute_raid_retention: failed to load raids from SQLite")
+            return
+
+        if not raids:
+            return
+
+        processed = 0
+        for raid in raids:
+            raid_id = raid[0]
+            from_login = raid[1].lower()
+            to_login = raid[2].lower()
+            viewer_count = raid[3]
+            executed_at_raw = raid[4]
+
+            try:
+                from datetime import UTC, datetime as _dt
+                if isinstance(executed_at_raw, str):
+                    executed_at = _dt.fromisoformat(executed_at_raw.replace("Z", "+00:00"))
+                elif isinstance(executed_at_raw, _dt):
+                    executed_at = executed_at_raw
+                    if executed_at.tzinfo is None:
+                        executed_at = executed_at.replace(tzinfo=UTC)
+                else:
+                    continue
+
+                with storage.get_conn() as pg:
+                    existing = pg.execute(
+                        "SELECT raid_id FROM twitch_raid_retention WHERE raid_id = %s",
+                        (raid_id,),
+                    ).fetchone()
+                    if existing:
+                        continue
+
+                    target_session = pg.execute(
+                        """
+                        SELECT id FROM twitch_stream_sessions
+                        WHERE LOWER(streamer_login) = %s
+                          AND started_at <= %s
+                          AND (ended_at IS NULL OR ended_at >= %s)
+                        ORDER BY started_at DESC LIMIT 1
+                        """,
+                        (to_login, executed_at, executed_at),
+                    ).fetchone()
+                    if not target_session:
+                        continue
+
+                    target_session_id = target_session["id"]
+
+                    def _count_chatters(offset_min: int) -> int:
+                        row = pg.execute(
+                            """
+                            SELECT COUNT(DISTINCT chatter_login) AS cnt
+                            FROM twitch_session_chatters
+                            WHERE session_id = %s
+                              AND last_seen_at >= %s
+                              AND last_seen_at <= (%s + (%s || ' minutes')::INTERVAL)
+                            """,
+                            (target_session_id, executed_at, executed_at, str(offset_min)),
+                        ).fetchone()
+                        return row["cnt"] if row else 0
+
+                    c5 = _count_chatters(5)
+                    c15 = _count_chatters(15)
+                    c30 = _count_chatters(30)
+
+                    known_row = pg.execute(
+                        """
+                        SELECT COUNT(DISTINCT sc.chatter_login) AS known
+                        FROM twitch_session_chatters sc
+                        WHERE sc.session_id = %s
+                          AND sc.last_seen_at >= %s
+                          AND sc.chatter_login IN (
+                              SELECT chatter_login FROM twitch_chatter_rollup
+                              WHERE LOWER(streamer_login) = %s
+                          )
+                        """,
+                        (target_session_id, executed_at, from_login),
+                    ).fetchone()
+                    known_from_raider = known_row["known"] if known_row else 0
+
+                    new_row = pg.execute(
+                        """
+                        SELECT COUNT(DISTINCT sc.chatter_login) AS new_viewers
+                        FROM twitch_session_chatters sc
+                        WHERE sc.session_id = %s
+                          AND sc.last_seen_at >= %s
+                          AND sc.chatter_login NOT IN (
+                              SELECT chatter_login FROM twitch_chatter_rollup
+                              WHERE LOWER(streamer_login) = %s
+                                AND first_seen_at < %s
+                          )
+                        """,
+                        (target_session_id, executed_at, to_login, executed_at),
+                    ).fetchone()
+                    new_to_target = new_row["new_viewers"] if new_row else 0
+
+                    new_chat_row = pg.execute(
+                        """
+                        SELECT COUNT(DISTINCT sc.chatter_login) AS new_chatters
+                        FROM twitch_session_chatters sc
+                        WHERE sc.session_id = %s
+                          AND sc.first_message_at >= %s
+                          AND sc.messages > 0
+                          AND sc.chatter_login NOT IN (
+                              SELECT chatter_login FROM twitch_chatter_rollup
+                              WHERE LOWER(streamer_login) = %s
+                                AND first_seen_at < %s
+                          )
+                        """,
+                        (target_session_id, executed_at, to_login, executed_at),
+                    ).fetchone()
+                    new_chatters = new_chat_row["new_chatters"] if new_chat_row else 0
+
+                    pg.execute(
+                        """
+                        INSERT INTO twitch_raid_retention
+                            (raid_id, from_broadcaster_login, to_broadcaster_login,
+                             viewer_count_sent, executed_at, target_session_id,
+                             chatters_at_plus5m, chatters_at_plus15m, chatters_at_plus30m,
+                             known_from_raider, new_to_target, new_chatters)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (raid_id) DO NOTHING
+                        """,
+                        (
+                            raid_id,
+                            from_login,
+                            to_login,
+                            viewer_count,
+                            executed_at,
+                            target_session_id,
+                            c5,
+                            c15,
+                            c30,
+                            known_from_raider,
+                            new_to_target,
+                            new_chatters,
+                        ),
+                    )
+                    processed += 1
+
+            except Exception:
+                log.exception("compute_raid_retention: error for raid_id=%s", raid_id)
+                continue
+
+        if processed:
+            log.info("compute_raid_retention: inserted %d new rows", processed)

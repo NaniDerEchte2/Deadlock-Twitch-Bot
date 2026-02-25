@@ -366,7 +366,7 @@ class TokenErrorHandler:
                 conn.execute(
                     """
                     UPDATE twitch_raid_auth
-                    SET raid_enabled = 0
+                    SET raid_enabled = FALSE
                     WHERE twitch_user_id = ?
                     """,
                     (twitch_user_id,),

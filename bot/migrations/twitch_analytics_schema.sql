@@ -589,5 +589,22 @@ ALTER TABLE twitch_link_clicks SET (timescaledb.compress, timescaledb.compress_s
 SELECT add_compression_policy('twitch_link_clicks', INTERVAL '7 days', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_twitch_link_clicks_streamer ON twitch_link_clicks(streamer_login);
 
+-- ========= Raid Retention Rollup (computed, not a hypertable) =========
+CREATE TABLE IF NOT EXISTS twitch_raid_retention (
+    raid_id                BIGINT PRIMARY KEY REFERENCES twitch_raid_history(id) ON DELETE CASCADE,
+    from_broadcaster_login TEXT NOT NULL,
+    to_broadcaster_login   TEXT NOT NULL,
+    viewer_count_sent      INTEGER NOT NULL,
+    executed_at            TIMESTAMPTZ NOT NULL,
+    target_session_id      BIGINT REFERENCES twitch_stream_sessions(id),
+    chatters_at_plus5m     INTEGER,
+    chatters_at_plus15m    INTEGER,
+    chatters_at_plus30m    INTEGER,
+    known_from_raider      INTEGER,
+    new_to_target          INTEGER,
+    new_chatters           INTEGER,
+    computed_at            TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- ========= Housekeeping =========
 ANALYZE;

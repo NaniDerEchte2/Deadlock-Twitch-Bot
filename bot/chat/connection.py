@@ -468,7 +468,7 @@ class ConnectionMixin:
                 FROM twitch_streamers_partner_state s
                 JOIN twitch_raid_auth a ON s.twitch_user_id = a.twitch_user_id
                 LEFT JOIN twitch_live_state l ON s.twitch_user_id = l.twitch_user_id
-                WHERE a.raid_enabled = 1
+                WHERE a.raid_enabled IS TRUE
                    OR s.is_partner_active = 1
                 """
             ).fetchall()

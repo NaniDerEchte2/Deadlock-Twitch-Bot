@@ -24,6 +24,10 @@ import type {
   ViewerTimelinePoint,
   CategoryLeaderboard,
   CoachingData,
+  LurkerAnalysis,
+  RaidRetention,
+  ViewerProfiles,
+  AudienceSharing,
 } from '@/types/analytics';
 
 const API_BASE = '/twitch/api/v2';
@@ -346,6 +350,50 @@ export async function fetchMonetization(
   days: TimeRange
 ): Promise<MonetizationStats> {
   return fetchApi<MonetizationStats>('/monetization', {
+    streamer: streamer || '',
+    days,
+  });
+}
+
+// Lurker Analysis
+export async function fetchLurkerAnalysis(
+  streamer: string | null,
+  days: TimeRange
+): Promise<LurkerAnalysis> {
+  return fetchApi<LurkerAnalysis>('/lurker-analysis', {
+    streamer: streamer || '',
+    days,
+  });
+}
+
+// Raid Retention
+export async function fetchRaidRetention(
+  streamer: string | null,
+  days: TimeRange
+): Promise<RaidRetention> {
+  return fetchApi<RaidRetention>('/raid-retention', {
+    streamer: streamer || '',
+    days,
+  });
+}
+
+// Viewer Profiles
+export async function fetchViewerProfiles(
+  streamer: string | null,
+  days: TimeRange
+): Promise<ViewerProfiles> {
+  return fetchApi<ViewerProfiles>('/viewer-profiles', {
+    streamer: streamer || '',
+    days,
+  });
+}
+
+// Audience Sharing
+export async function fetchAudienceSharing(
+  streamer: string | null,
+  days: TimeRange
+): Promise<AudienceSharing> {
+  return fetchApi<AudienceSharing>('/audience-sharing', {
     streamer: streamer || '',
     days,
   });

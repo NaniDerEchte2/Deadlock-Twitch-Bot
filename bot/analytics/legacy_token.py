@@ -55,7 +55,7 @@ class LegacyTokenAnalyticsMixin:
                            legacy_scopes        = NULL,
                            legacy_saved_at      = NULL
                      WHERE twitch_user_id = ?
-                       AND needs_reauth = 1
+                       AND needs_reauth IS TRUE
                        AND (
                            legacy_access_token IS NOT NULL
                         OR legacy_refresh_token IS NOT NULL
@@ -198,7 +198,7 @@ class LegacyTokenAnalyticsMixin:
         try:
             with storage.get_conn() as conn:
                 return conn.execute(
-                    "SELECT COUNT(*) FROM twitch_raid_auth WHERE needs_reauth=1"
+                    "SELECT COUNT(*) FROM twitch_raid_auth WHERE needs_reauth IS TRUE"
                 ).fetchone()[0]
         except Exception:
             log.debug("LegacyToken: Konnte pending reauth count nicht lesen", exc_info=True)

@@ -1503,3 +1503,89 @@ def get_coaching() -> dict[str, Any]:
             "Kurzfristig: **!discord in Titel aufnehmen** und **frühere Samstag-Starts testen**."
         ),
     }
+
+
+def get_lurker_analysis() -> dict:
+    return {
+        "dataAvailable": True,
+        "regularLurkers": [
+            {"login": "silent_watcher_42", "lurkSessions": 18, "firstSeen": "2025-10-01T18:00:00", "lastSeen": "2025-12-28T21:00:00"},
+            {"login": "nightowl_lurk", "lurkSessions": 15, "firstSeen": "2025-09-15T19:00:00", "lastSeen": "2025-12-30T22:00:00"},
+            {"login": "bgstream_pro", "lurkSessions": 12, "firstSeen": "2025-10-10T17:00:00", "lastSeen": "2025-12-25T20:00:00"},
+            {"login": "couch_gaming", "lurkSessions": 11, "firstSeen": "2025-11-01T20:00:00", "lastSeen": "2025-12-29T21:00:00"},
+            {"login": "lazy_sunday_fan", "lurkSessions": 10, "firstSeen": "2025-10-20T15:00:00", "lastSeen": "2025-12-27T16:00:00"},
+            {"login": "silent_fan_de", "lurkSessions": 9, "firstSeen": "2025-11-05T18:00:00", "lastSeen": "2025-12-26T19:00:00"},
+            {"login": "zapperghost", "lurkSessions": 8, "firstSeen": "2025-09-01T20:00:00", "lastSeen": "2025-12-20T21:00:00"},
+            {"login": "background_andy", "lurkSessions": 7, "firstSeen": "2025-10-14T17:00:00", "lastSeen": "2025-12-22T18:00:00"},
+            {"login": "muted_observer", "lurkSessions": 6, "firstSeen": "2025-11-10T19:00:00", "lastSeen": "2025-12-24T20:00:00"},
+            {"login": "shadow_viewer99", "lurkSessions": 5, "firstSeen": "2025-11-20T18:00:00", "lastSeen": "2025-12-15T19:00:00"},
+        ],
+        "lurkerStats": {"ratio": 34.2, "avgSessions": 7.4, "totalLurkers": 127, "totalViewers": 371},
+        "conversionStats": {"rate": 8.3, "eligible": 84, "converted": 7},
+    }
+
+
+def get_raid_retention() -> dict:
+    return {
+        "dataAvailable": True,
+        "summary": {"avgRetentionPct": 41.2, "avgConversionPct": 18.7, "totalNewChatters": 43, "raidCount": 5},
+        "raids": [
+            {"raidId": 101, "toBroadcaster": "competitive_player_eu", "viewersSent": 140, "executedAt": "2025-12-28T22:15:00", "chattersAt5m": 85, "chattersAt15m": 71, "chattersAt30m": 62, "retention30mPct": 44.3, "newChatters": 12, "chatterConversionPct": 19.4, "knownFromRaider": 28},
+            {"raidId": 102, "toBroadcaster": "game_pro_streamer", "viewersSent": 95, "executedAt": "2025-12-21T21:30:00", "chattersAt5m": 55, "chattersAt15m": 43, "chattersAt30m": 37, "retention30mPct": 38.9, "newChatters": 8, "chatterConversionPct": 21.6, "knownFromRaider": 15},
+            {"raidId": 103, "toBroadcaster": "deadlock_esports", "viewersSent": 210, "executedAt": "2025-12-14T20:00:00", "chattersAt5m": 130, "chattersAt15m": 98, "chattersAt30m": 82, "retention30mPct": 39.0, "newChatters": 18, "chatterConversionPct": 22.0, "knownFromRaider": 45},
+            {"raidId": 104, "toBroadcaster": "relaxed_gamer_de", "viewersSent": 70, "executedAt": "2025-12-07T23:00:00", "chattersAt5m": 38, "chattersAt15m": 31, "chattersAt30m": 28, "retention30mPct": 40.0, "newChatters": 5, "chatterConversionPct": 17.9, "knownFromRaider": 10},
+            {"raidId": 105, "toBroadcaster": "fps_master_twitch", "viewersSent": 180, "executedAt": "2025-11-30T21:45:00", "chattersAt5m": 110, "chattersAt15m": 88, "chattersAt30m": 76, "retention30mPct": 42.2, "newChatters": 14, "chatterConversionPct": 18.4, "knownFromRaider": 38},
+        ],
+    }
+
+
+def get_viewer_profiles() -> dict:
+    return {
+        "dataAvailable": True,
+        "profiles": {"exclusive": 87, "loyalMulti": 112, "casual": 134, "explorer": 23, "passive": 127, "total": 483},
+        "exclusivityDistribution": [
+            {"streamerCount": 1, "viewerCount": 87},
+            {"streamerCount": 2, "viewerCount": 68},
+            {"streamerCount": 3, "viewerCount": 44},
+            {"streamerCount": 4, "viewerCount": 31},
+            {"streamerCount": 5, "viewerCount": 24},
+            {"streamerCount": 6, "viewerCount": 18},
+            {"streamerCount": 7, "viewerCount": 12},
+            {"streamerCount": 8, "viewerCount": 9},
+            {"streamerCount": 10, "viewerCount": 7},
+            {"streamerCount": 15, "viewerCount": 4},
+            {"streamerCount": 20, "viewerCount": 3},
+        ],
+    }
+
+
+def get_audience_sharing() -> dict:
+    return {
+        "dataAvailable": True,
+        "current": [
+            {"streamer": "competitive_player_eu", "sharedViewers": 142, "inflow": 18, "outflow": 7, "jaccardSimilarity": 0.21},
+            {"streamer": "game_pro_streamer", "sharedViewers": 98, "inflow": 12, "outflow": 14, "jaccardSimilarity": 0.15},
+            {"streamer": "deadlock_esports", "sharedViewers": 76, "inflow": 9, "outflow": 5, "jaccardSimilarity": 0.11},
+            {"streamer": "fps_master_twitch", "sharedViewers": 54, "inflow": 22, "outflow": 3, "jaccardSimilarity": 0.09},
+            {"streamer": "relaxed_gamer_de", "sharedViewers": 41, "inflow": 4, "outflow": 11, "jaccardSimilarity": 0.07},
+            {"streamer": "speedrun_king", "sharedViewers": 33, "inflow": 3, "outflow": 8, "jaccardSimilarity": 0.05},
+            {"streamer": "nightly_grind", "sharedViewers": 28, "inflow": 7, "outflow": 2, "jaccardSimilarity": 0.04},
+            {"streamer": "chill_de_stream", "sharedViewers": 19, "inflow": 5, "outflow": 6, "jaccardSimilarity": 0.03},
+        ],
+        "timeline": [
+            {"month": "2025-09", "streamer": "competitive_player_eu", "sharedViewers": 88},
+            {"month": "2025-09", "streamer": "game_pro_streamer", "sharedViewers": 61},
+            {"month": "2025-09", "streamer": "deadlock_esports", "sharedViewers": 45},
+            {"month": "2025-10", "streamer": "competitive_player_eu", "sharedViewers": 104},
+            {"month": "2025-10", "streamer": "game_pro_streamer", "sharedViewers": 79},
+            {"month": "2025-10", "streamer": "deadlock_esports", "sharedViewers": 58},
+            {"month": "2025-11", "streamer": "competitive_player_eu", "sharedViewers": 121},
+            {"month": "2025-11", "streamer": "game_pro_streamer", "sharedViewers": 88},
+            {"month": "2025-11", "streamer": "deadlock_esports", "sharedViewers": 67},
+            {"month": "2025-12", "streamer": "competitive_player_eu", "sharedViewers": 142},
+            {"month": "2025-12", "streamer": "game_pro_streamer", "sharedViewers": 98},
+            {"month": "2025-12", "streamer": "deadlock_esports", "sharedViewers": 76},
+        ],
+        "totalUniqueViewers": 483,
+        "dataQuality": {"months": 4, "minSharedFilter": 3},
+    }

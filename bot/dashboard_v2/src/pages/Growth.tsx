@@ -4,8 +4,9 @@ import { TrendingUp, Calendar, Clock, AlertCircle, Loader2, Crown, Users, Play }
 import { useQuery } from '@tanstack/react-query';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { fetchMonthlyStats, fetchWeekdayStats } from '@/api/client';
-import { useTagAnalysisExtended, useTitlePerformance } from '@/hooks/useAnalytics';
+import { useTagAnalysisExtended, useTitlePerformance, useRaidRetention } from '@/hooks/useAnalytics';
 import { TagPerformanceChart } from '@/components/charts/TagPerformance';
+import { RaidRetention } from '@/components/charts/RaidRetention';
 import type { MonthlyStats, WeekdayStats, TimeRange } from '@/types/analytics';
 
 interface GrowthProps {
@@ -28,6 +29,7 @@ export function Growth({ streamer, days }: GrowthProps) {
 
   const { data: tagData } = useTagAnalysisExtended(streamer, days);
   const { data: titleData } = useTitlePerformance(streamer, days);
+  const { data: raidRetentionData } = useRaidRetention(streamer, days);
 
   const chartData = useMemo(() => {
     if (!monthlyData) return [];
@@ -210,6 +212,12 @@ export function Growth({ streamer, days }: GrowthProps) {
           titleData={mockTitleData}
         />
       )}
+
+      {/* Raid Retention */}
+      <div>
+        <h2 className="text-lg font-semibold text-white mb-4">Raid-Retention</h2>
+        <RaidRetention data={raidRetentionData} />
+      </div>
     </div>
   );
 }

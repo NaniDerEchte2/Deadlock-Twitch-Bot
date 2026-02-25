@@ -33,3 +33,4 @@ twitch_cog/analytics/dashboard_v2/node_modules/
 logs/
 *.log
 .ruff_cache/
+*.ps1

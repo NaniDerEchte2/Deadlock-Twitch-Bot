@@ -27,6 +27,10 @@ import {
   fetchMonetization,
   fetchCategoryTimings,
   fetchCategoryActivitySeries,
+  fetchLurkerAnalysis,
+  fetchRaidRetention,
+  fetchViewerProfiles,
+  fetchAudienceSharing,
 } from '@/api/client';
 import type { TimeRange } from '@/types/analytics';
 
@@ -249,6 +253,46 @@ export function useMonetization(streamer: string | null, days: TimeRange) {
     queryKey: ['monetization', streamer, days],
     queryFn: () => fetchMonetization(streamer, days),
     staleTime: STALE_TIME,
+  });
+}
+
+// Lurker Analysis Hook
+export function useLurkerAnalysis(streamer: string | null, days: TimeRange) {
+  return useQuery({
+    queryKey: ['lurker-analysis', streamer, days],
+    queryFn: () => fetchLurkerAnalysis(streamer, days),
+    staleTime: STALE_TIME,
+    enabled: !!streamer,
+  });
+}
+
+// Raid Retention Hook
+export function useRaidRetention(streamer: string | null, days: TimeRange) {
+  return useQuery({
+    queryKey: ['raid-retention', streamer, days],
+    queryFn: () => fetchRaidRetention(streamer, days),
+    staleTime: STALE_TIME,
+    enabled: !!streamer,
+  });
+}
+
+// Viewer Profiles Hook
+export function useViewerProfiles(streamer: string | null, days: TimeRange) {
+  return useQuery({
+    queryKey: ['viewer-profiles', streamer, days],
+    queryFn: () => fetchViewerProfiles(streamer, days),
+    staleTime: STALE_TIME,
+    enabled: !!streamer,
+  });
+}
+
+// Audience Sharing Hook
+export function useAudienceSharing(streamer: string | null, days: TimeRange) {
+  return useQuery({
+    queryKey: ['audience-sharing', streamer, days],
+    queryFn: () => fetchAudienceSharing(streamer, days),
+    staleTime: STALE_TIME,
+    enabled: !!streamer,
   });
 }
 

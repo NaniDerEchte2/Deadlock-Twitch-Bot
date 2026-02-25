@@ -12,7 +12,6 @@ from __future__ import annotations
 import logging
 import math
 import re
-import sqlite3
 from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -24,7 +23,7 @@ class CoachingEngine:
     """Generates coaching data from the Twitch analytics database."""
 
     @staticmethod
-    def get_coaching_data(conn: sqlite3.Connection, streamer: str, days: int) -> dict[str, Any]:
+    def get_coaching_data(conn: Any, streamer: str, days: int) -> dict[str, Any]:
         streamer_login = streamer.lower()
         since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
 
