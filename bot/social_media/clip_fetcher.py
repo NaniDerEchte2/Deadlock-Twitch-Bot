@@ -110,7 +110,8 @@ class ClipFetcher(commands.Cog):
                     # Record fetch history
                     with get_conn() as conn:
                         conn.execute(
-                            "INSERT OR IGNORE INTO twitch_streamers (twitch_login) VALUES (?)",
+                            "INSERT INTO twitch_streamers (twitch_login) VALUES (?) "
+                            "ON CONFLICT (twitch_login) DO NOTHING",
                             (streamer,),
                         )
                         conn.execute(
@@ -143,7 +144,8 @@ class ClipFetcher(commands.Cog):
                     # Record error in fetch history
                     with get_conn() as conn:
                         conn.execute(
-                            "INSERT OR IGNORE INTO twitch_streamers (twitch_login) VALUES (?)",
+                            "INSERT INTO twitch_streamers (twitch_login) VALUES (?) "
+                            "ON CONFLICT (twitch_login) DO NOTHING",
                             (streamer,),
                         )
                         conn.execute(
@@ -194,7 +196,8 @@ class ClipFetcher(commands.Cog):
             # Record fetch history
             with get_conn() as conn:
                 conn.execute(
-                    "INSERT OR IGNORE INTO twitch_streamers (twitch_login) VALUES (?)",
+                    "INSERT INTO twitch_streamers (twitch_login) VALUES (?) "
+                    "ON CONFLICT (twitch_login) DO NOTHING",
                     (streamer_login,),
                 )
                 conn.execute(

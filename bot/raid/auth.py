@@ -81,6 +81,40 @@ FALLBACK_MAIN_GUILD_ID = _parse_env_int("MAIN_GUILD_ID", 0)
 log = logging.getLogger("TwitchStreams.RaidManager")
 
 
+def _safe_int(val, default: int = 0) -> int:
+    try:
+        return int(val)
+    except Exception:
+        return default
+
+
+def _parse_expiry_ts(val) -> float:
+    """
+    Parse various expiry formats (ISO8601, epoch seconds as int/str).
+    Returns 0.0 on failure so callers can force a refresh.
+    """
+    if val is None:
+        return 0.0
+    # Numeric epoch
+    if isinstance(val, (int, float)):
+        try:
+            return float(val)
+        except Exception:
+            return 0.0
+    text = str(val).strip()
+    if not text:
+        return 0.0
+    if text.isdigit():
+        try:
+            return float(text)
+        except Exception:
+            return 0.0
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
 def _mask_log_identifier(value: object, *, visible_prefix: int = 3, visible_suffix: int = 2) -> str:
     text = str(value or "").strip()
     if not text:
@@ -469,12 +503,9 @@ class RaidAuthManager:
                 )
                 continue
 
-            try:
-                expires_dt = datetime.fromisoformat(expires_iso.replace("Z", "+00:00"))
-                expires_ts = expires_dt.timestamp()
-            except Exception:
+            expires_ts = _parse_expiry_ts(expires_iso)
+            if not expires_ts:
                 log.warning("Invalid expiry date for %s, forcing refresh", login)
-                expires_ts = 0
 
             # Refresh wenn weniger als 2 Stunden (7200s) gültig
             if now_ts < expires_ts - 7200:
@@ -497,9 +528,7 @@ class RaidAuthManager:
                                 _mask_log_identifier(login),
                             )
                             continue
-                        curr_ts = datetime.fromisoformat(
-                            curr_iso.replace("Z", "+00:00")
-                        ).timestamp()
+                        curr_ts = _parse_expiry_ts(curr_iso)
                         # Bug Fix: time.time() statt veraltetes now_ts verwenden
                         if time.time() < curr_ts - 7200:
                             continue  # Wurde bereits refresht
@@ -519,7 +548,7 @@ class RaidAuthManager:
                     )
                     new_access = token_data["access_token"]
                     new_refresh = token_data.get("refresh_token") or refresh_tok
-                    expires_in = token_data.get("expires_in", 3600)
+                    expires_in = _safe_int(token_data.get("expires_in", 3600), 3600)
 
                     new_expires_at = datetime.now(UTC).timestamp() + expires_in
                     new_expires_iso = datetime.fromtimestamp(new_expires_at, UTC).isoformat()
@@ -607,12 +636,12 @@ class RaidAuthManager:
         twitch_login: str,
         access_token: str,
         refresh_token: str,
-        expires_in: int,
+        expires_in: int | str,
         scopes: list[str],
     ) -> None:
         """Speichert OAuth-Tokens verschlüsselt in der Datenbank."""
         now = datetime.now(UTC)
-        expires_at = now.timestamp() + expires_in
+        expires_at = now.timestamp() + _safe_int(expires_in, 3600)
         expires_at_iso = datetime.fromtimestamp(expires_at, UTC).isoformat()
         authorized_at = now.isoformat()
 
@@ -777,7 +806,7 @@ class RaidAuthManager:
             return None
         expires_at_iso = row["token_expires_at"]
         twitch_login = row["twitch_login"]
-        expires_at = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00")).timestamp()
+        expires_at = _parse_expiry_ts(expires_at_iso)
 
         # Token noch gültig? (5 Minuten Puffer)
         if time.time() < expires_at - 300:
@@ -812,9 +841,7 @@ class RaidAuthManager:
                     "refresh_token.dc",
                     _dc_uid,
                 )
-                curr_expires = datetime.fromisoformat(
-                    curr_expires_iso.replace("Z", "+00:00")
-                ).timestamp()
+                curr_expires = _parse_expiry_ts(curr_expires_iso)
                 if time.time() < curr_expires - 300 and curr_access and curr_refresh:
                     return curr_access, curr_refresh
 
@@ -831,7 +858,7 @@ class RaidAuthManager:
                 )
                 new_access_token = token_data["access_token"]
                 new_refresh_token = token_data.get("refresh_token") or refresh_token
-                expires_in = token_data.get("expires_in", 3600)
+                expires_in = _safe_int(token_data.get("expires_in", 3600), 3600)
 
                 # Token in DB aktualisieren
                 new_expires_at = datetime.now(UTC).timestamp() + expires_in
@@ -916,7 +943,7 @@ class RaidAuthManager:
             return None
         expires_at_iso = row["token_expires_at"]
         twitch_login = row["twitch_login"]
-        expires_at = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00")).timestamp()
+        expires_at = _parse_expiry_ts(expires_at_iso)
 
         # SCHRITT 3: Token noch gültig?
         if time.time() < expires_at - 300:  # 5 Minuten Puffer
@@ -943,9 +970,7 @@ class RaidAuthManager:
                     "access_token.dc",
                     _dc_uid,
                 )
-                curr_expires = datetime.fromisoformat(
-                    curr_expires_iso.replace("Z", "+00:00")
-                ).timestamp()
+                curr_expires = _parse_expiry_ts(curr_expires_iso)
                 if time.time() < curr_expires - 300 and curr_access:
                     return curr_access
 
@@ -967,7 +992,7 @@ class RaidAuthManager:
                 )
                 new_access_token = token_data["access_token"]
                 new_refresh_token = token_data.get("refresh_token") or refresh_token
-                expires_in = token_data.get("expires_in", 3600)
+                expires_in = _safe_int(token_data.get("expires_in", 3600), 3600)
 
                 # Token in DB aktualisieren
                 new_expires_at = datetime.now(UTC).timestamp() + expires_in

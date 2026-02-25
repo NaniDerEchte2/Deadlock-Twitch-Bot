@@ -552,15 +552,18 @@ class _DashboardRoutesMixin:
                 ]
 
                 # --- 3. Question Radar ---
-                question_rows = conn.execute("""
+                question_rows = conn.execute(
+                    """
                     SELECT content, streamer_login, message_ts
                     FROM twitch_chat_messages
                     WHERE message_ts >= datetime('now', '-6 hours')
-                      AND content LIKE '%?%'
+                      AND content LIKE ?
                       AND length(content) > 10
                     ORDER BY message_ts DESC
                     LIMIT 20
-                """).fetchall()
+                """,
+                    ("%?%",),
+                ).fetchall()
                 questions = [{"content": r[0], "streamer": r[1], "ts": r[2]} for r in question_rows]
 
                 # --- 4. Meta Snapshot & Sentiment (1h) ---

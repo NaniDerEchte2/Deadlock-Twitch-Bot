@@ -710,7 +710,9 @@ class TwitchBaseCog(commands.Cog):
     def _set_channel(self, guild_id: int, channel_id: int) -> None:
         with storage.get_conn() as c:
             c.execute(
-                "INSERT OR REPLACE INTO twitch_guild_settings (guild_id, notify_channel_id) VALUES (?, ?)",
+                "INSERT INTO twitch_guild_settings (guild_id, notify_channel_id) "
+                "VALUES (?, ?) "
+                "ON CONFLICT (guild_id) DO UPDATE SET notify_channel_id = EXCLUDED.notify_channel_id",
                 (int(guild_id), int(channel_id)),
             )
         if self._notify_channel_id == 0:

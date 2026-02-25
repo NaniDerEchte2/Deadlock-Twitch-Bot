@@ -65,12 +65,12 @@ class SocialMediaCredentialManager:
                        enc_version, enc_kid
                 FROM social_media_platform_auth
                 WHERE platform = ?
-                  AND (streamer_login = ? OR (streamer_login IS NULL AND ? IS NULL))
+                  AND COALESCE(streamer_login, '') = COALESCE(?, '')
                   AND enabled = 1
                 ORDER BY streamer_login IS NOT NULL DESC
                 LIMIT 1
                 """,
-                (platform, streamer_login, streamer_login),
+                (platform, streamer_login),
             ).fetchone()
 
             if not row:

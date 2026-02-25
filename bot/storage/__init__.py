@@ -8,4 +8,5 @@ from .pg import (  # noqa: F401
     query_one,
     query_all,
     backfill_tracked_stats_from_category,
+    delete_streamer,
 )

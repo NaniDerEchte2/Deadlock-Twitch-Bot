@@ -212,9 +212,10 @@ class TwitchAdminMixin:
         try:
             with storage.get_conn() as c:
                 c.execute(
-                    "INSERT OR IGNORE INTO twitch_streamers "
+                    "INSERT INTO twitch_streamers "
                     "(twitch_login, twitch_user_id, require_discord_link, next_link_check_at) "
-                    "VALUES (?, ?, ?, datetime('now','+30 days'))",
+                    "VALUES (?, ?, ?, datetime('now','+30 days')) "
+                    "ON CONFLICT (twitch_login) DO NOTHING",
                     (user["login"].lower(), user["id"], int(require_link)),
                 )
                 # WICHTIG: Auch bei UPDATE die user_id setzen (falls sie vorher NULL war)

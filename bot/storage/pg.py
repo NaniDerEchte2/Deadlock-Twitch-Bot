@@ -21,6 +21,59 @@ KEYRING_SERVICE = "DeadlockBot"
 ENV_DSN = "TWITCH_ANALYTICS_DSN"
 
 
+def _placeholder_sql(sql: str) -> str:
+    """Escape literal '%' and convert sqlite-style '?' to psycopg placeholders."""
+    # Escape all percent signs first; psycopg treats '%%' as literal '%'.
+    sql = sql.replace("%", "%%")
+    # Restore the valid placeholder forms.
+    sql = sql.replace("%%s", "%s").replace("%%b", "%b").replace("%%t", "%t")
+    # Translate sqlite-style '?' placeholders to '%s'.
+    return sql.replace("?", "%s")
+
+
+def _monkey_patch_psycopg() -> None:
+    """
+    Add a couple of sqlite-compat helpers directly onto psycopg.Connection so
+    legacy call-sites that accidentally hold the raw connection won't explode.
+    """
+    if not hasattr(psycopg.Connection, "executemany"):
+        def _conn_executemany(self, sql, params=None, *args, **kwargs):
+            with self.cursor() as cur:
+                return cur.executemany(_placeholder_sql(sql), params or (), *args, **kwargs)
+
+        psycopg.Connection.executemany = _conn_executemany  # type: ignore[attr-defined]
+
+    # No-op stub that mirrors SQLite's `changes()` to avoid UndefinedFunction errors
+    # when someone runs "SELECT changes()" on a raw connection.
+    if not hasattr(psycopg.Connection, "_deadlock_changes_stub"):
+        def _mark_changes_stub(self):
+            return 0
+        psycopg.Connection._deadlock_changes_stub = _mark_changes_stub  # type: ignore[attr-defined]
+
+
+_monkey_patch_psycopg()
+
+
+def _align_serial_sequence(conn: psycopg.Connection, table: str, column: str) -> None:
+    """
+    Ensure the backing sequence for a SERIAL/IDENTITY column is ahead of existing rows.
+    Prevents duplicate key errors after migrations or manual imports.
+    """
+    try:
+        row = conn.execute(
+            "SELECT pg_get_serial_sequence(%s, %s)", (table, column)
+        ).fetchone()
+        seq_name = row[0] if row else None
+        if not seq_name:
+            return
+        conn.execute(
+            f"SELECT setval(%s, COALESCE((SELECT MAX({column}) FROM {table}), 0), true)",
+            (seq_name,),
+        )
+    except Exception as exc:  # pragma: no cover - best effort guard
+        log.debug("Could not align serial sequence for %s.%s: %s", table, column, exc)
+
+
 class RowCompat:
     """Row that supports both numeric and name-based access."""
 
@@ -68,9 +121,6 @@ def _compat_row_factory(cursor: psycopg.Cursor) -> psycopg.rows.RowMaker[RowComp
 
 
 def _load_dsn() -> str:
-    dsn = os.environ.get(ENV_DSN)
-    if dsn:
-        return dsn
     try:
         import keyring  # type: ignore
 
@@ -82,16 +132,6 @@ def _load_dsn() -> str:
     except Exception as exc:  # pragma: no cover - best-effort Tresor lookup
         log.debug("Keyring lookup failed: %s", exc)
     raise RuntimeError(f"{ENV_DSN} not set (env or Windows Credential Manager '{KEYRING_SERVICE}')")
-
-
-def _placeholder_sql(sql: str) -> str:
-    """Escape literal '%' and convert sqlite-style '?' to psycopg placeholders."""
-    # Escape all percent signs first; psycopg treats '%%' as literal '%'.
-    sql = sql.replace("%", "%%")
-    # Restore the valid placeholder forms.
-    sql = sql.replace("%%s", "%s").replace("%%b", "%b").replace("%%t", "%t")
-    # Translate sqlite-style '?' placeholders to '%s'.
-    return sql.replace("?", "%s")
 
 
 class _CompatCursor:
@@ -121,15 +161,73 @@ class _CompatCursor:
         return self._cursor.__exit__(exc_type, exc, tb)
 
 
+class _ScalarCursor:
+    """Minimal cursor-like object for compatibility helpers (changes(), last_insert_rowid())."""
+
+    def __init__(self, value: int | None):
+        self._value = value or 0
+        self.rowcount = 1
+
+    def fetchone(self):
+        return (self._value,)
+
+    def fetchall(self):
+        return [(self._value,)]
+
+    def __iter__(self):
+        yield (self._value,)
+
+
 class _CompatConnection:
     """Wrapper exposing a psycopg connection with sqlite-style execute()."""
 
     def __init__(self, conn: psycopg.Connection):
         self._conn = conn
+        self._last_rowcount: int = 0
+        self._last_insert_rowid: int | None = None
 
     # Basic helpers expected by callers
     def execute(self, sql: str, params=None, *args, **kwargs):
-        return self._conn.execute(_placeholder_sql(sql), params or (), *args, **kwargs)
+        sql_text = sql or ""
+        normalized = sql_text.strip().lower().rstrip(";")
+
+        if normalized == "select changes()":
+            return _ScalarCursor(self._last_rowcount)
+        if normalized in {"select last_insert_rowid()", "select last_insert_rowid"}:
+            return _ScalarCursor(self._last_insert_rowid)
+
+        cur = self._conn.execute(_placeholder_sql(sql_text), params or (), *args, **kwargs)
+        self._last_rowcount = getattr(cur, "rowcount", 0)
+
+        if normalized.startswith("insert"):
+            try:
+                lastval_row = self._conn.execute("SELECT LASTVAL()").fetchone()
+                self._last_insert_rowid = lastval_row[0] if lastval_row else None
+            except Exception:
+                self._last_insert_rowid = None
+
+        return cur
+
+    def executemany(self, sql: str, params_seq, *args, **kwargs):
+        sql_text = sql or ""
+        normalized = sql_text.strip().lower().rstrip(";")
+
+        if normalized == "select changes()":
+            return _ScalarCursor(self._last_rowcount)
+
+        with self._conn.cursor() as _cur:
+            cur = _CompatCursor(_cur)
+            cur.executemany(sql_text, params_seq, *args, **kwargs)
+            self._last_rowcount = getattr(cur, "rowcount", 0)
+
+        if normalized.startswith("insert"):
+            try:
+                lastval_row = self._conn.execute("SELECT LASTVAL()").fetchone()
+                self._last_insert_rowid = lastval_row[0] if lastval_row else None
+            except Exception:
+                self._last_insert_rowid = None
+
+        return cur
 
     def cursor(self, *args, **kwargs):
         return _CompatCursor(self._conn.cursor(*args, **kwargs))
@@ -209,6 +307,17 @@ def _ensure_compat_functions(conn: psycopg.Connection) -> None:
         )
         cur.execute(
             """
+            CREATE OR REPLACE FUNCTION changes()
+            RETURNS integer
+            LANGUAGE plpgsql VOLATILE AS $$
+            BEGIN
+              RETURN 0;
+            END;
+            $$;
+            """
+        )
+        cur.execute(
+            """
             CREATE OR REPLACE FUNCTION datetime(ts text, modifier text DEFAULT NULL)
             RETURNS timestamptz
             LANGUAGE plpgsql STABLE AS $$
@@ -242,6 +351,12 @@ def get_conn():
     conn = psycopg.connect(dsn, row_factory=_compat_row_factory, autocommit=True)
     try:
         _ensure_compat_functions(conn)
+        if not getattr(get_conn, "_schema_ok", False):
+            try:
+                ensure_schema(conn)
+                get_conn._schema_ok = True
+            except Exception as exc:  # pragma: no cover - best effort
+                log.warning("Schema initialization failed: %s", exc, exc_info=True)
         yield _CompatConnection(conn)
     finally:
         conn.close()
@@ -286,6 +401,39 @@ def backfill_tracked_stats_from_category(conn, login: str) -> int:
         (normalized,),
     )
     return int(cur.rowcount or 0)
+
+
+def delete_streamer(conn, login: str) -> int:
+    """Delete a streamer and related clip records (manual cascade helper)."""
+    normalized = (login or "").strip()
+    if not normalized:
+        return 0
+
+    # Grandchild tables (depend on clip ids)
+    conn.execute(
+        """DELETE FROM twitch_clips_social_analytics
+           WHERE clip_id IN (
+               SELECT id FROM twitch_clips_social_media WHERE streamer_login = ?
+           )""",
+        (normalized,),
+    )
+    conn.execute(
+        """DELETE FROM twitch_clips_upload_queue
+           WHERE clip_id IN (
+               SELECT id FROM twitch_clips_social_media WHERE streamer_login = ?
+           )""",
+        (normalized,),
+    )
+
+    # Child tables
+    conn.execute("DELETE FROM twitch_clips_social_media WHERE streamer_login = ?", (normalized,))
+    conn.execute("DELETE FROM clip_templates_streamer WHERE streamer_login = ?", (normalized,))
+    conn.execute("DELETE FROM clip_last_hashtags WHERE streamer_login = ?", (normalized,))
+    conn.execute("DELETE FROM clip_fetch_history WHERE streamer_login = ?", (normalized,))
+
+    # The streamer itself
+    cur = conn.execute("DELETE FROM twitch_streamers WHERE twitch_login = ?", (normalized,))
+    return int(getattr(cur, "rowcount", 0) or 0)
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +672,7 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_twitch_sessions_open ON twitch_stream_sessions(streamer_login) WHERE ended_at IS NULL"
     )
+    _align_serial_sequence(conn, "twitch_stream_sessions", "id")
 
     conn.execute(
         """
@@ -732,7 +881,7 @@ def ensure_schema(conn) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS discord_invite_codes (
-            guild_id     INTEGER NOT NULL,
+            guild_id     BIGINT NOT NULL,
             invite_code  TEXT    NOT NULL,
             created_at   TEXT DEFAULT CURRENT_TIMESTAMP,
             last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -743,13 +892,19 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_discord_invites_guild ON discord_invite_codes(guild_id)"
     )
+    try:  # migrate existing INT -> BIGINT if needed
+        conn.execute(
+            "ALTER TABLE discord_invite_codes ALTER COLUMN guild_id TYPE BIGINT USING guild_id::bigint"
+        )
+    except Exception:
+        pass
 
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS twitch_streamer_invites (
             streamer_login TEXT PRIMARY KEY,
-            guild_id       INTEGER NOT NULL,
-            channel_id     INTEGER NOT NULL,
+            guild_id       BIGINT NOT NULL,
+            channel_id     BIGINT NOT NULL,
             invite_code    TEXT    NOT NULL,
             invite_url     TEXT    NOT NULL,
             created_at     TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -760,6 +915,15 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_streamer_invites_code ON twitch_streamer_invites(invite_code)"
     )
+    try:
+        conn.execute(
+            "ALTER TABLE twitch_streamer_invites ALTER COLUMN guild_id TYPE BIGINT USING guild_id::bigint"
+        )
+        conn.execute(
+            "ALTER TABLE twitch_streamer_invites ALTER COLUMN channel_id TYPE BIGINT USING channel_id::bigint"
+        )
+    except Exception:
+        pass
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_twitch_streamer_invites_guild ON twitch_streamer_invites(guild_id)"
     )
@@ -1104,6 +1268,7 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_clip_fetch_history_streamer ON clip_fetch_history(streamer_login, fetched_at DESC)"
     )
+    _align_serial_sequence(conn, "clip_fetch_history", "id")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_clip_templates_global_category ON clip_templates_global(category)"
     )

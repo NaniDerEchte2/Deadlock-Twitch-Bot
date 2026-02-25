@@ -696,13 +696,25 @@ class TwitchMonitoringMixin(_EventSubMixin, _SessionsMixin, _EmbedsMixin):
             try:
                 with storage.get_conn() as c:
                     c.executemany(
-                        "INSERT OR REPLACE INTO twitch_live_state "
-                        "("
+                        "INSERT INTO twitch_live_state ("
                         "twitch_user_id, streamer_login, is_live, last_seen_at, last_title, last_game, "
                         "last_viewer_count, last_discord_message_id, last_tracking_token, last_stream_id, "
                         "last_started_at, had_deadlock_in_session, active_session_id, last_deadlock_seen_at"
-                        ") "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT (twitch_user_id) DO UPDATE SET "
+                        "streamer_login = EXCLUDED.streamer_login, "
+                        "is_live = EXCLUDED.is_live, "
+                        "last_seen_at = EXCLUDED.last_seen_at, "
+                        "last_title = EXCLUDED.last_title, "
+                        "last_game = EXCLUDED.last_game, "
+                        "last_viewer_count = EXCLUDED.last_viewer_count, "
+                        "last_discord_message_id = EXCLUDED.last_discord_message_id, "
+                        "last_tracking_token = EXCLUDED.last_tracking_token, "
+                        "last_stream_id = EXCLUDED.last_stream_id, "
+                        "last_started_at = EXCLUDED.last_started_at, "
+                        "had_deadlock_in_session = EXCLUDED.had_deadlock_in_session, "
+                        "active_session_id = EXCLUDED.active_session_id, "
+                        "last_deadlock_seen_at = EXCLUDED.last_deadlock_seen_at",
                         rows,
                     )
                 return
@@ -826,34 +838,32 @@ class TwitchMonitoringMixin(_EventSubMixin, _SessionsMixin, _EmbedsMixin):
     async def _log_stats(self, streams_by_login: dict[str, dict], category_streams: list[dict]):
         now_utc = datetime.now(tz=UTC).isoformat(timespec="seconds")
 
+        # 1) Tracked stats (only our target game)
         try:
-            with storage.get_conn() as c:
-                for stream in streams_by_login.values():
-                    if not self._stream_is_in_target_category(stream):
-                        continue
-                    login = (stream.get("user_login") or "").lower()
-                    viewers = int(stream.get("viewer_count") or 0)
-                    is_partner = 1 if stream.get("is_partner") else 0
-                    game_name, stream_title, tags = self._normalize_stream_meta(stream)
-                    c.execute(
+            rows: list[tuple] = []
+            for stream in streams_by_login.values():
+                if not self._stream_is_in_target_category(stream):
+                    continue
+                login = (stream.get("user_login") or "").lower()
+                viewers = int(stream.get("viewer_count") or 0)
+                is_partner = bool(stream.get("is_partner"))
+                game_name, stream_title, tags = self._normalize_stream_meta(stream)
+                rows.append((now_utc, login, viewers, is_partner, game_name, stream_title, tags))
+
+            if rows:
+                with storage.get_conn() as c:
+                    c.executemany(
                         """
                         INSERT INTO twitch_stats_tracked (
                             ts_utc, streamer, viewer_count, is_partner, game_name, stream_title, tags
                         ) VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (
-                            now_utc,
-                            login,
-                            viewers,
-                            is_partner,
-                            game_name,
-                            stream_title,
-                            tags,
-                        ),
+                        rows,
                     )
         except Exception:
             log.exception("Konnte tracked-Stats nicht loggen")
 
+        # 2) Session samples (light-weight, keep separate to avoid losing data)
         try:
             for stream in streams_by_login.values():
                 if not self._stream_is_in_target_category(stream):
@@ -863,28 +873,25 @@ class TwitchMonitoringMixin(_EventSubMixin, _SessionsMixin, _EmbedsMixin):
         except Exception:
             log.debug("Konnte Session-Metrik nicht loggen", exc_info=True)
 
+        # 3) Category-wide stats (all streams in category, regardless of Deadlock)
         try:
-            with storage.get_conn() as c:
-                for stream in category_streams:
-                    login = (stream.get("user_login") or "").lower()
-                    viewers = int(stream.get("viewer_count") or 0)
-                    is_partner = 1 if stream.get("is_partner") else 0
-                    game_name, stream_title, tags = self._normalize_stream_meta(stream)
-                    c.execute(
+            rows: list[tuple] = []
+            for stream in category_streams:
+                login = (stream.get("user_login") or "").lower()
+                viewers = int(stream.get("viewer_count") or 0)
+                is_partner = bool(stream.get("is_partner"))
+                game_name, stream_title, tags = self._normalize_stream_meta(stream)
+                rows.append((now_utc, login, viewers, is_partner, game_name, stream_title, tags))
+
+            if rows:
+                with storage.get_conn() as c:
+                    c.executemany(
                         """
                         INSERT INTO twitch_stats_category (
                             ts_utc, streamer, viewer_count, is_partner, game_name, stream_title, tags
                         ) VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (
-                            now_utc,
-                            login,
-                            viewers,
-                            is_partner,
-                            game_name,
-                            stream_title,
-                            tags,
-                        ),
+                        rows,
                     )
         except Exception:
             log.exception("Konnte category-Stats nicht loggen")

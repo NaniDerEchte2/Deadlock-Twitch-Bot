@@ -68,8 +68,11 @@ class ConnectionMixin:
                 with get_conn() as conn:
                     conn.execute(
                         """
-                        INSERT OR REPLACE INTO twitch_raid_blacklist (target_id, target_login, reason)
+                        INSERT INTO twitch_raid_blacklist (target_id, target_login, reason)
                         VALUES (?, ?, ?)
+                        ON CONFLICT (target_login) DO UPDATE SET
+                            target_id = EXCLUDED.target_id,
+                            reason = EXCLUDED.reason
                         """,
                         (target_id, login, reason),
                     )

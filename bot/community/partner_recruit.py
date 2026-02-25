@@ -203,9 +203,15 @@ class TwitchPartnerRecruitMixin:
             with get_conn() as conn:
                 conn.execute(
                     """
-                    INSERT OR REPLACE INTO twitch_partner_outreach
+                    INSERT INTO twitch_partner_outreach
                         (streamer_login, streamer_user_id, detected_at, contacted_at, status, cooldown_until)
                     VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (streamer_login) DO UPDATE SET
+                        streamer_user_id = EXCLUDED.streamer_user_id,
+                        detected_at = EXCLUDED.detected_at,
+                        contacted_at = EXCLUDED.contacted_at,
+                        status = EXCLUDED.status,
+                        cooldown_until = EXCLUDED.cooldown_until
                     """,
                     (
                         login.lower(),

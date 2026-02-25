@@ -66,7 +66,8 @@ class ClipManager:
                 # Sicherstellen dass Streamer in twitch_streamers existiert (FK-Anforderung).
                 # Race Condition: Scout kann Streamer löschen während ClipFetcher läuft.
                 conn.execute(
-                    "INSERT OR IGNORE INTO twitch_streamers (twitch_login, twitch_user_id) VALUES (?, ?)",
+                    "INSERT INTO twitch_streamers (twitch_login, twitch_user_id) VALUES (?, ?) "
+                    "ON CONFLICT (twitch_login) DO NOTHING",
                     (streamer_login, twitch_user_id),
                 )
 
@@ -78,6 +79,7 @@ class ClipManager:
                          streamer_login, twitch_user_id, created_at, duration_seconds,
                          view_count, game_name, status)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                    RETURNING id
                     """,
                     (
                         clip_id,
@@ -93,7 +95,8 @@ class ClipManager:
                     ),
                 )
 
-                clip_db_id = cursor.lastrowid
+                row = cursor.fetchone()
+                clip_db_id = row[0] if row else None
                 log.debug(
                     "Clip registriert: %s (ID: %s) - %s",
                     clip_id,
@@ -305,6 +308,7 @@ class ClipManager:
                         (clip_id, platform, title, description, hashtags,
                          scheduled_at, priority, status, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                    RETURNING id
                     """,
                     (
                         clip_db_id,
@@ -318,7 +322,8 @@ class ClipManager:
                     ),
                 )
 
-                queue_id = cursor.lastrowid
+                row = cursor.fetchone()
+                queue_id = row[0] if row else None
                 log.info(
                     "Upload queued: Clip %s -> %s (Queue ID: %s, Priority: %s)",
                     clip_db_id,
@@ -624,6 +629,7 @@ class ClipManager:
                     INSERT INTO clip_templates_global
                         (template_name, description_template, hashtags, category, created_by)
                     VALUES (?, ?, ?, ?, ?)
+                    RETURNING id
                     """,
                     (
                         template_name,
@@ -633,7 +639,8 @@ class ClipManager:
                         created_by,
                     ),
                 )
-                template_id = cursor.lastrowid
+                row = cursor.fetchone()
+                template_id = row[0] if row else None
                 log.info("Global template created: %s (ID: %s)", template_name, template_id)
                 return template_id
 
@@ -764,6 +771,7 @@ class ClipManager:
                         INSERT INTO clip_templates_streamer
                             (streamer_login, template_name, description_template, hashtags, is_default)
                         VALUES (?, ?, ?, ?, ?)
+                        RETURNING id
                         """,
                         (
                             streamer_login,
@@ -773,7 +781,8 @@ class ClipManager:
                             1 if is_default else 0,
                         ),
                     )
-                    template_id = cursor.lastrowid
+                    row = cursor.fetchone()
+                    template_id = row[0] if row else None
                     log.info(
                         "Streamer template created: %s/%s (ID: %s)",
                         streamer_login,

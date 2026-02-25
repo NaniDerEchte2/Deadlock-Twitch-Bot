@@ -306,11 +306,12 @@ class IRCLurkerTracker:
                 if to_insert:
                     conn.executemany(
                         """
-                        INSERT OR IGNORE INTO twitch_session_chatters
+                        INSERT INTO twitch_session_chatters
                             (session_id, streamer_login, chatter_login, chatter_id,
                              first_message_at, messages, is_first_time_global,
                              seen_via_chatters_api, last_seen_at)
                         VALUES (?, ?, ?, ?, ?, 0, 0, 1, ?)
+                        ON CONFLICT (session_id, chatter_login) DO NOTHING
                         """,
                         to_insert,
                     )

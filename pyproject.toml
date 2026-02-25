@@ -12,4 +12,4 @@ py-modules = ["twitch_cog"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["bot*"]
+include = ["bot*", "twitch_cog*"]

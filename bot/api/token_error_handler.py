@@ -71,7 +71,14 @@ class TokenErrorHandler:
         try:
             with get_conn() as conn:
                 existing = {
-                    row[1] for row in conn.execute("PRAGMA table_info(twitch_token_blacklist)")
+                    row[0]
+                    for row in conn.execute(
+                        """
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_name = 'twitch_token_blacklist'
+                        """
+                    )
                 }
                 for col_name, statement in column_add_statements.items():
                     if col_name not in existing:

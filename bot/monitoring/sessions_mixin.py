@@ -135,17 +135,18 @@ class _SessionsMixin:
         viewer_count = int(stream.get("viewer_count") or 0)
         stream_id = str(stream.get("id") or "").strip() or None
         game_name = (stream.get("game_name") or "").strip() or None
-        had_deadlock_initial = 1 if self._stream_is_in_target_category(stream) else 0
+        had_deadlock_initial = bool(self._stream_is_in_target_category(stream))
         session_id: int | None = None
         try:
             with storage.get_conn() as c:
-                c.execute(
+                cur = c.execute(
                     """
                     INSERT INTO twitch_stream_sessions (
                         streamer_login, stream_id, started_at, start_viewers, peak_viewers,
                         end_viewers, avg_viewers, samples, followers_start, stream_title,
                         language, is_mature, tags, game_name, had_deadlock_in_session
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    RETURNING id
                     """,
                     (
                         login,
@@ -159,13 +160,13 @@ class _SessionsMixin:
                         followers_start,
                         title,
                         language,
-                        1 if is_mature else 0,
+                        bool(is_mature),
                         tags,
                         game_name,
                         had_deadlock_initial,
                     ),
                 )
-                session_id = int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
+                session_id = int(cur.fetchone()[0])
                 c.execute(
                     "UPDATE twitch_live_state SET active_session_id = ? WHERE streamer_login = ?",
                     (session_id, login),
@@ -203,9 +204,12 @@ class _SessionsMixin:
                 minutes_from_start = int(max(0, (now_dt - start_dt).total_seconds() // 60))
                 c.execute(
                     """
-                    INSERT OR REPLACE INTO twitch_session_viewers
+                    INSERT INTO twitch_session_viewers
                         (session_id, ts_utc, minutes_from_start, viewer_count)
                     VALUES (?, ?, ?, ?)
+                    ON CONFLICT (session_id, ts_utc) DO UPDATE SET
+                        minutes_from_start = EXCLUDED.minutes_from_start,
+                        viewer_count = EXCLUDED.viewer_count
                     """,
                     (
                         session_id,
@@ -476,7 +480,7 @@ class _SessionsMixin:
                         followers_end,
                         follower_delta,
                         reason,
-                        1 if had_deadlock_session else 0,
+                        bool(had_deadlock_session),
                         last_game_value,
                         session_id,
                     ),
