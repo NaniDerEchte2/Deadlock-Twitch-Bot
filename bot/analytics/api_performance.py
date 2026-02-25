@@ -1,0 +1,1158 @@
+"""
+Analytics API v2 - Performance Mixin.
+
+Performance metrics: heatmaps, periodic stats, tags, title performance,
+rankings, category comparison, category timings, category activity series,
+viewer timeline, category leaderboard.
+"""
+
+from __future__ import annotations
+
+import collections
+import json
+import logging
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from aiohttp import web
+
+from ..storage import pg as storage
+
+log = logging.getLogger("TwitchStreams.AnalyticsV2")
+
+
+class _AnalyticsPerformanceMixin:
+    """Mixin providing performance metrics endpoints."""
+
+    async def _api_v2_hourly_heatmap(self, request: web.Request) -> web.Response:
+        """Get hourly heatmap data."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip() or None
+        days = min(max(int(request.query.get("days", "30")), 7), 365)
+
+        try:
+            with storage.get_conn() as conn:
+                since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+                streamer_login = streamer.lower() if streamer else None
+                rows = conn.execute(
+                    """
+                    SELECT
+                        CAST(strftime('%w', s.started_at) AS INTEGER) as weekday,
+                        CAST(strftime('%H', s.started_at) AS INTEGER) as hour,
+                        COUNT(*) as stream_count,
+                        AVG(s.avg_viewers) as avg_viewers,
+                        AVG(s.peak_viewers) as avg_peak
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ?
+                      AND s.ended_at IS NOT NULL
+                      AND (COALESCE(?, '') = '' OR LOWER(s.streamer_login) = ?)
+                    GROUP BY weekday, hour
+                """,
+                    [since_date, streamer_login, streamer_login],
+                ).fetchall()
+
+                data = [
+                    {
+                        "weekday": r[0],
+                        "hour": r[1],
+                        "streamCount": r[2],
+                        "avgViewers": float(r[3]) if r[3] else 0,
+                        "avgPeak": float(r[4]) if r[4] else 0,
+                    }
+                    for r in rows
+                ]
+
+                return web.json_response(data)
+        except Exception as exc:
+            log.exception("Error in hourly heatmap API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_v2_calendar_heatmap(self, request: web.Request) -> web.Response:
+        """Get calendar heatmap data."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip() or None
+        days = min(max(int(request.query.get("days", "365")), 30), 365)
+
+        try:
+            with storage.get_conn() as conn:
+                since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+                streamer_login = streamer.lower() if streamer else None
+                rows = conn.execute(
+                    """
+                    SELECT
+                        DATE(s.started_at) as date,
+                        COUNT(*) as stream_count,
+                        SUM(s.avg_viewers * s.duration_seconds / 3600.0) as hours_watched
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ?
+                      AND s.ended_at IS NOT NULL
+                      AND (COALESCE(?, '') = '' OR LOWER(s.streamer_login) = ?)
+                    GROUP BY DATE(s.started_at)
+                """,
+                    [since_date, streamer_login, streamer_login],
+                ).fetchall()
+
+                data = [
+                    {
+                        "date": r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0]),
+                        "streamCount": r[1],
+                        "hoursWatched": float(r[2]) if r[2] else 0,
+                        "value": float(r[2]) if r[2] else 0,
+                    }
+                    for r in rows
+                ]
+
+                return web.json_response(data)
+        except Exception as exc:
+            log.exception("Error in calendar heatmap API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_v2_monthly_stats(self, request: web.Request) -> web.Response:
+        """Get monthly aggregated stats."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip() or None
+        months = min(max(int(request.query.get("months", "12")), 1), 24)
+
+        try:
+            with storage.get_conn() as conn:
+                since_date = (datetime.now(UTC) - timedelta(days=months * 30)).isoformat()
+                streamer_login = streamer.lower() if streamer else None
+                rows = conn.execute(
+                    """
+                    SELECT
+                        CAST(strftime('%Y', s.started_at) AS INTEGER) as year,
+                        CAST(strftime('%m', s.started_at) AS INTEGER) as month,
+                        SUM(s.avg_viewers * s.duration_seconds / 3600.0) as hours_watched,
+                        SUM(s.duration_seconds / 3600.0) as airtime,
+                        AVG(s.avg_viewers) as avg_viewers,
+                        MAX(s.peak_viewers) as peak_viewers,
+                        SUM(CASE WHEN s.follower_delta IS NOT NULL
+                             AND NOT (s.followers_end = 0 AND s.followers_start > 0)
+                             THEN s.follower_delta ELSE 0 END) as follower_delta,
+                        SUM(s.unique_chatters) as unique_chatters,
+                        COUNT(*) as stream_count
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ?
+                      AND s.ended_at IS NOT NULL
+                      AND (COALESCE(?, '') = '' OR LOWER(s.streamer_login) = ?)
+                    GROUP BY year, month
+                    ORDER BY year DESC, month DESC
+                """,
+                    [since_date, streamer_login, streamer_login],
+                ).fetchall()
+
+                month_names = [
+                    "",
+                    "Jan",
+                    "Feb",
+                    "Mar",
+                    "Apr",
+                    "Mai",
+                    "Jun",
+                    "Jul",
+                    "Aug",
+                    "Sep",
+                    "Okt",
+                    "Nov",
+                    "Dez",
+                ]
+                data = [
+                    {
+                        "year": r[0],
+                        "month": r[1],
+                        "monthLabel": month_names[r[1]] if r[1] else "",
+                        "totalHoursWatched": float(r[2]) if r[2] else 0,
+                        "totalAirtime": float(r[3]) if r[3] else 0,
+                        "avgViewers": float(r[4]) if r[4] else 0,
+                        "peakViewers": int(r[5]) if r[5] else 0,
+                        "followerDelta": int(r[6]) if r[6] else 0,
+                        "uniqueChatters": int(r[7]) if r[7] else 0,
+                        "streamCount": r[8],
+                    }
+                    for r in rows
+                ]
+
+                return web.json_response(data)
+        except Exception as exc:
+            log.exception("Error in monthly stats API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_v2_weekly_stats(self, request: web.Request) -> web.Response:
+        """Get weekday analysis stats."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip() or None
+        days = min(max(int(request.query.get("days", "30")), 7), 365)
+
+        try:
+            with storage.get_conn() as conn:
+                since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+                streamer_login = streamer.lower() if streamer else None
+                rows = conn.execute(
+                    """
+                    SELECT
+                        CAST(strftime('%w', s.started_at) AS INTEGER) as weekday,
+                        COUNT(*) as stream_count,
+                        AVG(s.duration_seconds / 3600.0) as avg_hours,
+                        AVG(s.avg_viewers) as avg_viewers,
+                        AVG(s.peak_viewers) as avg_peak,
+                        SUM(CASE WHEN s.follower_delta IS NOT NULL
+                             AND NOT (s.followers_end = 0 AND s.followers_start > 0)
+                             THEN s.follower_delta ELSE 0 END) as total_followers
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ?
+                      AND s.ended_at IS NOT NULL
+                      AND (COALESCE(?, '') = '' OR LOWER(s.streamer_login) = ?)
+                    GROUP BY weekday
+                    ORDER BY weekday
+                """,
+                    [since_date, streamer_login, streamer_login],
+                ).fetchall()
+
+                weekday_names = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"]
+                data = [
+                    {
+                        "weekday": r[0],
+                        "weekdayLabel": weekday_names[r[0]] if r[0] is not None else "",
+                        "streamCount": r[1],
+                        "avgHours": float(r[2]) if r[2] else 0,
+                        "avgViewers": float(r[3]) if r[3] else 0,
+                        "avgPeak": float(r[4]) if r[4] else 0,
+                        "totalFollowers": int(r[5]) if r[5] else 0,
+                    }
+                    for r in rows
+                ]
+
+                return web.json_response(data)
+        except Exception as exc:
+            log.exception("Error in weekly stats API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_v2_tag_analysis(self, request: web.Request) -> web.Response:
+        """Get tag performance analysis."""
+        self._require_v2_auth(request)
+
+        try:
+            # Tags are stored as JSON in the tags column
+            # This is a simplified version - full implementation would parse JSON
+            return web.json_response([])
+        except Exception as exc:
+            log.exception("Error in tag analysis API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_v2_tag_analysis_extended(self, request: web.Request) -> web.Response:
+        """Get extended tag performance with trends."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip() or None
+        days = min(max(int(request.query.get("days", "30")), 7), 365)
+        limit = min(max(int(request.query.get("limit", "20")), 5), 50)
+
+        try:
+            with storage.get_conn() as conn:
+                since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+                streamer_login = streamer.lower() if streamer else None
+
+                # Hole Sessions mit Tags
+                rows = conn.execute(
+                    """
+                    SELECT
+                        s.id,
+                        s.tags,
+                        s.avg_viewers,
+                        s.retention_10m,
+                        CASE WHEN s.follower_delta IS NOT NULL
+                             AND NOT (s.followers_end = 0 AND s.followers_start > 0)
+                             THEN s.follower_delta ELSE NULL END as follower_delta,
+                        s.duration_seconds,
+                        EXTRACT(HOUR FROM s.started_at) as start_hour
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ?
+                      AND s.ended_at IS NOT NULL
+                      AND s.tags IS NOT NULL
+                      AND (COALESCE(?, '') = '' OR LOWER(s.streamer_login) = ?)
+                """,
+                    [since_date, streamer_login, streamer_login],
+                ).fetchall()
+
+                tag_stats: dict[str, dict[str, Any]] = {}
+                for row in rows:
+                    tags_str = row[1] or ""
+                    if tags_str.startswith("["):
+                        try:
+                            tags = json.loads(tags_str)
+                        except json.JSONDecodeError:
+                            tags = [tags_str]
+                    else:
+                        tags = [t.strip() for t in tags_str.split(",") if t.strip()]
+
+                    # Jede Session zahlt pro Tag hochstens einmal
+                    seen_tags: set[str] = set()
+                    for tag in tags[:5]:
+                        if tag in seen_tags:
+                            continue
+                        seen_tags.add(tag)
+                        bucket = tag_stats.setdefault(
+                            tag,
+                            {
+                                "viewers": [],
+                                "retention": [],
+                                "followers": [],
+                                "durations": [],
+                                "hours": [],
+                                "samples": 0,
+                            },
+                        )
+                        bucket["viewers"].append(float(row[2]) if row[2] else 0.0)
+                        if row[3] is not None:
+                            bucket["retention"].append(float(row[3]) * 100.0)
+                        if row[4] is not None:
+                            bucket["followers"].append(float(row[4]))
+                        bucket["durations"].append(float(row[5]) if row[5] else 0.0)
+                        if row[6] is not None:
+                            bucket["hours"].append(int(row[6]))
+                        bucket["samples"] += 1
+
+                def _median(values: list[float]) -> float:
+                    if not values:
+                        return 0.0
+                    vals = sorted(values)
+                    n = len(vals)
+                    mid = n // 2
+                    if n % 2 == 1:
+                        return vals[mid]
+                    return (vals[mid - 1] + vals[mid]) / 2
+
+                # Filter: nur Tags mit ausreichend Samples
+                filtered = {tag: data for tag, data in tag_stats.items() if data["samples"] >= 3}
+
+                sorted_tags = sorted(
+                    filtered.items(),
+                    key=lambda x: (_median(x[1]["viewers"]), x[1]["samples"]),
+                    reverse=True,
+                )
+
+                result = []
+                for rank, (tag, data) in enumerate(sorted_tags[:limit], 1):
+                    avg_v = _median(data["viewers"])
+                    avg_r = _median(data["retention"])
+                    med_f = _median(data["followers"])
+                    avg_d = _median(data["durations"])
+
+                    if data["hours"]:
+                        hour_counts = collections.Counter(data["hours"])
+                        best_hour = hour_counts.most_common(1)[0][0]
+                        best_slot = f"{best_hour:02d}:00-{(best_hour + 4) % 24:02d}:00"
+                    else:
+                        best_slot = "18:00-22:00"
+
+                    result.append(
+                        {
+                            "tagName": tag,
+                            "usageCount": data["samples"],
+                            "avgViewers": round(avg_v, 1),
+                            "avgRetention10m": round(avg_r, 1),
+                            "avgFollowerGain": round(med_f, 1),
+                            "trend": "stable",
+                            "trendValue": 0,
+                            "bestTimeSlot": best_slot,
+                            "avgStreamDuration": round(avg_d, 0),
+                            "categoryRank": rank,
+                        }
+                    )
+
+                return web.json_response(result)
+        except Exception as exc:
+            log.exception("Error in tag analysis extended API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_v2_title_performance(self, request: web.Request) -> web.Response:
+        """Get stream title performance analysis."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip() or None
+        days = min(max(int(request.query.get("days", "30")), 7), 365)
+        limit = min(max(int(request.query.get("limit", "20")), 5), 50)
+
+        if not streamer:
+            return web.json_response({"error": "Streamer required"}, status=400)
+
+        try:
+            with storage.get_conn() as conn:
+                since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+                rows = conn.execute(
+                    """
+                    SELECT
+                        s.stream_title,
+                        COUNT(*) as usage_count,
+                        AVG(s.avg_viewers) as avg_viewers,
+                        AVG(s.retention_10m) as avg_retention,
+                        AVG(CASE WHEN s.follower_delta IS NOT NULL
+                             AND NOT (s.followers_end = 0 AND s.followers_start > 0)
+                             THEN s.follower_delta ELSE NULL END) as avg_followers,
+                        MAX(s.peak_viewers) as peak_viewers
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ? AND LOWER(s.streamer_login) = ?
+                      AND s.ended_at IS NOT NULL AND s.stream_title IS NOT NULL AND s.stream_title != ''
+                    GROUP BY s.stream_title
+                    ORDER BY avg_viewers DESC
+                    LIMIT ?
+                """,
+                    [since_date, streamer.lower(), limit],
+                ).fetchall()
+
+                def extract_keywords(title: str) -> list[str]:
+                    """Extract meaningful keywords from title."""
+                    import re
+
+                    # Remove common words and punctuation
+                    stop_words = {
+                        "der",
+                        "die",
+                        "das",
+                        "und",
+                        "oder",
+                        "mit",
+                        "fur",
+                        "the",
+                        "and",
+                        "or",
+                        "with",
+                        "for",
+                        "to",
+                        "a",
+                        "an",
+                    }
+                    words = re.findall(r"\b\w{3,}\b", title.lower())
+                    keywords = [w.capitalize() for w in words if w not in stop_words]
+                    return keywords[:5]  # Max 5 keywords
+
+                result = [
+                    {
+                        "title": row[0] or "",
+                        "usageCount": row[1],
+                        "avgViewers": round(float(row[2]), 1) if row[2] else 0,
+                        "avgRetention10m": round(float(row[3]) * 100, 1) if row[3] else 0,
+                        "avgFollowerGain": round(float(row[4]), 1) if row[4] else 0,
+                        "peakViewers": int(row[5]) if row[5] else 0,
+                        "keywords": extract_keywords(row[0] or ""),
+                    }
+                    for row in rows
+                ]
+
+                return web.json_response(result)
+        except Exception as exc:
+            log.exception("Error in title performance API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_v2_rankings(self, request: web.Request) -> web.Response:
+        """Get streamer rankings."""
+        self._require_v2_auth(request)
+
+        metric = request.query.get("metric", "viewers")
+        days = min(max(int(request.query.get("days", "30")), 7), 365)
+        limit = min(max(int(request.query.get("limit", "20")), 5), 50)
+
+        try:
+            with storage.get_conn() as conn:
+                since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+                if metric == "retention":
+                    ranking_sql = """
+                    SELECT
+                        s.streamer_login,
+                        AVG(s.retention_10m) as value
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ? AND s.ended_at IS NOT NULL
+                    GROUP BY s.streamer_login
+                    HAVING COUNT(*) >= 3
+                    ORDER BY value DESC
+                    LIMIT ?
+                    """
+                elif metric == "growth":
+                    ranking_sql = """
+                    SELECT
+                        s.streamer_login,
+                        SUM(CASE WHEN s.follower_delta IS NOT NULL
+                             AND NOT (s.followers_end = 0 AND s.followers_start > 0)
+                             THEN s.follower_delta ELSE 0 END) as value
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ? AND s.ended_at IS NOT NULL
+                    GROUP BY s.streamer_login
+                    HAVING COUNT(*) >= 3
+                    ORDER BY value DESC
+                    LIMIT ?
+                    """
+                else:
+                    metric = "viewers"
+                    ranking_sql = """
+                    SELECT
+                        s.streamer_login,
+                        AVG(s.avg_viewers) as value
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ? AND s.ended_at IS NOT NULL
+                    GROUP BY s.streamer_login
+                    HAVING COUNT(*) >= 3
+                    ORDER BY value DESC
+                    LIMIT ?
+                    """
+
+                rows = conn.execute(ranking_sql, [since_date, limit]).fetchall()
+
+                data = [
+                    {
+                        "rank": i + 1,
+                        "login": r[0],
+                        "value": (float(r[1]) * 100 if metric == "retention" else float(r[1]))
+                        if r[1]
+                        else 0,
+                        "trend": "same",
+                        "trendValue": 0,
+                    }
+                    for i, r in enumerate(rows)
+                ]
+
+                return web.json_response(data)
+        except Exception as exc:
+            log.exception("Error in rankings API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_v2_category_comparison(self, request: web.Request) -> web.Response:
+        """Compare streamer to category averages."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip()
+        days = min(max(int(request.query.get("days", "30")), 7), 365)
+
+        if not streamer:
+            return web.json_response({"error": "Streamer required"}, status=400)
+
+        try:
+            with storage.get_conn() as conn:
+                since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+                # Your stats from stats_tracked (higher accuracy for tracked streamers)
+                your_tracked = conn.execute(
+                    """
+                    SELECT AVG(viewer_count), MAX(viewer_count)
+                    FROM twitch_stats_tracked
+                    WHERE ts_utc >= ? AND LOWER(streamer) = ?
+                """,
+                    [since_date, streamer.lower()],
+                ).fetchone()
+
+                # Fallback to session data
+                your_session = conn.execute(
+                    """
+                    SELECT
+                        AVG(s.avg_viewers) as avg_viewers,
+                        MAX(s.peak_viewers) as peak_viewers,
+                        AVG(s.retention_10m) as retention10m,
+                        AVG(CASE WHEN s.avg_viewers > 0 THEN s.unique_chatters * 100.0 / s.avg_viewers ELSE 0 END) as chat_health
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ? AND LOWER(s.streamer_login) = ? AND s.ended_at IS NOT NULL
+                """,
+                    [since_date, streamer.lower()],
+                ).fetchone()
+
+                # Use tracked data if available, else session data
+                your_avg = (
+                    float(your_tracked[0])
+                    if your_tracked and your_tracked[0]
+                    else (float(your_session[0]) if your_session and your_session[0] else 0)
+                )
+                your_peak = (
+                    int(your_tracked[1])
+                    if your_tracked and your_tracked[1]
+                    else (int(your_session[1]) if your_session and your_session[1] else 0)
+                )
+                your_ret = float(your_session[2]) * 100 if your_session and your_session[2] else 0
+                your_chat = float(your_session[3]) if your_session and your_session[3] else 0
+
+                # Category stats from stats_category (per-streamer aggregates)
+                cat_data = self._get_category_percentiles(conn, since_date)
+                sorted_avgs = cat_data["sorted_avgs"]
+                category_total = cat_data["total"]
+
+                # Category averages
+                cat_avg_viewers = sum(sorted_avgs) / len(sorted_avgs) if sorted_avgs else 0
+
+                # Peak viewers per streamer from category
+                cat_peak = conn.execute(
+                    """
+                    SELECT AVG(max_vc) FROM (
+                        SELECT MAX(viewer_count) as max_vc
+                        FROM twitch_stats_category
+                        WHERE ts_utc >= ?
+                        GROUP BY streamer
+                    )
+                """,
+                    [since_date],
+                ).fetchone()
+                cat_avg_peak = float(cat_peak[0]) if cat_peak and cat_peak[0] else 0
+
+                # Category-wide retention and chat health from session data
+                cat_session_avgs = conn.execute(
+                    """
+                    SELECT
+                        AVG(s.retention_10m) as avg_ret,
+                        AVG(CASE WHEN s.avg_viewers > 0 THEN s.unique_chatters * 100.0 / s.avg_viewers ELSE 0 END) as avg_chat
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ? AND s.ended_at IS NOT NULL
+                """,
+                    [since_date],
+                ).fetchone()
+                cat_avg_ret = (
+                    float(cat_session_avgs[0]) * 100
+                    if cat_session_avgs and cat_session_avgs[0]
+                    else 0
+                )
+                cat_avg_chat = (
+                    float(cat_session_avgs[1]) if cat_session_avgs and cat_session_avgs[1] else 0
+                )
+
+                # Per-streamer retention and chat for percentile ranking
+                per_streamer_ret = conn.execute(
+                    """
+                    SELECT AVG(s.retention_10m) as ret
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ? AND s.ended_at IS NOT NULL
+                    GROUP BY LOWER(s.streamer_login)
+                    ORDER BY ret
+                """,
+                    [since_date],
+                ).fetchall()
+                ret_sorted = [float(r[0]) * 100 for r in per_streamer_ret if r[0] is not None]
+
+                per_streamer_chat = conn.execute(
+                    """
+                    SELECT AVG(CASE WHEN s.avg_viewers > 0 THEN s.unique_chatters * 100.0 / s.avg_viewers ELSE 0 END) as ch
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ? AND s.ended_at IS NOT NULL
+                    GROUP BY LOWER(s.streamer_login)
+                    ORDER BY ch
+                """,
+                    [since_date],
+                ).fetchall()
+                chat_sorted = [float(r[0]) for r in per_streamer_chat if r[0] is not None]
+
+                # Percentiles for avgViewers
+                avg_percentile = (
+                    int(self._percentile_of(sorted_avgs, your_avg) * 100) if sorted_avgs else 0
+                )
+
+                # Percentile for peakViewers
+                peak_avgs = conn.execute(
+                    """
+                    SELECT MAX(viewer_count) as peak
+                    FROM twitch_stats_category
+                    WHERE ts_utc >= ?
+                    GROUP BY streamer
+                    ORDER BY peak
+                """,
+                    [since_date],
+                ).fetchall()
+                peak_sorted = [float(r[0]) for r in peak_avgs] if peak_avgs else []
+                peak_percentile = (
+                    int(self._percentile_of(peak_sorted, your_peak) * 100) if peak_sorted else 50
+                )
+
+                # Percentiles for retention and chat
+                ret_percentile = (
+                    int(self._percentile_of(ret_sorted, your_ret) * 100) if ret_sorted else 50
+                )
+                chat_percentile = (
+                    int(self._percentile_of(chat_sorted, your_chat) * 100) if chat_sorted else 50
+                )
+
+                # Category rank (1 = best)
+                category_rank = (
+                    category_total - int(avg_percentile / 100 * category_total)
+                    if category_total
+                    else 0
+                )
+
+                return web.json_response(
+                    {
+                        "yourStats": {
+                            "avgViewers": round(your_avg, 1),
+                            "peakViewers": your_peak,
+                            "retention10m": round(your_ret, 1),
+                            "chatHealth": round(your_chat, 1),
+                        },
+                        "categoryAvg": {
+                            "avgViewers": round(cat_avg_viewers, 1),
+                            "peakViewers": round(cat_avg_peak, 0),
+                            "retention10m": round(cat_avg_ret, 1),
+                            "chatHealth": round(cat_avg_chat, 1),
+                        },
+                        "percentiles": {
+                            "avgViewers": avg_percentile,
+                            "peakViewers": peak_percentile,
+                            "retention10m": ret_percentile,
+                            "chatHealth": chat_percentile,
+                        },
+                        "categoryRank": category_rank,
+                        "categoryTotal": category_total,
+                    }
+                )
+        except Exception as exc:
+            log.exception("Error in category comparison API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_v2_viewer_timeline(self, request: web.Request) -> web.Response:
+        """Return bucketed viewer data from twitch_stats_tracked."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip()
+        days = min(max(int(request.query.get("days", "7")), 1), 365)
+
+        if not streamer:
+            return web.json_response({"error": "Streamer required"}, status=400)
+
+        try:
+            with storage.get_conn() as conn:
+                since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+                # Determine bucket size based on range
+                if days <= 7:
+                    bucket_minutes = 5
+                elif days <= 30:
+                    bucket_minutes = 30
+                else:
+                    bucket_minutes = 60
+
+                # Use static SQL variants per bucket size to avoid dynamic query construction.
+                if bucket_minutes == 5:
+                    timeline_sql = """
+                    SELECT
+                        strftime('%Y-%m-%d %H:', ts_utc) || PRINTF('%02d', (CAST(strftime('%M', ts_utc) AS INTEGER) / 5) * 5) as bucket,
+                        AVG(viewer_count) as avg_vc,
+                        MAX(viewer_count) as peak_vc,
+                        MIN(viewer_count) as min_vc,
+                        COUNT(*) as samples
+                    FROM twitch_stats_tracked
+                    WHERE ts_utc >= ? AND LOWER(streamer) = ?
+                    GROUP BY bucket
+                    ORDER BY bucket
+                    """
+                elif bucket_minutes == 30:
+                    timeline_sql = """
+                    SELECT
+                        strftime('%Y-%m-%d %H:', ts_utc) || CASE WHEN CAST(strftime('%M', ts_utc) AS INTEGER) < 30 THEN '00' ELSE '30' END as bucket,
+                        AVG(viewer_count) as avg_vc,
+                        MAX(viewer_count) as peak_vc,
+                        MIN(viewer_count) as min_vc,
+                        COUNT(*) as samples
+                    FROM twitch_stats_tracked
+                    WHERE ts_utc >= ? AND LOWER(streamer) = ?
+                    GROUP BY bucket
+                    ORDER BY bucket
+                    """
+                else:
+                    timeline_sql = """
+                    SELECT
+                        strftime('%Y-%m-%d %H:00', ts_utc) as bucket,
+                        AVG(viewer_count) as avg_vc,
+                        MAX(viewer_count) as peak_vc,
+                        MIN(viewer_count) as min_vc,
+                        COUNT(*) as samples
+                    FROM twitch_stats_tracked
+                    WHERE ts_utc >= ? AND LOWER(streamer) = ?
+                    GROUP BY bucket
+                    ORDER BY bucket
+                    """
+
+                rows = conn.execute(timeline_sql, [since_date, streamer.lower()]).fetchall()
+
+                data = [
+                    {
+                        "timestamp": r[0],
+                        "avgViewers": round(float(r[1]), 1) if r[1] else 0,
+                        "peakViewers": int(r[2]) if r[2] else 0,
+                        "minViewers": int(r[3]) if r[3] else 0,
+                        "samples": r[4] or 0,
+                    }
+                    for r in rows
+                ]
+
+                return web.json_response(data)
+        except Exception as exc:
+            log.exception("Error in viewer timeline API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_v2_category_leaderboard(self, request: web.Request) -> web.Response:
+        """Top-N streamers from twitch_stats_category."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip()
+        days = min(max(int(request.query.get("days", "30")), 1), 365)
+        limit = min(max(int(request.query.get("limit", "25")), 5), 100)
+        sort_mode = request.query.get("sort", "avg")  # avg or peak
+
+        try:
+            with storage.get_conn() as conn:
+                since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+                if sort_mode == "peak":
+                    leaderboard_sql = """
+                    SELECT
+                        c.streamer,
+                        AVG(c.viewer_count) as avg_vc,
+                        MAX(c.viewer_count) as peak_vc,
+                        BOOL_OR(c.is_partner) as is_partner
+                    FROM twitch_stats_category c
+                    WHERE c.ts_utc >= ?
+                    GROUP BY c.streamer
+                    ORDER BY peak_vc DESC
+                    """
+                else:
+                    leaderboard_sql = """
+                    SELECT
+                        c.streamer,
+                        AVG(c.viewer_count) as avg_vc,
+                        MAX(c.viewer_count) as peak_vc,
+                        BOOL_OR(c.is_partner) as is_partner
+                    FROM twitch_stats_category c
+                    WHERE c.ts_utc >= ?
+                    GROUP BY c.streamer
+                    ORDER BY avg_vc DESC
+                    """
+
+                rows = conn.execute(leaderboard_sql, [since_date]).fetchall()
+
+                total_streamers = len(rows)
+
+                # Build ranked list
+                leaderboard = []
+                your_rank = None
+                streamer_lower = streamer.lower() if streamer else ""
+                your_entry = None
+
+                for i, r in enumerate(rows):
+                    rank = i + 1
+                    entry = {
+                        "rank": rank,
+                        "streamer": r[0],
+                        "avgViewers": round(float(r[1]), 1) if r[1] else 0,
+                        "peakViewers": int(r[2]) if r[2] else 0,
+                        "isPartner": bool(r[3]),
+                        "isYou": r[0].lower() == streamer_lower,
+                    }
+                    if r[0].lower() == streamer_lower:
+                        your_rank = rank
+                        your_entry = entry
+                    if rank <= limit:
+                        leaderboard.append(entry)
+
+                # If streamer is not in top-N, append them
+                if your_entry and your_rank and your_rank > limit:
+                    leaderboard.append(your_entry)
+
+                return web.json_response(
+                    {
+                        "leaderboard": leaderboard,
+                        "totalStreamers": total_streamers,
+                        "yourRank": your_rank,
+                    }
+                )
+        except Exception as exc:
+            log.exception("Error in category leaderboard API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_v2_category_timings(self, request: web.Request) -> web.Response:
+        """
+        Outlier-resistente Stunden- und Wochentags-Analyse fur die gesamte Kategorie.
+        Methode: Median der Streamer-Mediane (zweistufig) + P25/P75 Konfidenzband.
+        Einzelne Streamer mit extrem hohen Viewerzahlen verzerren so das Ergebnis nicht.
+        """
+        self._require_v2_auth(request)
+        days = min(max(int(request.query.get("days", "30")), 7), 90)
+        source = request.query.get("source", "category")  # 'category' | 'tracked'
+
+        from datetime import datetime, timedelta
+        from statistics import median, quantiles
+
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        try:
+            with storage.get_conn() as c:
+                if source == "tracked":
+                    rows = c.execute(
+                        """
+                        SELECT streamer,
+                               CAST(strftime('%H', ts_utc) AS INTEGER) AS hour,
+                               CAST(strftime('%w', ts_utc) AS INTEGER) AS weekday,
+                               viewer_count
+                          FROM twitch_stats_tracked
+                         WHERE ts_utc >= ?
+                           AND viewer_count IS NOT NULL
+                           AND viewer_count > 0
+                        """,
+                        (cutoff,),
+                    ).fetchall()
+                else:
+                    rows = c.execute(
+                        """
+                        SELECT streamer,
+                               CAST(strftime('%H', ts_utc) AS INTEGER) AS hour,
+                               CAST(strftime('%w', ts_utc) AS INTEGER) AS weekday,
+                               viewer_count
+                          FROM twitch_stats_category
+                         WHERE ts_utc >= ?
+                           AND viewer_count IS NOT NULL
+                           AND viewer_count > 0
+                        """,
+                        (cutoff,),
+                    ).fetchall()
+        except Exception as exc:
+            log.exception("category-timings query failed")
+            return web.json_response({"error": str(exc)}, status=500)
+
+        # --- Stunde: Streamer -> Stunde -> Liste Viewerzahlen ---
+        # hour_data[hour][streamer] = [viewer_counts...]
+        hour_data: dict = collections.defaultdict(lambda: collections.defaultdict(list))
+        weekday_data: dict = collections.defaultdict(lambda: collections.defaultdict(list))
+
+        for row in rows:
+            streamer = row[0]
+            hour = int(row[1])
+            wd = int(row[2])
+            vc = float(row[3])
+            hour_data[hour][streamer].append(vc)
+            weekday_data[wd][streamer].append(vc)
+
+        def _robust_stats(slot_data: dict) -> dict:
+            """Fur einen Slot (Stunde/Wochentag): Median der Streamer-Mediane + P25/P75."""
+            if not slot_data:
+                return {
+                    "median": None,
+                    "p25": None,
+                    "p75": None,
+                    "streamer_count": 0,
+                    "sample_count": 0,
+                }
+            # Schritt 1: pro Streamer einen Median berechnen
+            per_streamer = [median(vals) for vals in slot_data.values() if vals]
+            per_streamer.sort()
+            n = len(per_streamer)
+            sample_count = sum(len(v) for v in slot_data.values())
+            if n == 0:
+                return {
+                    "median": None,
+                    "p25": None,
+                    "p75": None,
+                    "streamer_count": 0,
+                    "sample_count": 0,
+                }
+            # Schritt 2: Median der Mediane
+            med = median(per_streamer)
+            # P25 / P75
+            if n >= 4:
+                qs = quantiles(per_streamer, n=4)
+                p25, p75 = qs[0], qs[2]
+            elif n >= 2:
+                p25 = per_streamer[0]
+                p75 = per_streamer[-1]
+            else:
+                p25 = p75 = per_streamer[0]
+            return {
+                "median": round(med, 1),
+                "p25": round(p25, 1),
+                "p75": round(p75, 1),
+                "streamer_count": n,
+                "sample_count": sample_count,
+            }
+
+        weekday_names = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"]
+
+        hourly = []
+        for h in range(24):
+            s = _robust_stats(hour_data.get(h, {}))
+            s["hour"] = h
+            hourly.append(s)
+
+        weekday_order = [1, 2, 3, 4, 5, 6, 0]  # Mo-So
+        weekly = []
+        for wd in weekday_order:
+            s = _robust_stats(weekday_data.get(wd, {}))
+            s["weekday"] = wd
+            s["label"] = weekday_names[wd]
+            weekly.append(s)
+
+        total_streamers = len({row[0] for row in rows})
+
+        return web.json_response(
+            {
+                "hourly": hourly,
+                "weekly": weekly,
+                "total_streamers": total_streamers,
+                "window_days": days,
+                "method": "median_of_medians",
+            }
+        )
+
+    async def _api_v2_category_activity_series(self, request: web.Request) -> web.Response:
+        """
+        Legacy stats-style comparison series for category vs tracked.
+        Provides hourly and weekday rows with average and peak values.
+        """
+        self._require_v2_auth(request)
+        days = min(max(int(request.query.get("days", "30")), 7), 365)
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+        hourly_rows: list[Any] = []
+        weekday_rows: list[Any] = []
+
+        try:
+            with storage.get_conn() as conn:
+                hourly_rows = conn.execute(
+                    """
+                    WITH source_rows AS (
+                        SELECT 'tracked' AS source_key, viewer_count, ts_utc
+                          FROM twitch_stats_tracked
+                        UNION ALL
+                        SELECT 'category' AS source_key, viewer_count, ts_utc
+                          FROM twitch_stats_category
+                    )
+                    SELECT source_key,
+                           CAST(strftime('%H', ts_utc) AS INTEGER) AS hour,
+                           AVG(viewer_count) AS avg_viewers,
+                           MAX(viewer_count) AS max_viewers,
+                           COUNT(*) AS samples
+                      FROM source_rows
+                     WHERE ts_utc >= ?
+                     GROUP BY source_key, hour
+                     ORDER BY source_key, hour
+                    """,
+                    (cutoff,),
+                ).fetchall()
+
+                weekday_rows = conn.execute(
+                    """
+                    WITH source_rows AS (
+                        SELECT 'tracked' AS source_key, viewer_count, ts_utc
+                          FROM twitch_stats_tracked
+                        UNION ALL
+                        SELECT 'category' AS source_key, viewer_count, ts_utc
+                          FROM twitch_stats_category
+                    )
+                    SELECT source_key,
+                           CAST(strftime('%w', ts_utc) AS INTEGER) AS weekday,
+                           AVG(viewer_count) AS avg_viewers,
+                           MAX(viewer_count) AS max_viewers,
+                           COUNT(*) AS samples
+                      FROM source_rows
+                     WHERE ts_utc >= ?
+                     GROUP BY source_key, weekday
+                     ORDER BY source_key, weekday
+                    """,
+                    (cutoff,),
+                ).fetchall()
+        except Exception as exc:
+            log.exception("category-activity-series query failed")
+            return web.json_response({"error": str(exc)}, status=500)
+
+        def _float_or_none(value: Any, *, digits: int = 1) -> float | None:
+            if value is None:
+                return None
+            try:
+                return round(float(value), digits)
+            except (TypeError, ValueError):
+                return None
+
+        def _int_or_none(value: Any) -> int | None:
+            if value is None:
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        hourly_map: dict[str, dict[int, dict[str, Any]]] = {
+            "category": {},
+            "tracked": {},
+        }
+        weekday_map: dict[str, dict[int, dict[str, Any]]] = {
+            "category": {},
+            "tracked": {},
+        }
+
+        for row in hourly_rows:
+            source_key = str(row[0] or "").strip().lower()
+            hour = _int_or_none(row[1])
+            if source_key not in hourly_map or hour is None:
+                continue
+            hourly_map[source_key][hour] = {
+                "avg": _float_or_none(row[2]),
+                "peak": _int_or_none(row[3]),
+                "samples": _int_or_none(row[4]) or 0,
+            }
+
+        for row in weekday_rows:
+            source_key = str(row[0] or "").strip().lower()
+            weekday = _int_or_none(row[1])
+            if source_key not in weekday_map or weekday is None:
+                continue
+            weekday_map[source_key][weekday] = {
+                "avg": _float_or_none(row[2]),
+                "peak": _int_or_none(row[3]),
+                "samples": _int_or_none(row[4]) or 0,
+            }
+
+        hourly: list[dict[str, Any]] = []
+        for hour in range(24):
+            category_point = hourly_map["category"].get(hour, {})
+            tracked_point = hourly_map["tracked"].get(hour, {})
+            hourly.append(
+                {
+                    "hour": hour,
+                    "label": f"{hour:02d}:00",
+                    "categoryAvg": category_point.get("avg"),
+                    "trackedAvg": tracked_point.get("avg"),
+                    "categoryPeak": category_point.get("peak"),
+                    "trackedPeak": tracked_point.get("peak"),
+                    "categorySamples": int(category_point.get("samples") or 0),
+                    "trackedSamples": int(tracked_point.get("samples") or 0),
+                }
+            )
+
+        weekday_labels = {
+            0: "Sonntag",
+            1: "Montag",
+            2: "Dienstag",
+            3: "Mittwoch",
+            4: "Donnerstag",
+            5: "Freitag",
+            6: "Samstag",
+        }
+        weekday_order = [1, 2, 3, 4, 5, 6, 0]  # Mo-So
+
+        weekly: list[dict[str, Any]] = []
+        for weekday in weekday_order:
+            category_point = weekday_map["category"].get(weekday, {})
+            tracked_point = weekday_map["tracked"].get(weekday, {})
+            weekly.append(
+                {
+                    "weekday": weekday,
+                    "label": weekday_labels.get(weekday, str(weekday)),
+                    "categoryAvg": category_point.get("avg"),
+                    "trackedAvg": tracked_point.get("avg"),
+                    "categoryPeak": category_point.get("peak"),
+                    "trackedPeak": tracked_point.get("peak"),
+                    "categorySamples": int(category_point.get("samples") or 0),
+                    "trackedSamples": int(tracked_point.get("samples") or 0),
+                }
+            )
+
+        return web.json_response(
+            {
+                "hourly": hourly,
+                "weekly": weekly,
+                "windowDays": days,
+                "source": "legacy_stats_chart",
+            }
+        )

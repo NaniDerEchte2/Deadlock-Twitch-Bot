@@ -1,0 +1,724 @@
+"""
+Analytics API v2 - Overview Mixin.
+
+Route setup, overview data, sessions, health scores, network stats, correlations.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from aiohttp import web
+
+from ..storage import pg as storage
+
+log = logging.getLogger("TwitchStreams.AnalyticsV2")
+DASHBOARD_V2_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
+DASHBOARD_V2_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard-v2"
+
+
+class _AnalyticsOverviewMixin:
+    """Mixin providing route registration and overview data endpoints."""
+
+    def _register_v2_routes(self, router: web.UrlDispatcher) -> None:
+        """Register all v2 API routes."""
+        router.add_get("/twitch/api/v2/overview", self._api_v2_overview)
+        router.add_get("/twitch/api/v2/monthly-stats", self._api_v2_monthly_stats)
+        router.add_get("/twitch/api/v2/weekly-stats", self._api_v2_weekly_stats)
+        router.add_get("/twitch/api/v2/hourly-heatmap", self._api_v2_hourly_heatmap)
+        router.add_get("/twitch/api/v2/calendar-heatmap", self._api_v2_calendar_heatmap)
+        router.add_get("/twitch/api/v2/chat-analytics", self._api_v2_chat_analytics)
+        router.add_get("/twitch/api/v2/viewer-overlap", self._api_v2_viewer_overlap)
+        router.add_get("/twitch/api/v2/tag-analysis", self._api_v2_tag_analysis)
+        router.add_get("/twitch/api/v2/rankings", self._api_v2_rankings)
+        router.add_get("/twitch/api/v2/category-comparison", self._api_v2_category_comparison)
+        router.add_get("/twitch/api/v2/streamers", self._api_v2_streamers)
+        router.add_get("/twitch/api/v2/session/{id}", self._api_v2_session_detail)
+        router.add_get("/twitch/api/v2/auth-status", self._api_v2_auth_status)
+        # New Audience Analytics Endpoints
+        router.add_get(
+            "/twitch/api/v2/watch-time-distribution",
+            self._api_v2_watch_time_distribution,
+        )
+        router.add_get("/twitch/api/v2/follower-funnel", self._api_v2_follower_funnel)
+        router.add_get("/twitch/api/v2/tag-analysis-extended", self._api_v2_tag_analysis_extended)
+        router.add_get("/twitch/api/v2/title-performance", self._api_v2_title_performance)
+        router.add_get("/twitch/api/v2/audience-insights", self._api_v2_audience_insights)
+        router.add_get("/twitch/api/v2/audience-demographics", self._api_v2_audience_demographics)
+        # Stats-Data Endpoints (from twitch_stats_tracked / twitch_stats_category)
+        router.add_get("/twitch/api/v2/viewer-timeline", self._api_v2_viewer_timeline)
+        router.add_get("/twitch/api/v2/category-leaderboard", self._api_v2_category_leaderboard)
+        router.add_get("/twitch/api/v2/coaching", self._api_v2_coaching)
+        router.add_get("/twitch/api/v2/monetization", self._api_v2_monetization)
+        router.add_get("/twitch/api/v2/category-timings", self._api_v2_category_timings)
+        router.add_get(
+            "/twitch/api/v2/category-activity-series",
+            self._api_v2_category_activity_series,
+        )
+        # Serve the dashboard
+        router.add_get("/twitch/dashboard-v2", self._serve_dashboard_v2)
+        router.add_get("/twitch/dashboard-v2/{path:.*}", self._serve_dashboard_v2_assets)
+        # Public demo (no auth required)
+        self._register_demo_routes(router)
+
+    def _register_demo_routes(self, router: web.UrlDispatcher) -> None:
+        """Register public demo endpoints – no authentication required."""
+        from .demo_data import (
+            get_audience_demographics,
+            get_audience_insights,
+            get_auth_status,
+            get_calendar_heatmap,
+            get_category_activity_series,
+            get_category_comparison,
+            get_category_leaderboard,
+            get_category_timings,
+            get_chat_analytics,
+            get_coaching,
+            get_follower_funnel,
+            get_hourly_heatmap,
+            get_monetization,
+            get_monthly_stats,
+            get_overview,
+            get_rankings,
+            get_streamers,
+            get_tag_analysis,
+            get_tag_analysis_extended,
+            get_title_performance,
+            get_viewer_overlap,
+            get_viewer_timeline,
+            get_watch_time_distribution,
+            get_weekday_stats,
+        )
+
+        def _j(data):
+            async def _handler(request: web.Request) -> web.Response:
+                return web.json_response(data() if callable(data) else data)
+
+            return _handler
+
+        def _days_j(fn):
+            async def _handler(request: web.Request) -> web.Response:
+                try:
+                    days = int(request.query.get("days", "30"))
+                except ValueError:
+                    days = 30
+                return web.json_response(fn(days))
+
+            return _handler
+
+        def _metric_j(fn):
+            async def _handler(request: web.Request) -> web.Response:
+                metric = request.query.get("metric", "viewers")
+                return web.json_response(fn(metric))
+
+            return _handler
+
+        base = "/twitch/demo/api/v2"
+        router.add_get(f"{base}/auth-status", _j(get_auth_status))
+        router.add_get(f"{base}/streamers", _j(get_streamers))
+        router.add_get(f"{base}/overview", _days_j(get_overview))
+        router.add_get(f"{base}/monthly-stats", _j(get_monthly_stats))
+        router.add_get(f"{base}/weekly-stats", _j(get_weekday_stats))
+        router.add_get(f"{base}/hourly-heatmap", _j(get_hourly_heatmap))
+        router.add_get(f"{base}/calendar-heatmap", _j(get_calendar_heatmap))
+        router.add_get(f"{base}/chat-analytics", _j(get_chat_analytics))
+        router.add_get(f"{base}/viewer-overlap", _j(get_viewer_overlap))
+        router.add_get(f"{base}/tag-analysis", _j(get_tag_analysis))
+        router.add_get(f"{base}/tag-analysis-extended", _j(get_tag_analysis_extended))
+        router.add_get(f"{base}/title-performance", _j(get_title_performance))
+        router.add_get(f"{base}/rankings", _metric_j(get_rankings))
+        router.add_get(f"{base}/category-comparison", _j(get_category_comparison))
+        router.add_get(f"{base}/watch-time-distribution", _j(get_watch_time_distribution))
+        router.add_get(f"{base}/follower-funnel", _j(get_follower_funnel))
+        router.add_get(f"{base}/audience-insights", _j(get_audience_insights))
+        router.add_get(f"{base}/audience-demographics", _j(get_audience_demographics))
+        router.add_get(f"{base}/viewer-timeline", _days_j(get_viewer_timeline))
+        router.add_get(f"{base}/category-leaderboard", _j(get_category_leaderboard))
+        router.add_get(f"{base}/coaching", _j(get_coaching))
+        router.add_get(f"{base}/monetization", _j(get_monetization))
+        router.add_get(f"{base}/category-timings", _j(get_category_timings))
+        router.add_get(f"{base}/category-activity-series", _j(get_category_activity_series))
+        # Demo dashboard HTML
+        router.add_get("/twitch/demo/", self._serve_demo_dashboard)
+        router.add_get("/twitch/demo", self._serve_demo_dashboard)
+
+    async def _serve_demo_dashboard(self, request: web.Request) -> web.Response:
+        """Serve the demo dashboard HTML without authentication."""
+        import pathlib
+
+        dist_path = pathlib.Path(__file__).parent / "dashboard_v2" / "dist" / "index.html"
+        if not dist_path.exists():
+            return web.Response(
+                text="Dashboard not built. Run npm run build in dashboard_v2/",
+                status=404,
+            )
+        html = dist_path.read_text(encoding="utf-8")
+        # Inject demo config + fetch interceptor before the app boots.
+        # The built JS has the API base hardcoded as "/twitch/api/v2", so we
+        # intercept fetch() to transparently rewrite those calls to the public
+        # demo endpoints at "/twitch/demo/api/v2".
+        inject = (
+            "<script>"
+            "window.__DEMO_MODE__=true;"
+            'window.__DEMO_STREAMER__="deadlock_de_demo";'
+            "(function(){"
+            "var _f=window.fetch;"
+            "window.fetch=function(u,o){"
+            'if(typeof u==="string"&&u.indexOf("/twitch/api/v2/")!==-1){'
+            'u=u.replace("/twitch/api/v2/","/twitch/demo/api/v2/");'
+            "}"
+            "return _f.call(this,u,o);"
+            "};"
+            "})();"
+            "</script>"
+        )
+        html = html.replace("</head>", f"{inject}\n  </head>", 1)
+        return web.Response(text=html, content_type="text/html", charset="utf-8")
+
+    async def _serve_dashboard_v2(self, request: web.Request) -> web.Response:
+        """Serve the main dashboard HTML."""
+        if not self._check_v2_auth(request):
+            should_use_discord = getattr(self, "_should_use_discord_admin_login", None)
+            if callable(should_use_discord) and bool(should_use_discord(request)):
+                login_url = DASHBOARD_V2_DISCORD_LOGIN_URL
+            else:
+                login_url = DASHBOARD_V2_LOGIN_URL
+            raise web.HTTPFound(login_url)
+        import pathlib
+
+        dist_path = pathlib.Path(__file__).parent / "dashboard_v2" / "dist" / "index.html"
+        if dist_path.exists():
+            return web.FileResponse(dist_path)
+        return web.Response(
+            text="Dashboard not built. Run npm run build in dashboard_v2/", status=404
+        )
+
+    async def _serve_dashboard_v2_assets(self, request: web.Request) -> web.Response:
+        """Serve static assets for the dashboard."""
+        import pathlib
+
+        raw_path = request.match_info.get("path", "")
+        if not raw_path:
+            return web.Response(text="Not found", status=404)
+
+        dist_root = (pathlib.Path(__file__).resolve().parent / "dashboard_v2" / "dist").resolve()
+        candidate: pathlib.Path = dist_root
+
+        # Resolve each path segment against actual directory entries to avoid
+        # using untrusted input directly in filesystem path expressions.
+        for segment in raw_path.split("/"):
+            if not segment or segment in {".", ".."} or "\\" in segment:
+                return web.Response(text="Not found", status=404)
+            if not candidate.is_dir():
+                return web.Response(text="Not found", status=404)
+
+            next_candidate = None
+            for entry in candidate.iterdir():
+                if entry.name == segment:
+                    next_candidate = entry
+                    break
+            if next_candidate is None:
+                return web.Response(text="Not found", status=404)
+            candidate = next_candidate
+
+        try:
+            candidate.resolve().relative_to(dist_root)
+        except ValueError:
+            return web.Response(text="Not found", status=404)
+
+        if candidate.is_file():
+            return web.FileResponse(candidate)
+        return web.Response(text="Not found", status=404)
+
+    async def _api_v2_overview(self, request: web.Request) -> web.Response:
+        """Main overview endpoint with all dashboard data."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip() or None
+        days = min(max(int(request.query.get("days", "30")), 7), 365)
+
+        try:
+            data = await self._get_overview_data(streamer, days)
+            return web.json_response(data)
+        except Exception as exc:
+            log.exception("Error in overview API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _get_overview_data(self, streamer: str | None, days: int) -> dict[str, Any]:
+        """Get comprehensive overview data for the dashboard."""
+        with storage.get_conn() as conn:
+            since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+            prev_since_date = (datetime.now(UTC) - timedelta(days=days * 2)).isoformat()
+
+            streamer_login = streamer.lower() if streamer else None
+
+            # Check data exists
+            count = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM twitch_stream_sessions s
+                WHERE s.started_at >= ?
+                  AND s.ended_at IS NOT NULL
+                  AND (COALESCE(?, '') = '' OR LOWER(s.streamer_login) = ?)
+                """,
+                [since_date, streamer_login, streamer_login],
+            ).fetchone()[0]
+
+            if count == 0:
+                return {"empty": True, "error": "Keine Daten für den Zeitraum"}
+
+            # Get sessions
+            sessions = self._get_sessions(conn, since_date, streamer, 50)
+
+            # Calculate metrics
+            metrics = self._calculate_overview_metrics(conn, since_date, streamer)
+
+            # Calculate previous period metrics for trends
+            prev_metrics = conn.execute(
+                """
+                SELECT
+                    AVG(s.avg_viewers) as avg_viewers,
+                    SUM(CASE WHEN s.follower_delta IS NOT NULL
+                         AND NOT (s.followers_end = 0 AND s.followers_start > 0)
+                         THEN s.follower_delta ELSE 0 END) as followers,
+                    AVG(CASE
+                        WHEN s.avg_viewers >= 3 AND s.peak_viewers > 0
+                        THEN LEAST(1.0, s.retention_10m, s.avg_viewers * 1.0 / NULLIF(s.peak_viewers, 0))
+                        ELSE NULL
+                    END) as retention
+                FROM twitch_stream_sessions s
+                WHERE s.started_at >= ? AND s.started_at < ?
+                  AND s.ended_at IS NOT NULL
+                  AND (COALESCE(?, '') = '' OR LOWER(s.streamer_login) = ?)
+                """,
+                [prev_since_date, since_date, streamer_login, streamer_login],
+            ).fetchone()
+
+            # Calculate trends
+            def calc_trend(curr, prev):
+                if not prev or prev == 0:
+                    return None
+                return round(((curr - prev) / abs(prev)) * 100, 1)
+
+            prev_avg = float(prev_metrics[0]) if prev_metrics and prev_metrics[0] else 0
+            prev_fol = int(prev_metrics[1]) if prev_metrics and prev_metrics[1] else 0
+            prev_ret = float(prev_metrics[2]) * 100 if prev_metrics and prev_metrics[2] else 0
+
+            avg_viewers_trend = calc_trend(metrics.get("avg_avg_viewers", 0), prev_avg)
+            # Follower trend: use abs(prev) to avoid inversion with negative base
+            followers_trend = calc_trend(metrics.get("total_followers", 0), prev_fol)
+            retention_trend = calc_trend(metrics.get("avg_retention_10m", 0), prev_ret)
+
+            # Calculate category percentile for health score
+            category_percentile = None
+            category_rank = None
+            category_total = None
+            if streamer:
+                cat_data = self._get_category_percentiles(conn, since_date)
+                if cat_data["sorted_avgs"]:
+                    streamer_avg = cat_data["streamer_map"].get(streamer.lower())
+                    if streamer_avg is not None:
+                        category_percentile = self._percentile_of(
+                            cat_data["sorted_avgs"], streamer_avg
+                        )
+                        category_total = cat_data["total"]
+                        # Rank = total - position (1 = best)
+                        category_rank = category_total - int(category_percentile * category_total)
+
+            # Calculate scores
+            scores = self._calculate_health_scores(metrics, category_percentile)
+
+            # Generate insights
+            findings = self._generate_insights(metrics)
+            actions = self._generate_actions(metrics)
+
+            # Get network stats
+            network = self._get_network_stats(conn, since_date, streamer)
+
+            # Correlations
+            correlations = self._calculate_correlations(sessions)
+
+            result: dict[str, Any] = {
+                "streamer": streamer,
+                "days": days,
+                "scores": scores,
+                "summary": {
+                    "avgViewers": metrics.get("avg_avg_viewers", 0),
+                    "peakViewers": metrics.get("max_peak_viewers", 0),
+                    "totalHoursWatched": metrics.get("total_hours_watched", 0),
+                    "totalAirtime": metrics.get("total_airtime_hours", 0),
+                    "followersDelta": metrics.get("total_followers", 0),
+                    "followersGained": metrics.get("gained_followers", 0),
+                    "followersPerHour": metrics.get("followers_per_hour", 0),
+                    "followersGainedPerHour": metrics.get("gained_followers_per_hour", 0),
+                    "retention10m": metrics.get("avg_retention_10m", 0),
+                    "retentionReliable": metrics.get("retention_sample_count", 0) >= 3,
+                    "uniqueChatters": metrics.get("total_unique_chatters", 0),
+                    "streamCount": count,
+                    # Trend indicators
+                    "avgViewersTrend": avg_viewers_trend,
+                    "followersTrend": followers_trend,
+                    "retentionTrend": retention_trend,
+                },
+                "sessions": sessions,
+                "findings": findings,
+                "actions": actions,
+                "correlations": correlations,
+                "network": network,
+            }
+            if category_rank is not None:
+                result["categoryRank"] = category_rank
+                result["categoryTotal"] = category_total
+            return result
+
+    def _get_sessions(
+        self, conn, since_date: str, streamer: str | None, limit: int = 50
+    ) -> list[dict]:
+        """Get list of sessions with metrics."""
+        streamer_login = streamer.lower() if streamer else None
+        rows = conn.execute(
+            """
+            SELECT
+                s.id,
+                CAST(s.started_at AS DATE) AS start_date,
+                CAST(s.started_at AS TIME) AS start_time,
+                s.duration_seconds,
+                s.start_viewers, s.peak_viewers, s.end_viewers, s.avg_viewers,
+                COALESCE(s.retention_5m, 0), COALESCE(s.retention_10m, 0), COALESCE(s.retention_20m, 0),
+                COALESCE(s.dropoff_pct, 0), COALESCE(s.unique_chatters, 0),
+                COALESCE(s.first_time_chatters, 0), COALESCE(s.returning_chatters, 0),
+                COALESCE(s.followers_start, 0), COALESCE(s.followers_end, 0),
+                COALESCE(s.stream_title, '')
+            FROM twitch_stream_sessions s
+            WHERE s.started_at >= ?
+              AND s.ended_at IS NOT NULL
+              AND (COALESCE(?, '') = '' OR LOWER(s.streamer_login) = ?)
+            ORDER BY s.started_at DESC
+            LIMIT ?
+        """,
+            [since_date, streamer_login, streamer_login, limit],
+        ).fetchall()
+
+        sessions: list[dict[str, Any]] = []
+        for r in rows:
+            date_val = r[1]
+            time_val = r[2]
+            date_str = date_val.isoformat() if hasattr(date_val, "isoformat") else (date_val or "")
+            time_str = time_val.isoformat() if hasattr(time_val, "isoformat") else (time_val or "")
+            peak_viewers = int(r[5]) if r[5] else 0
+            avg_viewers = float(r[7]) if r[7] else 0.0
+            # Begrenze Retention nur hart auf 100%, nicht auf avg/peak (verzerrt wachsende Streams)
+            retention_cap = 1.0
+
+            raw_ret_5m = float(r[8]) if r[8] else 0.0
+            raw_ret_10m = float(r[9]) if r[9] else 0.0
+            raw_ret_20m = float(r[10]) if r[10] else 0.0
+            ret_5m = max(0.0, min(raw_ret_5m, retention_cap))
+            ret_10m = max(0.0, min(raw_ret_10m, retention_cap))
+            ret_20m = max(0.0, min(raw_ret_20m, retention_cap))
+
+            sessions.append(
+                {
+                    "id": r[0],
+                    "date": date_str,
+                    "startTime": time_str,
+                    "duration": r[3] or 0,
+                    "startViewers": r[4] or 0,
+                    "peakViewers": peak_viewers,
+                    "endViewers": r[6] or 0,
+                    "avgViewers": avg_viewers,
+                    "retention5m": ret_5m * 100,
+                    "retention10m": ret_10m * 100,
+                    "retention20m": ret_20m * 100,
+                    "dropoffPct": float(r[11]) * 100 if r[11] else 0,
+                    "uniqueChatters": r[12] or 0,
+                    "firstTimeChatters": r[13] or 0,
+                    "returningChatters": r[14] or 0,
+                    "followersStart": r[15] or 0,
+                    "followersEnd": r[16] or 0,
+                    "title": r[17] or "",
+                }
+            )
+
+        return sessions
+
+    def _calculate_overview_metrics(
+        self, conn, since_date: str, streamer: str | None
+    ) -> dict[str, Any]:
+        """Calculate all overview metrics."""
+        streamer_login = streamer.lower() if streamer else None
+
+        row = conn.execute(
+            """
+            SELECT
+                AVG(s.avg_viewers) as avg_avg_viewers,
+                MAX(s.peak_viewers) as max_peak_viewers,
+                SUM(s.avg_viewers * s.duration_seconds / 3600.0) as total_hours_watched,
+                SUM(s.duration_seconds / 3600.0) as total_airtime_hours,
+                SUM(CASE WHEN s.follower_delta IS NOT NULL
+                     AND NOT (s.followers_end = 0 AND s.followers_start > 0)
+                     THEN s.follower_delta ELSE 0 END) as total_followers,
+                AVG(CASE
+                    WHEN s.avg_viewers >= 3 AND s.peak_viewers > 0
+                    THEN LEAST(1.0, s.retention_5m, s.avg_viewers * 1.0 / NULLIF(s.peak_viewers, 0))
+                    ELSE NULL
+                END) as avg_retention_5m,
+                AVG(CASE
+                    WHEN s.avg_viewers >= 3 AND s.peak_viewers > 0
+                    THEN LEAST(1.0, s.retention_10m, s.avg_viewers * 1.0 / NULLIF(s.peak_viewers, 0))
+                    ELSE NULL
+                END) as avg_retention_10m,
+                AVG(CASE
+                    WHEN s.avg_viewers >= 3 AND s.peak_viewers > 0
+                    THEN LEAST(1.0, s.retention_20m, s.avg_viewers * 1.0 / NULLIF(s.peak_viewers, 0))
+                    ELSE NULL
+                END) as avg_retention_20m,
+                AVG(s.dropoff_pct) as avg_dropoff,
+                SUM(s.unique_chatters) as total_unique_chatters,
+                AVG(CASE
+                    WHEN s.avg_viewers >= 3 AND s.peak_viewers > 0
+                    THEN LEAST(100.0, s.unique_chatters * 100.0 / NULLIF(s.peak_viewers, 0))
+                    ELSE NULL
+                END) as chat_per_100
+            FROM twitch_stream_sessions s
+            WHERE s.started_at >= ?
+              AND s.ended_at IS NOT NULL
+              AND (COALESCE(?, '') = '' OR LOWER(s.streamer_login) = ?)
+        """,
+            [since_date, streamer_login, streamer_login],
+        ).fetchone()
+
+        total_airtime = float(row[3]) if row[3] else 0
+        total_followers = int(row[4]) if row[4] else 0  # NET (can be negative)
+
+        # Gained followers = only positive session deltas (ignores unfollows)
+        gained_row = conn.execute(
+            """
+            SELECT COALESCE(SUM(CASE WHEN s.follower_delta > 0
+                 AND NOT (s.followers_end = 0 AND s.followers_start > 0)
+                 THEN s.follower_delta ELSE 0 END), 0)
+            FROM twitch_stream_sessions s
+            WHERE s.started_at >= ?
+              AND s.ended_at IS NOT NULL
+              AND (COALESCE(?, '') = '' OR LOWER(s.streamer_login) = ?)
+        """,
+            [since_date, streamer_login, streamer_login],
+        ).fetchone()
+        gained_followers = int(gained_row[0]) if gained_row and gained_row[0] else 0
+
+        # True unique chatters from rollup table (not SUM of per-session counts)
+        unique_chatters_sum = int(row[9]) if row[9] else 0
+        if streamer:
+            true_unique = conn.execute(
+                """
+                SELECT COUNT(DISTINCT chatter_login)
+                FROM twitch_chatter_rollup
+                WHERE LOWER(streamer_login) = ?
+            """,
+                [streamer.lower()],
+            ).fetchone()
+            unique_chatters = (
+                int(true_unique[0]) if true_unique and true_unique[0] else unique_chatters_sum
+            )
+        else:
+            unique_chatters = unique_chatters_sum
+
+        # Sample counts for data quality gating
+        sample_row = conn.execute(
+            """
+            SELECT
+                COUNT(CASE
+                    WHEN s.avg_viewers >= 3 AND s.peak_viewers > 0 AND s.retention_10m IS NOT NULL THEN 1
+                END),
+                COUNT(CASE
+                    WHEN s.avg_viewers >= 3 AND s.peak_viewers > 0 AND s.unique_chatters IS NOT NULL THEN 1
+                END),
+                COUNT(CASE WHEN s.follower_delta IS NOT NULL
+                     AND NOT (s.followers_end = 0 AND s.followers_start > 0) THEN 1 END)
+            FROM twitch_stream_sessions s
+            WHERE s.started_at >= ?
+              AND s.ended_at IS NOT NULL
+              AND (COALESCE(?, '') = '' OR LOWER(s.streamer_login) = ?)
+        """,
+            [since_date, streamer_login, streamer_login],
+        ).fetchone()
+        retention_sample_count = int(sample_row[0]) if sample_row else 0
+        chat_sample_count = int(sample_row[1]) if sample_row else 0
+        follower_valid_count = int(sample_row[2]) if sample_row else 0
+
+        # Active chatters (at least 1 message) for engagement rate calculation
+        active_chatters_row = conn.execute(
+            """
+            SELECT COUNT(DISTINCT COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id))
+            FROM twitch_session_chatters sc
+            JOIN twitch_stream_sessions s ON s.id = sc.session_id
+            WHERE s.started_at >= ?
+              AND s.ended_at IS NOT NULL
+              AND (COALESCE(?, '') = '' OR LOWER(s.streamer_login) = ?)
+              AND sc.messages > 0
+            """,
+            [since_date, streamer_login, streamer_login],
+        ).fetchone()
+        active_chatters = (
+            int(active_chatters_row[0]) if active_chatters_row and active_chatters_row[0] else 0
+        )
+
+        # Distinct Zuschauer (Chatters + Chatters-API ohne Nachrichten)
+        distinct_viewers_row = conn.execute(
+            """
+            SELECT COUNT(DISTINCT COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id))
+            FROM twitch_session_chatters sc
+            JOIN twitch_stream_sessions s ON s.id = sc.session_id
+            WHERE s.started_at >= ?
+              AND s.ended_at IS NOT NULL
+              AND (COALESCE(?, '') = '' OR LOWER(s.streamer_login) = ?)
+              AND (sc.messages > 0 OR COALESCE(sc.seen_via_chatters_api, FALSE) IS TRUE)
+            """,
+            [since_date, streamer_login, streamer_login],
+        ).fetchone()
+        distinct_viewers = (
+            int(distinct_viewers_row[0]) if distinct_viewers_row and distinct_viewers_row[0] else 0
+        )
+
+        avg_viewers = float(row[0]) if row[0] else 0
+        engagement_rate = (active_chatters / distinct_viewers * 100) if distinct_viewers > 0 else 0
+
+        return {
+            "avg_avg_viewers": avg_viewers,
+            "max_peak_viewers": int(row[1]) if row[1] else 0,
+            "total_hours_watched": float(row[2]) if row[2] else 0,
+            "total_airtime_hours": total_airtime,
+            "total_followers": total_followers,
+            "gained_followers": gained_followers,
+            "followers_per_hour": total_followers / total_airtime if total_airtime > 0 else 0,
+            "gained_followers_per_hour": gained_followers / total_airtime
+            if total_airtime > 0
+            else 0,
+            "avg_retention_5m": float(row[5]) * 100 if row[5] else 0,
+            "avg_retention_10m": float(row[6]) * 100 if row[6] else 0,
+            "avg_retention_20m": float(row[7]) * 100 if row[7] else 0,
+            "avg_dropoff": float(row[8]) * 100 if row[8] else 0,
+            "total_unique_chatters": unique_chatters,
+            "active_chatters": active_chatters,
+            "unique_viewers": distinct_viewers,
+            "engagement_rate": round(engagement_rate, 2),
+            "chat_per_100": float(row[10]) if row[10] else 0,
+            "retention_sample_count": retention_sample_count,
+            "chat_sample_count": chat_sample_count,
+            "follower_valid_count": follower_valid_count,
+        }
+
+    def _calculate_health_scores(
+        self, metrics: dict[str, Any], category_percentile: float | None = None
+    ) -> dict[str, int]:
+        """Calculate health scores from metrics."""
+        avg_viewers = metrics.get("avg_avg_viewers", 0)
+
+        # Reach: Based on percentile ranking in category if available, else fallback
+        if category_percentile is not None:
+            reach = min(100, int(20 + category_percentile * 80))
+        else:
+            reach = min(100, int(avg_viewers / 5))  # fallback
+
+        # Retention: Based on 10m retention (neutral if insufficient data)
+        ret_10m = metrics.get("avg_retention_10m", 0)
+        if metrics.get("retention_sample_count", 0) < 3:
+            retention = 50
+        else:
+            retention = min(100, int(ret_10m * 1.5))  # 66% = 100
+
+        # Engagement: % of avg viewers who actively chatted (0-10% bad, 10-20% ok, 20%+ gut)
+        engagement_rate = metrics.get("engagement_rate", 0)
+        if metrics.get("chat_sample_count", 0) < 3:
+            engagement = 50
+        else:
+            engagement = min(100, int(engagement_rate * 5))  # 20% engagement_rate = 100
+
+        # Growth: Based on followers per hour (floor at 0, negative fph = 0 growth)
+        fph = max(0, metrics.get("followers_per_hour", 0))
+        growth = min(100, int(fph * 20))  # 5 fph = 100
+
+        # Monetization: Placeholder (would need sub data)
+        monetization = min(100, max(0, int(avg_viewers / 10)))
+
+        # Network: Placeholder
+        network = 50
+
+        # Total: Weighted average
+        total = int(
+            reach * 0.2
+            + retention * 0.25
+            + engagement * 0.2
+            + growth * 0.15
+            + monetization * 0.1
+            + network * 0.1
+        )
+
+        return {
+            "total": total,
+            "reach": reach,
+            "retention": retention,
+            "engagement": engagement,
+            "growth": growth,
+            "monetization": monetization,
+            "network": network,
+        }
+
+    def _get_network_stats(self, conn, since_date: str, streamer: str | None) -> dict[str, int]:
+        """Get raid network statistics."""
+        if not streamer:
+            return {"sent": 0, "received": 0, "sentViewers": 0}
+
+        sent = conn.execute(
+            """
+            SELECT COUNT(*), COALESCE(SUM(viewer_count), 0)
+            FROM twitch_raid_history
+            WHERE LOWER(from_broadcaster_login) = ? AND executed_at >= ? AND COALESCE(success, FALSE) IS TRUE
+        """,
+            [streamer.lower(), since_date],
+        ).fetchone()
+
+        received = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM twitch_raid_history
+            WHERE LOWER(to_broadcaster_login) = ? AND executed_at >= ? AND COALESCE(success, FALSE) IS TRUE
+        """,
+            [streamer.lower(), since_date],
+        ).fetchone()
+
+        return {
+            "sent": sent[0] if sent else 0,
+            "sentViewers": int(sent[1]) if sent else 0,
+            "received": received[0] if received else 0,
+        }
+
+    def _calculate_correlations(self, sessions: list[dict]) -> dict[str, float]:
+        """Calculate metric correlations."""
+        if len(sessions) < 3:
+            return {"durationVsViewers": 0, "chatVsRetention": 0}
+
+        # Simple correlation approximation
+        durations = [s["duration"] for s in sessions]
+        viewers = [s["avgViewers"] for s in sessions]
+        chatters = [s["uniqueChatters"] for s in sessions]
+        retention = [s["retention10m"] for s in sessions]
+
+        def corr(a, b):
+            if len(a) < 2:
+                return 0
+            mean_a = sum(a) / len(a)
+            mean_b = sum(b) / len(b)
+            num = sum((x - mean_a) * (y - mean_b) for x, y in zip(a, b, strict=False))
+            den_a = sum((x - mean_a) ** 2 for x in a) ** 0.5
+            den_b = sum((y - mean_b) ** 2 for y in b) ** 0.5
+            if den_a == 0 or den_b == 0:
+                return 0
+            return round(num / (den_a * den_b), 2)
+
+        return {
+            "durationVsViewers": corr(durations, viewers),
+            "chatVsRetention": corr(chatters, retention),
+        }

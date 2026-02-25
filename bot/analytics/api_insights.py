@@ -1,0 +1,680 @@
+"""
+Analytics API v2 - Insights Mixin.
+
+Insights and AI: coaching, chat analytics, monetization,
+percentile helpers, generate insights/actions.
+"""
+
+from __future__ import annotations
+
+import collections
+import logging
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from typing import Any
+
+from aiohttp import web
+
+from ..storage import pg as storage
+from .coaching_engine import CoachingEngine
+
+log = logging.getLogger("TwitchStreams.AnalyticsV2")
+
+
+class _AnalyticsInsightsMixin:
+    """Mixin providing insights, coaching, chat analytics, and monetization endpoints."""
+
+    def _get_category_percentiles(self, conn, since_date: str) -> dict[str, Any]:
+        """Get per-streamer AVG viewer_count from stats_category and compute percentiles."""
+        rows = conn.execute(
+            """
+            SELECT streamer, AVG(viewer_count) as avg_vc
+            FROM twitch_stats_category
+            WHERE ts_utc >= ?
+            GROUP BY streamer
+            ORDER BY avg_vc
+        """,
+            [since_date],
+        ).fetchall()
+
+        if not rows:
+            return {"sorted_avgs": [], "streamer_map": {}, "total": 0}
+
+        sorted_avgs = [float(r[1]) for r in rows]
+        streamer_map = {r[0].lower(): float(r[1]) for r in rows}
+        return {
+            "sorted_avgs": sorted_avgs,
+            "streamer_map": streamer_map,
+            "total": len(rows),
+        }
+
+    def _percentile_of(self, sorted_avgs: list[float], value: float) -> float:
+        """Return the percentile (0-1) of value within sorted_avgs."""
+        if not sorted_avgs:
+            return 0.5
+        below = sum(1 for v in sorted_avgs if v < value)
+        return below / len(sorted_avgs)
+
+    def _generate_insights(self, metrics: dict[str, Any]) -> list[dict[str, str]]:
+        """Generate findings/insights from metrics."""
+        insights = []
+
+        # Retention
+        ret_10m = metrics.get("avg_retention_10m", 0)
+        if metrics.get("retention_sample_count", 0) < 3:
+            insights.append(
+                {
+                    "type": "info",
+                    "title": "Retention-Daten unzureichend",
+                    "text": "Zu wenige Sessions mit >=3 Viewern fur aussagekraftige Retention-Werte.",
+                }
+            )
+        elif ret_10m < 40:
+            insights.append(
+                {
+                    "type": "neg",
+                    "title": "Niedrige Retention",
+                    "text": f"10-Min Retention bei {ret_10m:.1f}%. Verbessere den Stream-Einstieg.",
+                }
+            )
+        elif ret_10m > 65:
+            insights.append(
+                {
+                    "type": "pos",
+                    "title": "Starke Retention",
+                    "text": f"Exzellente {ret_10m:.1f}% Retention. Dein Content fesselt!",
+                }
+            )
+
+        # Chat
+        chat_100 = metrics.get("chat_per_100", 0)
+        if metrics.get("chat_sample_count", 0) < 3:
+            insights.append(
+                {
+                    "type": "info",
+                    "title": "Chat-Daten unzureichend",
+                    "text": "Zu wenige Sessions mit >=3 Viewern fur aussagekraftige Chat-Metriken.",
+                }
+            )
+        elif chat_100 < 5:
+            insights.append(
+                {
+                    "type": "warn",
+                    "title": "Niedrige Chat-Aktivitat",
+                    "text": f"Nur {chat_100:.1f} Chatter/100 Peak-Viewer (Proxy). Mehr Interaktion fordern!",
+                }
+            )
+        elif chat_100 > 30:
+            insights.append(
+                {
+                    "type": "pos",
+                    "title": "Aktive Community",
+                    "text": f"{chat_100:.1f} Chatter/100 Peak-Viewer (Proxy) - sehr engagiert!",
+                }
+            )
+
+        # Followers (skip when no valid follower data)
+        fph = metrics.get("followers_per_hour", 0)
+        gained_fph = metrics.get("gained_followers_per_hour", 0)
+        follower_data_valid = metrics.get("follower_valid_count", 0) > 0
+        if not follower_data_valid:
+            pass  # No reliable follower data -- skip all follower insights
+        elif fph < 0:
+            insights.append(
+                {
+                    "type": "neg",
+                    "title": "Follower-Verlust",
+                    "text": f"Netto {fph:.2f} Follower/Stunde ({metrics.get('total_followers', 0):+d} gesamt). "
+                    f"Gewonnen: {gained_fph:.2f}/h. Unfollows uberwiegen.",
+                }
+            )
+        elif fph < 0.5:
+            insights.append(
+                {
+                    "type": "warn",
+                    "title": "Langsames Follower-Wachstum",
+                    "text": f"Nur {fph:.2f} Follower/Stunde. Regelmaig an Follows erinnern!",
+                }
+            )
+        elif fph > 3:
+            insights.append(
+                {
+                    "type": "pos",
+                    "title": "Starkes Wachstum",
+                    "text": f"{fph:.1f} Follower/Stunde - ausgezeichnet!",
+                }
+            )
+
+        return insights
+
+    def _generate_actions(self, metrics: dict[str, Any]) -> list[dict[str, str]]:
+        """Generate action recommendations."""
+        actions = []
+
+        ret_10m = metrics.get("avg_retention_10m", 0)
+        if metrics.get("retention_sample_count", 0) >= 3 and ret_10m < 50:
+            actions.append(
+                {
+                    "tag": "Retention",
+                    "text": "Starte mit einem starken Hook in den ersten 2 Minuten.",
+                    "priority": "high",
+                }
+            )
+
+        chat_100 = metrics.get("chat_per_100", 0)
+        if metrics.get("chat_sample_count", 0) >= 3 and chat_100 < 10:
+            actions.append(
+                {
+                    "tag": "Engagement",
+                    "text": "Stelle alle 5-10 Minuten eine direkte Frage an den Chat.",
+                    "priority": "medium",
+                }
+            )
+
+        fph = metrics.get("followers_per_hour", 0)
+        follower_data_valid = metrics.get("follower_valid_count", 0) > 0
+        if follower_data_valid and fph < 0:
+            actions.append(
+                {
+                    "tag": "Growth",
+                    "text": "Follower-Verlust! Prufe ob Content-Wechsel oder lange Pausen Unfollows verursachen.",
+                    "priority": "high",
+                }
+            )
+        elif follower_data_valid and fph < 1:
+            actions.append(
+                {
+                    "tag": "Growth",
+                    "text": "Erinnere alle 20-30 Minuten an Follow mit konkretem Grund.",
+                    "priority": "medium",
+                }
+            )
+
+        return actions
+
+    async def _api_v2_chat_analytics(self, request: web.Request) -> web.Response:
+        """Get chat analytics."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip() or None
+        days = min(max(int(request.query.get("days", "30")), 7), 365)
+
+        try:
+            with storage.get_conn() as conn:
+                since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+                if not streamer:
+                    return web.json_response({"error": "Streamer required"}, status=400)
+                streamer_login = streamer.lower()
+
+                # Session context for normalization (e.g. messages/minute, loyalty score).
+                session_stats = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) as session_count,
+                        COALESCE(SUM(s.duration_seconds), 0) as total_duration_seconds
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ?
+                      AND LOWER(s.streamer_login) = ?
+                      AND s.ended_at IS NOT NULL
+                    """,
+                    [since_date, streamer_login],
+                ).fetchone()
+                session_count = int(session_stats[0]) if session_stats and session_stats[0] else 0
+                total_duration_seconds = (
+                    float(session_stats[1]) if session_stats and session_stats[1] else 0.0
+                )
+
+                # True message counts from raw chat events in the selected time range.
+                all_messages = conn.execute(
+                    """
+                    SELECT message_ts, content, is_command, chatter_login, chatter_id
+                    FROM twitch_chat_messages
+                    WHERE message_ts >= ?
+                      AND LOWER(streamer_login) = ?
+                    """,
+                    [since_date, streamer_login],
+                ).fetchall()
+
+                total_messages = len(all_messages)
+                command_messages = 0
+                distinct_chatters_set = set()
+
+                type_counts = collections.Counter()
+                hour_counts = collections.Counter()
+
+                for r in all_messages:
+                    ts_str = r[0]
+                    content = r[1] or ""
+                    is_cmd = r[2]
+                    chatter_key = r[3] or r[4] or ""
+
+                    if is_cmd:
+                        command_messages += 1
+                    if chatter_key:
+                        distinct_chatters_set.add(chatter_key)
+
+                    # Type Analysis
+                    msg_type = self._classify_message(content)
+                    type_counts[msg_type] += 1
+
+                    # Hourly Analysis
+                    try:
+                        # Assumes ISO format YYYY-MM-DDTHH:MM:SS...
+                        if "T" in ts_str:
+                            # Extract HH
+                            hour_str = ts_str.split("T")[1][:2]
+                            hour_counts[int(hour_str)] += 1
+                        elif " " in ts_str:
+                            # Fallback for YYYY-MM-DD HH:MM:SS
+                            hour_str = ts_str.split(" ")[1][:2]
+                            hour_counts[int(hour_str)] += 1
+                    except (TypeError, ValueError, IndexError):
+                        log.debug(
+                            "Skipping invalid chat message timestamp: %r",
+                            ts_str,
+                            exc_info=True,
+                        )
+
+                distinct_chatters_from_messages = len(distinct_chatters_set)
+
+                # Chatter cohort split + lurker stats from session-level chatter table.
+                cohort_stats = conn.execute(
+                    """
+                    SELECT
+                        COUNT(DISTINCT COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)) as unique_chatters,
+                        COUNT(
+                            DISTINCT CASE
+                                WHEN COALESCE(sc.is_first_time_global, FALSE) IS TRUE
+                                THEN COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)
+                            END
+                        ) as first_time_chatters,
+                        COUNT(DISTINCT sc.session_id) as sessions_with_chat,
+                        COUNT(*) as total_unique_viewers,
+                        SUM(
+                            CASE
+                                WHEN sc.messages = 0 AND sc.seen_via_chatters_api IS TRUE
+                                THEN 1
+                                ELSE 0
+                            END
+                        ) as lurkers,
+                        SUM(CASE WHEN sc.messages > 0 THEN 1 ELSE 0 END) as active_chatters_count,
+                        ROUND(AVG(CASE WHEN sc.messages > 0 THEN sc.messages ELSE NULL END), 1) as avg_messages_per_chatter,
+                        SUM(CASE WHEN sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) as chatters_api_seen
+                    FROM twitch_session_chatters sc
+                    JOIN twitch_stream_sessions s ON s.id = sc.session_id
+                    WHERE s.started_at >= ?
+                      AND LOWER(s.streamer_login) = ?
+                      AND s.ended_at IS NOT NULL
+                    """,
+                    [since_date, streamer_login],
+                ).fetchone()
+                unique_chatters = int(cohort_stats[0]) if cohort_stats and cohort_stats[0] else 0
+                first_time_chatters = (
+                    int(cohort_stats[1]) if cohort_stats and cohort_stats[1] else 0
+                )
+                sessions_with_chat = int(cohort_stats[2]) if cohort_stats and cohort_stats[2] else 0
+                total_unique_viewers = (
+                    int(cohort_stats[3]) if cohort_stats and cohort_stats[3] else 0
+                )
+                lurker_count = int(cohort_stats[4]) if cohort_stats and cohort_stats[4] else 0
+                active_chatters_count = (
+                    int(cohort_stats[5]) if cohort_stats and cohort_stats[5] else 0
+                )
+                avg_messages_per_chatter = (
+                    float(cohort_stats[6]) if cohort_stats and cohort_stats[6] else 0.0
+                )
+                chatters_api_seen = int(cohort_stats[7]) if cohort_stats and cohort_stats[7] else 0
+                lurker_ratio = (
+                    round(lurker_count / total_unique_viewers, 3)
+                    if total_unique_viewers > 0
+                    else 0.0
+                )
+                active_ratio = (
+                    round(active_chatters_count / total_unique_viewers, 3)
+                    if total_unique_viewers > 0
+                    else 0.0
+                )
+                chatters_api_coverage = (
+                    round(chatters_api_seen / total_unique_viewers, 3)
+                    if total_unique_viewers > 0
+                    else 0.0
+                )
+
+                # Fallback for older rows where session_chatters may be sparse.
+                if unique_chatters == 0 and distinct_chatters_from_messages > 0:
+                    unique_chatters = distinct_chatters_from_messages
+                    first_time_chatters = 0
+
+                returning_chatters = max(0, unique_chatters - first_time_chatters)
+                total_minutes = total_duration_seconds / 60.0 if total_duration_seconds > 0 else 0.0
+                messages_per_minute = (total_messages / total_minutes) if total_minutes > 0 else 0.0
+                chatter_return_rate = (
+                    (returning_chatters / unique_chatters) * 100.0 if unique_chatters > 0 else 0.0
+                )
+
+                # Top chatters in selected period (not all-time rollup).
+                top = conn.execute(
+                    """
+                    SELECT
+                        COALESCE(NULLIF(cm.chatter_login, ''), cm.chatter_id, 'unknown') as chatter_key,
+                        COUNT(*) as messages,
+                        COUNT(DISTINCT cm.session_id) as sessions,
+                        MIN(cm.message_ts) as first_seen,
+                        MAX(cm.message_ts) as last_seen
+                    FROM twitch_chat_messages cm
+                    WHERE cm.message_ts >= ?
+                      AND LOWER(cm.streamer_login) = ?
+                    GROUP BY COALESCE(NULLIF(cm.chatter_login, ''), cm.chatter_id, 'unknown')
+                    ORDER BY messages DESC
+                    LIMIT 20
+                    """,
+                    [since_date, streamer_login],
+                ).fetchall()
+
+                return web.json_response(
+                    {
+                        "totalMessages": total_messages,
+                        "uniqueChatters": unique_chatters,
+                        "firstTimeChatters": first_time_chatters,
+                        "returningChatters": returning_chatters,
+                        "messagesPerMinute": round(messages_per_minute, 2),
+                        "chatterReturnRate": round(chatter_return_rate, 1),
+                        "commandMessages": command_messages,
+                        "nonCommandMessages": max(0, total_messages - command_messages),
+                        "lurkerRatio": lurker_ratio,
+                        "lurkerCount": lurker_count,
+                        "activeChatters": active_chatters_count,
+                        "activeRatio": active_ratio,
+                        "avgMessagesPerChatter": avg_messages_per_chatter,
+                        "topChatters": [
+                            {
+                                "login": r[0],
+                                "totalMessages": int(r[1]) if r[1] else 0,
+                                "totalSessions": int(r[2]) if r[2] else 0,
+                                "firstSeen": r[3].isoformat()
+                                if hasattr(r[3], "isoformat")
+                                else r[3],
+                                "lastSeen": r[4].isoformat()
+                                if hasattr(r[4], "isoformat")
+                                else r[4],
+                                "loyaltyScore": round(
+                                    min(
+                                        100.0,
+                                        ((int(r[2]) if r[2] else 0) / max(1, session_count))
+                                        * 100.0,
+                                    ),
+                                    1,
+                                ),
+                            }
+                            for r in top
+                        ],
+                        "messageTypes": [
+                            {
+                                "type": k,
+                                "count": v,
+                                "percentage": round(v / total_messages * 100, 1)
+                                if total_messages > 0
+                                else 0,
+                            }
+                            for k, v in type_counts.most_common()
+                        ],
+                        "hourlyActivity": [
+                            {"hour": h, "count": hour_counts.get(h, 0)} for h in range(24)
+                        ],
+                        "dataQuality": {
+                            "sessions": session_count,
+                            "sessionsWithChat": sessions_with_chat,
+                            "chatSessionCoverage": round(
+                                (sessions_with_chat / session_count) * 100.0, 1
+                            )
+                            if session_count > 0
+                            else 0.0,
+                            "chattersApiCoverage": chatters_api_coverage,
+                        },
+                    }
+                )
+        except Exception as exc:
+            log.exception("Error in chat analytics API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_v2_coaching(self, request: web.Request) -> web.Response:
+        """Get personalized coaching data for a streamer."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip()
+        days = min(max(int(request.query.get("days", "30")), 7), 365)
+
+        if not streamer:
+            return web.json_response({"error": "Streamer required"}, status=400)
+
+        try:
+            with storage.get_conn() as conn:
+                data = CoachingEngine.get_coaching_data(conn, streamer, days)
+
+                # Normalize Decimal/Datetime values for JSON serialization
+                def _sanitize(obj):
+                    if isinstance(obj, Decimal):
+                        return float(obj)
+                    if isinstance(obj, (datetime, date)):
+                        return obj.isoformat()
+                    if isinstance(obj, dict):
+                        return {k: _sanitize(v) for k, v in obj.items()}
+                    if isinstance(obj, list):
+                        return [_sanitize(v) for v in obj]
+                    return obj
+
+                data = _sanitize(data)
+                return web.json_response(data)
+        except Exception as exc:
+            log.exception("Error in coaching API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_v2_monetization(self, request: web.Request) -> web.Response:
+        """Monetization & Hype Train overview for the last N days."""
+        self._require_v2_auth(request)
+        streamer = request.query.get("streamer", "").strip().lower()
+        days = min(max(int(request.query.get("days", "30")), 7), 90)
+
+        from datetime import datetime, timedelta
+
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+        ads: dict = {
+            "total": 0,
+            "auto": 0,
+            "manual": 0,
+            "sessions_with_ads": 0,
+            "avg_duration_s": 0.0,
+            "avg_viewer_drop_pct": None,
+            "worst_ads": [],
+        }
+        hype_train: dict = {
+            "total": 0,
+            "avg_level": 0.0,
+            "max_level": 0,
+            "avg_duration_s": 0.0,
+        }
+        bits: dict = {"total": 0, "cheer_events": 0}
+        subs: dict = {"total_events": 0, "gifted": 0}
+
+        try:
+            with storage.get_conn() as c:
+                # --- Ad Break overview ---
+                ad_agg = c.execute(
+                    """
+                    SELECT COUNT(*) AS total_ads,
+                           SUM(CASE WHEN a.is_automatic IS TRUE THEN 1 ELSE 0 END) AS auto_ads,
+                           AVG(a.duration_seconds) AS avg_duration,
+                           COUNT(DISTINCT a.session_id) AS sessions_with_ads
+                      FROM twitch_ad_break_events a
+                      LEFT JOIN twitch_stream_sessions s ON s.id = a.session_id
+                     WHERE a.started_at >= ?
+                       AND (? = '' OR LOWER(s.streamer_login) = ?)
+                    """,
+                    (cutoff, streamer, streamer),
+                ).fetchone()
+                if ad_agg:
+                    total = int(ad_agg["total_ads"] or 0)
+                    auto = int(ad_agg["auto_ads"] or 0)
+                    ads["total"] = total
+                    ads["auto"] = auto
+                    ads["manual"] = total - auto
+                    ads["sessions_with_ads"] = int(ad_agg["sessions_with_ads"] or 0)
+                    ads["avg_duration_s"] = round(float(ad_agg["avg_duration"] or 0.0), 1)
+
+                # --- Viewer impact ---
+                ad_rows = c.execute(
+                    """
+                    SELECT a.id, a.session_id, a.started_at, a.duration_seconds, a.is_automatic,
+                           s.started_at AS session_start
+                      FROM twitch_ad_break_events a
+                      JOIN twitch_stream_sessions s ON s.id = a.session_id
+                     WHERE a.started_at >= ?
+                       AND a.session_id IS NOT NULL
+                       AND (? = '' OR LOWER(s.streamer_login) = ?)
+                     ORDER BY a.started_at DESC
+                     LIMIT 200
+                    """,
+                    (cutoff, streamer, streamer),
+                ).fetchall()
+
+                timeline_map: dict = {}
+                if ad_rows:
+                    session_ids = list({int(r["session_id"]) for r in ad_rows if r["session_id"]})
+                    if session_ids:
+                        vrows = c.execute(
+                            """
+                            SELECT session_id, minutes_from_start, viewer_count
+                              FROM twitch_session_viewers
+                             WHERE session_id = ANY(?)
+                             ORDER BY session_id, minutes_from_start
+                            """,
+                            (session_ids,),
+                        ).fetchall()
+                        for vr in vrows:
+                            sid = int(vr["session_id"])
+                            timeline_map.setdefault(sid, []).append(
+                                (
+                                    float(vr["minutes_from_start"] or 0),
+                                    int(vr["viewer_count"] or 0),
+                                )
+                            )
+
+                drop_pcts: list = []
+                worst_ads: list = []
+                for ad in ad_rows:
+                    sid = int(ad["session_id"] or 0)
+                    dur_s = float(ad["duration_seconds"] or 30)
+                    try:
+                        ad_dt = datetime.fromisoformat(str(ad["started_at"]).replace("Z", "+00:00"))
+                        sess_dt = datetime.fromisoformat(
+                            str(ad["session_start"]).replace("Z", "+00:00")
+                        )
+                        min_into = (ad_dt - sess_dt).total_seconds() / 60.0
+                    except Exception:
+                        continue
+                    tl = timeline_map.get(sid, [])
+                    if not tl:
+                        continue
+                    dur_min = dur_s / 60.0
+                    pre = [v for m, v in tl if (min_into - 5) <= m < min_into]
+                    post_start = min_into + dur_min
+                    post = [v for m, v in tl if post_start <= m < (post_start + 5)]
+                    if not pre or not post:
+                        continue
+                    pre_avg = sum(pre) / len(pre)
+                    if pre_avg <= 0:
+                        continue
+                    drop = (sum(post) / len(post) - pre_avg) / pre_avg * 100.0
+                    drop_pcts.append(drop)
+                    worst_ads.append(
+                        {
+                            "started_at": str(ad["started_at"] or "")[:16],
+                            "duration_s": int(dur_s),
+                            "drop_pct": round(drop, 1),
+                            "is_automatic": bool(ad["is_automatic"]),
+                        }
+                    )
+
+                if drop_pcts:
+                    ads["avg_viewer_drop_pct"] = round(sum(drop_pcts) / len(drop_pcts), 1)
+                worst_ads.sort(key=lambda x: x["drop_pct"])
+                ads["worst_ads"] = worst_ads[:5]
+
+                # --- Hype Train ---
+                try:
+                    ht = c.execute(
+                        """
+                        SELECT COUNT(*) AS total, AVG(h.level) AS avg_level,
+                               MAX(h.level) AS max_level, AVG(h.duration_seconds) AS avg_dur
+                          FROM twitch_hype_train_events h
+                          LEFT JOIN twitch_stream_sessions s ON s.id = h.session_id
+                         WHERE h.started_at >= ?
+                           AND h.ended_at IS NOT NULL
+                           AND (? = '' OR LOWER(s.streamer_login) = ?)
+                        """,
+                        (cutoff, streamer, streamer),
+                    ).fetchone()
+                    if ht:
+                        hype_train = {
+                            "total": int(ht["total"] or 0),
+                            "avg_level": round(float(ht["avg_level"] or 0), 1),
+                            "max_level": int(ht["max_level"] or 0),
+                            "avg_duration_s": round(float(ht["avg_dur"] or 0), 0),
+                        }
+                except Exception:
+                    log.debug("Hype train query failed", exc_info=True)
+
+                # --- Bits ---
+                try:
+                    br = c.execute(
+                        """
+                        SELECT SUM(amount) AS total, COUNT(*) AS events
+                          FROM twitch_bits_events
+                         WHERE received_at >= ?
+                           AND (? = '' OR LOWER(streamer_login) = ?)
+                        """,
+                        (cutoff, streamer, streamer),
+                    ).fetchone()
+                    if br:
+                        bits = {
+                            "total": int(br["total"] or 0),
+                            "cheer_events": int(br["events"] or 0),
+                        }
+                except Exception:
+                    log.debug("Bits query failed", exc_info=True)
+
+                # --- Subs ---
+                try:
+                    sr = c.execute(
+                        """
+                        SELECT COUNT(*) AS total,
+                               SUM(CASE WHEN is_gift=1 THEN 1 ELSE 0 END) AS gifted
+                          FROM twitch_subscription_events
+                         WHERE received_at >= ?
+                           AND (? = '' OR LOWER(streamer_login) = ?)
+                        """,
+                        (cutoff, streamer, streamer),
+                    ).fetchone()
+                    if sr:
+                        subs = {
+                            "total_events": int(sr["total"] or 0),
+                            "gifted": int(sr["gifted"] or 0),
+                        }
+                except Exception:
+                    log.debug("Subs query failed", exc_info=True)
+
+        except Exception as exc:
+            log.exception("Error in monetization API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+        return web.json_response(
+            {
+                "ads": ads,
+                "hype_train": hype_train,
+                "bits": bits,
+                "subs": subs,
+                "window_days": days,
+            }
+        )

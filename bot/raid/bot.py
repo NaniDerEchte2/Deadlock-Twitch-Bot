@@ -1,0 +1,1693 @@
+# cogs/twitch/raid_manager.py
+"""
+Raid Bot Manager - RaidBot
+
+Verwaltet:
+- Automatische Raids beim Offline-Gehen
+- Partner-Auswahl (niedrigste Viewer, optional niedrigste Follower)
+- Raid-Metadaten und History
+"""
+
+import asyncio
+import json
+import logging
+import os
+import secrets
+import time
+from datetime import UTC, datetime
+from urllib.parse import urlencode
+
+import aiohttp
+import discord
+
+from ..api.token_error_handler import TokenErrorHandler
+from ..storage import backfill_tracked_stats_from_category, get_conn
+
+TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"  # noqa: S105
+TWITCH_AUTHORIZE_URL = "https://id.twitch.tv/oauth2/authorize"
+TWITCH_API_BASE = "https://api.twitch.tv/helix"
+
+# Erforderliche Scopes für Raid-Funktionalität + Zusatz-Metriken (Follower/Chat)
+# Hinweis: Re-Auth notwendig, falls bisher nur channel:manage:raids erteilt war.
+RAID_SCOPES = [
+    "channel:manage:raids",
+    "moderator:read:followers",
+    "moderator:manage:banned_users",
+    "moderator:manage:chat_messages",
+    "channel:read:subscriptions",
+    "analytics:read:games",
+    "channel:manage:moderators",
+    "channel:bot",
+    "chat:read",
+    "chat:edit",
+    "clips:edit",
+    "channel:read:ads",
+    "bits:read",
+    "channel:read:hype_train",
+    "moderator:read:chatters",
+    "moderator:manage:shoutouts",
+    "channel:read:redemptions",
+]
+
+RAID_TARGET_COOLDOWN_DAYS = 7  # Avoid repeating the same raid target if alternatives exist
+RECRUIT_DISCORD_INVITE = (
+    os.getenv("RECRUIT_DISCORD_INVITE") or ""
+).strip() or "Discord: Server hinzufügen & Code eingeben: z5TfVHuQq2"
+RECRUIT_DISCORD_INVITE_DIRECT = (
+    os.getenv("RECRUIT_DISCORD_INVITE_DIRECT") or ""
+).strip() or "https://discord.gg/z5TfVHuQq2"
+
+_recruit_direct_invite_threshold_raw = (
+    os.getenv("RECRUIT_DIRECT_INVITE_MAX_FOLLOWERS") or "120"
+).strip()
+try:
+    RECRUIT_DIRECT_INVITE_MAX_FOLLOWERS = max(0, int(_recruit_direct_invite_threshold_raw))
+except ValueError:
+    RECRUIT_DIRECT_INVITE_MAX_FOLLOWERS = 120
+
+
+def _parse_env_int(name: str, default: int = 0) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+STREAMER_ROLE_ID = _parse_env_int("STREAMER_ROLE_ID", 1313624729466441769)
+STREAMER_GUILD_ID = _parse_env_int("STREAMER_GUILD_ID", 0)
+FALLBACK_MAIN_GUILD_ID = _parse_env_int("MAIN_GUILD_ID", 0)
+
+log = logging.getLogger("TwitchStreams.RaidManager")
+
+
+def _mask_log_identifier(value: object, *, visible_prefix: int = 3, visible_suffix: int = 2) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "<empty>"
+    if len(text) <= visible_prefix + visible_suffix:
+        return "***"
+    return f"{text[:visible_prefix]}...{text[-visible_suffix:]}"
+
+
+from .auth import RaidAuthManager  # noqa: E402
+from .executor import RaidExecutor  # noqa: E402
+
+
+class RaidBot:
+    """
+    Hauptklasse für automatische Raid-Verwaltung.
+
+    - Erkennt, wenn ein Partner offline geht
+    - Wählt Partner nach niedrigsten Viewern (Tie-Breaker: Follower, dann Stream-Zeit)
+    - Führt den Raid aus und loggt Metadaten (gesendete + empfangene Raids)
+    """
+
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str,
+        redirect_uri: str,
+        session: aiohttp.ClientSession,
+    ):
+        self.auth_manager = RaidAuthManager(client_id, client_secret, redirect_uri)
+        self.raid_executor = RaidExecutor(client_id, self.auth_manager)
+        self._session = session
+        self.chat_bot = None  # Wird später gesetzt
+        self._bot_id = None  # Wird bei set_chat_bot gesetzt als Fallback
+        self._cog = None  # Referenz zum TwitchStreamCog für EventSub subscriptions
+
+        # Pending Raids: {to_broadcaster_id: (from_login, target_stream_data, registered_ts, is_partner_raid, viewer_count, offline_trigger_ts)}
+        self._pending_raids: dict[str, tuple[str, dict | None, float, bool, int, float | None]] = {}
+        # Unterdrückt den nächsten Offline-Auto-Raid, wenn kurz zuvor ein manueller/externer Raid erkannt wurde.
+        self._manual_raid_suppression: dict[str, float] = {}
+
+        # Cleanup-Task starten
+        self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
+
+    @property
+    def session(self) -> aiohttp.ClientSession | None:
+        """Return an active HTTP session; refresh from cog/api if the cached one is closed."""
+        if self._session is not None and not self._session.closed:
+            return self._session
+
+        cog = getattr(self, "_cog", None)
+        api = getattr(cog, "api", None) if cog is not None else None
+        if api is not None:
+            try:
+                refreshed = api.get_http_session()
+                if refreshed is not None and not refreshed.closed:
+                    if self._session is not refreshed:
+                        log.warning(
+                            "RaidBot detected closed HTTP session; switched to fresh TwitchAPI session"
+                        )
+                    self._session = refreshed
+                    return refreshed
+            except Exception:
+                log.debug(
+                    "RaidBot could not refresh HTTP session from TwitchAPI",
+                    exc_info=True,
+                )
+        return None
+
+    @session.setter
+    def session(self, value: aiohttp.ClientSession | None) -> None:
+        self._session = value
+
+    async def cleanup(self):
+        """Stoppt Hintergrund-Tasks."""
+        if self._cleanup_task and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                log.debug("Cleanup task cancelled")
+
+    async def _periodic_cleanup(self):
+        """
+        Periodische Wartung:
+        1. Cleanup abgelaufener Auth-States (alle 30min)
+        2. Proaktiver Refresh von User-Tokens (alle 30min; intern expiry-gebremst)
+        3. Cleanup alter pending raids (alle 2min)
+        """
+        state_cleanup_interval = 1800.0
+        token_refresh_interval = 1800.0
+        blacklist_cleanup_interval = 7 * 1800.0
+        pending_raid_cleanup_interval = 120.0
+        grace_period_check_interval = 3600.0  # stündlich
+
+        last_state_cleanup = 0.0
+        last_token_refresh = 0.0
+        last_blacklist_cleanup = 0.0
+        last_raid_cleanup = 0.0
+        last_grace_period_check = 0.0
+        while True:
+            await asyncio.sleep(60)  # Loop-Tick (Wartungs-Tasks laufen in eigenen Intervallen)
+            try:
+                now = time.time()
+
+                # 1. State Cleanup (alle 30min)
+                if now - last_state_cleanup >= state_cleanup_interval:
+                    self.auth_manager.cleanup_states()
+                    last_state_cleanup = now
+
+                # 2. Token Maintenance (alle 30min; refresh_all_tokens prüft intern Expiry)
+                if now - last_token_refresh >= token_refresh_interval:
+                    active_session = self.session
+                    if active_session is None:
+                        log.warning("Skipping token maintenance: no active HTTP session available")
+                    else:
+                        try:
+                            await self.auth_manager.refresh_all_tokens(active_session)
+                        except RuntimeError as exc:
+                            if "Session is closed" in str(exc):
+                                self.session = None
+                                log.warning(
+                                    "Token maintenance deferred: shared HTTP session closed; retrying next tick"
+                                )
+                            else:
+                                raise
+                        else:
+                            self.auth_manager.clear_legacy_tokens_for_fully_authed()
+                            last_token_refresh = now
+
+                # Token Blacklist Cleanup (alle 3.5h)
+                if now - last_blacklist_cleanup >= blacklist_cleanup_interval:
+                    self.auth_manager.token_error_handler.cleanup_old_entries(days=30)
+                    last_blacklist_cleanup = now
+
+                # Grace-Period Check (stündlich): Erinnerung + Rolle entfernen bei Ablauf
+                if now - last_grace_period_check >= grace_period_check_interval:
+                    await self.auth_manager.token_error_handler.check_grace_periods()
+                    last_grace_period_check = now
+
+                # 3. Pending Raids Cleanup (alle 2min)
+                if now - last_raid_cleanup >= pending_raid_cleanup_interval:
+                    self._cleanup_stale_pending_raids()
+                    self._cleanup_expired_manual_raid_suppressions()
+                    last_raid_cleanup = now
+
+            except Exception:
+                log.exception("Error during periodic raid bot maintenance")
+
+    def set_chat_bot(self, chat_bot):
+        """Setzt den Twitch Chat Bot für Recruitment-Nachrichten."""
+        self.chat_bot = chat_bot
+        # Bot-ID speichern damit complete_setup auch ohne chat_bot funktioniert
+        if chat_bot:
+            bot_id = getattr(chat_bot, "bot_id_safe", None) or getattr(chat_bot, "bot_id", None)
+            if bot_id and str(bot_id).strip():
+                self._bot_id = str(bot_id).strip()
+
+    def set_discord_bot(self, discord_bot):
+        """
+        Setzt die Discord Bot-Instanz für Token-Error-Benachrichtigungen.
+
+        Args:
+            discord_bot: Discord Client/Bot Instanz
+        """
+        self.auth_manager.token_error_handler.discord_bot = discord_bot
+        self.auth_manager._discord_bot = discord_bot
+        log.debug("Discord bot set for token error notifications")
+
+    def set_cog(self, cog):
+        """
+        Setzt die Cog-Referenz für dynamische EventSub subscriptions.
+
+        Args:
+            cog: TwitchStreamCog Instanz
+        """
+        self._cog = cog
+        log.debug("Cog reference set for dynamic EventSub subscriptions")
+
+    def mark_manual_raid_started(self, broadcaster_id: str, ttl_seconds: float = 300.0) -> None:
+        """Unterdrückt den nächsten Offline-Auto-Raid für einen Streamer (z.B. nach !raid/!traid)."""
+        broadcaster_key = str(broadcaster_id or "").strip()
+        if not broadcaster_key:
+            return
+        ttl = max(30.0, float(ttl_seconds or 0.0))
+        self._manual_raid_suppression[broadcaster_key] = time.time() + ttl
+
+    def is_offline_auto_raid_suppressed(self, broadcaster_id: str) -> bool:
+        """True, wenn für den Streamer aktuell eine manuelle-Raid-Sperre aktiv ist."""
+        broadcaster_key = str(broadcaster_id or "").strip()
+        if not broadcaster_key:
+            return False
+        now = time.time()
+        until = self._manual_raid_suppression.get(broadcaster_key)
+        if until is None:
+            return False
+        if now <= until:
+            return True
+        self._manual_raid_suppression.pop(broadcaster_key, None)
+        return False
+
+    def _resolve_streamer_id_by_login(self, broadcaster_login: str) -> str | None:
+        """Best-effort: löst eine Twitch-User-ID aus twitch_streamers über den Login auf."""
+        login_key = str(broadcaster_login or "").strip().lower()
+        if not login_key:
+            return None
+        try:
+            with get_conn() as conn:
+                row = conn.execute(
+                    "SELECT twitch_user_id FROM twitch_streamers WHERE LOWER(twitch_login) = ?",
+                    (login_key,),
+                ).fetchone()
+            if not row:
+                return None
+            resolved = row["twitch_user_id"] if hasattr(row, "keys") else row[0]
+            resolved_key = str(resolved or "").strip()
+            return resolved_key or None
+        except Exception:
+            log.debug(
+                "Konnte broadcaster_id nicht über Login auflösen: %s",
+                login_key,
+                exc_info=True,
+            )
+            return None
+
+    def _cleanup_expired_manual_raid_suppressions(self) -> None:
+        """Entfernt abgelaufene Einträge aus dem Manual-Raid-Suppression-Cache."""
+        now = time.time()
+        expired = [
+            broadcaster_id
+            for broadcaster_id, until in self._manual_raid_suppression.items()
+            if now > float(until or 0.0)
+        ]
+        for broadcaster_id in expired:
+            self._manual_raid_suppression.pop(broadcaster_id, None)
+        if expired:
+            log.debug("Cleaned up %d expired manual raid suppressions", len(expired))
+
+    @staticmethod
+    def _normalize_discord_user_id(raw: str | None) -> str | None:
+        candidate = str(raw or "").strip()
+        if candidate and candidate.isdigit():
+            return candidate
+        return None
+
+    def _iter_role_guild_candidates(
+        self, discord_bot: discord.Client | None
+    ) -> list[discord.Guild]:
+        if discord_bot is None:
+            return []
+
+        candidates: list[discord.Guild] = []
+        seen: set[int] = set()
+        for guild_id in (STREAMER_GUILD_ID, FALLBACK_MAIN_GUILD_ID):
+            if guild_id and guild_id not in seen:
+                seen.add(guild_id)
+                guild = discord_bot.get_guild(guild_id)
+                if guild is not None:
+                    candidates.append(guild)
+
+        if not candidates:
+            candidates.extend(getattr(discord_bot, "guilds", []))
+        return candidates
+
+    async def _resolve_discord_display_name(self, discord_user_id: str | None) -> str | None:
+        normalized_id = self._normalize_discord_user_id(discord_user_id)
+        if not normalized_id:
+            return None
+
+        discord_bot = getattr(self.auth_manager, "_discord_bot", None)
+        if discord_bot is None:
+            return None
+
+        user_id_int = int(normalized_id)
+        user = discord_bot.get_user(user_id_int)
+        if user is None:
+            try:
+                user = await discord_bot.fetch_user(user_id_int)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return None
+
+        if user is None:
+            return None
+        return (
+            str(
+                getattr(user, "global_name", None)
+                or getattr(user, "display_name", None)
+                or getattr(user, "name", None)
+                or ""
+            ).strip()
+            or None
+        )
+
+    async def _apply_streamer_role(
+        self,
+        discord_user_id: str | None,
+        *,
+        should_have_role: bool,
+        reason: str,
+    ) -> None:
+        if STREAMER_ROLE_ID <= 0:
+            return
+
+        normalized_id = self._normalize_discord_user_id(discord_user_id)
+        if not normalized_id:
+            return
+
+        discord_bot = getattr(self.auth_manager, "_discord_bot", None)
+        if discord_bot is None:
+            return
+
+        user_id_int = int(normalized_id)
+        for guild in self._iter_role_guild_candidates(discord_bot):
+            role = guild.get_role(STREAMER_ROLE_ID)
+            if role is None:
+                continue
+
+            member = guild.get_member(user_id_int)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(user_id_int)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    member = None
+
+            if member is None:
+                continue
+
+            try:
+                has_role = role in member.roles
+                if should_have_role and not has_role:
+                    await member.add_roles(role, reason=reason)
+                    log.info(
+                        "Streamer role granted to %s in guild %s",
+                        normalized_id,
+                        guild.id,
+                    )
+                elif (not should_have_role) and has_role:
+                    await member.remove_roles(role, reason=reason)
+                    log.info(
+                        "Streamer role removed from %s in guild %s",
+                        normalized_id,
+                        guild.id,
+                    )
+            except discord.Forbidden:
+                log.warning("Missing permission to sync streamer role in guild %s", guild.id)
+            except discord.HTTPException:
+                log.warning(
+                    "Discord API error while syncing streamer role in guild %s",
+                    guild.id,
+                )
+
+    async def _sync_partner_state_after_auth(
+        self,
+        twitch_user_id: str,
+        twitch_login: str,
+        *,
+        state_discord_user_id: str | None = None,
+    ) -> str | None:
+        provided_discord_id = self._normalize_discord_user_id(state_discord_user_id)
+        existing_discord_id: str | None = None
+        existing_display_name: str | None = None
+
+        with get_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT discord_user_id, discord_display_name
+                FROM twitch_streamers
+                WHERE twitch_user_id = ?
+                   OR lower(twitch_login) = lower(?)
+                LIMIT 1
+                """,
+                (twitch_user_id, twitch_login),
+            ).fetchone()
+            if row:
+                existing_discord_id = self._normalize_discord_user_id(
+                    row[0] if not hasattr(row, "keys") else row["discord_user_id"]
+                )
+                existing_display_name = (
+                    str(
+                        row[1] if not hasattr(row, "keys") else row["discord_display_name"] or ""
+                    ).strip()
+                    or None
+                )
+
+        final_discord_id = provided_discord_id or existing_discord_id
+        final_display_name = existing_display_name or await self._resolve_discord_display_name(
+            final_discord_id
+        )
+
+        is_on_discord_value = 1 if final_discord_id else 0
+        with get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO twitch_streamers
+                    (twitch_login, twitch_user_id, discord_user_id, discord_display_name,
+                     is_on_discord, manual_verified_permanent, manual_verified_until,
+                     manual_verified_at, manual_partner_opt_out, raid_bot_enabled)
+                VALUES (?, ?, ?, ?, ?, 1, NULL, CURRENT_TIMESTAMP, 0, 1)
+                ON CONFLICT (twitch_login) DO NOTHING
+                """,
+                (
+                    twitch_login,
+                    twitch_user_id,
+                    final_discord_id,
+                    final_display_name,
+                    is_on_discord_value,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE twitch_streamers
+                   SET twitch_login = ?,
+                       twitch_user_id = ?,
+                       discord_user_id = ?,
+                       discord_display_name = ?,
+                       is_on_discord = ?,
+                       manual_verified_permanent = 1,
+                       manual_verified_until = NULL,
+                       manual_verified_at = COALESCE(manual_verified_at, CURRENT_TIMESTAMP),
+                       manual_partner_opt_out = 0,
+                       is_monitored_only = 0,
+                       raid_bot_enabled = 1
+                 WHERE twitch_user_id = ?
+                    OR lower(twitch_login) = lower(?)
+                """,
+                (
+                    twitch_login,
+                    twitch_user_id,
+                    final_discord_id,
+                    final_display_name,
+                    is_on_discord_value,
+                    twitch_user_id,
+                    twitch_login,
+                ),
+            )
+            copied = backfill_tracked_stats_from_category(conn, twitch_login)
+            if copied:
+                log.info(
+                    "Backfilled %d category samples into tracked for %s during partner sync",
+                    copied,
+                    twitch_login,
+                )
+            # autocommit – no explicit commit needed
+
+        if final_discord_id:
+            await self._apply_streamer_role(
+                final_discord_id,
+                should_have_role=True,
+                reason="Twitch-Bot erfolgreich autorisiert",
+            )
+        return final_discord_id
+
+    async def complete_setup_for_streamer(
+        self,
+        twitch_user_id: str,
+        twitch_login: str,
+        state_discord_user_id: str | None = None,
+    ):
+        """
+        Führt Aktionen nach erfolgreicher OAuth-Autorisierung aus:
+        1. Bot als Moderator setzen
+        2. Bestätigungsnachricht im Chat senden
+        """
+        log.info("Completing setup for streamer %s (%s)", twitch_login, twitch_user_id)
+
+        try:
+            await self._sync_partner_state_after_auth(
+                twitch_user_id,
+                twitch_login,
+                state_discord_user_id=state_discord_user_id,
+            )
+        except Exception:
+            log.exception(
+                "Failed to sync partner state after auth for %s (%s)",
+                twitch_login,
+                twitch_user_id,
+            )
+
+        # 1. Tokens holen
+        tokens = await self.auth_manager.get_tokens_for_user(twitch_user_id, self.session)
+        if not tokens:
+            log.warning("Could not load OAuth grant for %s to complete setup", twitch_login)
+            return
+
+        access_token, _ = tokens
+        # Bot-ID: aus chat_bot wenn verfügbar, sonst aus gespeichertem _bot_id Fallback
+        bot_id = None
+        if self.chat_bot:
+            bot_id = getattr(self.chat_bot, "bot_id_safe", None)
+            if bot_id is None:
+                bot_id_raw = getattr(self.chat_bot, "bot_id", None)
+                bot_id = str(bot_id_raw).strip() if bot_id_raw and str(bot_id_raw).strip() else None
+        if not bot_id:
+            bot_id = getattr(self, "_bot_id", None)
+        if not bot_id:
+            # Letzte Chance: Bot-ID aus ENV
+            import os
+
+            bot_id = os.getenv("TWITCH_BOT_USER_ID", "").strip() or None
+        if not bot_id:
+            log.warning(
+                "complete_setup: Keine Bot-ID verfügbar für %s (chat_bot=%s). Setze TWITCH_BOT_USER_ID ENV.",
+                twitch_login,
+                "None" if not self.chat_bot else "set",
+            )
+            return
+
+        # 2. Bot als Moderator setzen
+        if bot_id:
+            try:
+                url = f"{TWITCH_API_BASE}/moderation/moderators"
+                params = {
+                    "broadcaster_id": twitch_user_id,
+                    "user_id": bot_id,
+                }
+                headers = {
+                    "Client-ID": self.auth_manager.client_id,
+                    "Authorization": f"Bearer {access_token}",
+                }
+                async with self.session.post(url, headers=headers, params=params) as r:
+                    if r.status in {200, 204}:
+                        log.info(
+                            "Bot (ID: %s) is now moderator in %s's channel (ID: %s)",
+                            bot_id,
+                            twitch_login,
+                            twitch_user_id,
+                        )
+                    elif r.status == 422:
+                        log.info(
+                            "Bot (ID: %s) is already moderator in %s's channel",
+                            bot_id,
+                            twitch_login,
+                        )
+                    else:
+                        txt = await r.text()
+                        if r.status == 400 and "already a mod" in txt.lower():
+                            log.info(
+                                "Bot (ID: %s) is already moderator in %s's channel (HTTP 400 variant)",
+                                bot_id,
+                                twitch_login,
+                            )
+                        else:
+                            log.warning(
+                                "Failed to add bot as moderator in %s: HTTP %s (used broadcaster grant)",
+                                _mask_log_identifier(twitch_login),
+                                r.status,
+                            )
+            except Exception:
+                log.exception("Error adding bot as moderator for %s", twitch_login)
+
+        # 3. Bestätigungsnachricht senden
+        if self.chat_bot:
+            try:
+                # Sicherstellen, dass der Bot im Channel ist
+                await self.chat_bot.join(twitch_login, channel_id=twitch_user_id)
+                await asyncio.sleep(
+                    2
+                )  # Etwas mehr Zeit geben, damit der Mod-Status im Chat "ankommt"
+
+                # Nachricht im Stil des Screenshots
+                message = "Deadlock Chatbot Guard verbunden! 🎮"
+                commands_public = (
+                    "Commands für alle: "
+                    "!ping (Bot-Status) | "
+                    "!clip [beschreibung] (Clip erstellen) | "
+                    "!raid_history (letzte Raids)"
+                )
+                commands_mod = (
+                    "Mod-Commands: "
+                    "!raid / !traid (Raid starten) | "
+                    "!raid_status (Bot-Status) | "
+                    "!uban / !unban (letzten Auto-Ban aufheben) | "
+                    "!silentban / !silentraid (Benachrichtigungen an/aus)"
+                )
+
+                # Sende Nachrichten (EventSub kompatibel via ChatBot Methode)
+                if hasattr(self.chat_bot, "_send_chat_message"):
+                    # Mock Channel-Objekt für die interne Methode
+                    class MockChannel:
+                        def __init__(self, login, uid):
+                            self.name = login
+                            self.id = uid
+
+                    mock_ch = MockChannel(twitch_login, twitch_user_id)
+                    await self.chat_bot._send_chat_message(mock_ch, message)
+                    await asyncio.sleep(1)
+                    await self.chat_bot._send_chat_message(mock_ch, commands_public)
+                    await asyncio.sleep(1)
+                    await self.chat_bot._send_chat_message(mock_ch, commands_mod)
+                elif hasattr(self.chat_bot, "send_message") and bot_id:
+                    await self.chat_bot.send_message(str(twitch_user_id), str(bot_id), message)
+                    await asyncio.sleep(1)
+                    await self.chat_bot.send_message(
+                        str(twitch_user_id), str(bot_id), commands_public
+                    )
+                    await asyncio.sleep(1)
+                    await self.chat_bot.send_message(str(twitch_user_id), str(bot_id), commands_mod)
+
+                log.info("Sent auth success message to %s", twitch_login)
+            except Exception:
+                log.exception("Error sending auth success message to %s", twitch_login)
+
+    def _cleanup_stale_pending_raids(self):
+        """
+        Entfernt pending raids, die älter als 5 Minuten sind (wahrscheinlich fehlgeschlagen).
+        """
+        now = time.time()
+        timeout = 300  # 5 Minuten
+        stale = [
+            to_id
+            for to_id, pending in self._pending_raids.items()
+            if now - (pending[2] if len(pending) > 2 else 0) > timeout
+        ]
+        for to_id in stale:
+            pending = self._pending_raids.pop(to_id)
+            from_login = pending[0] if len(pending) > 0 else "<unknown>"
+            registered_ts = pending[2] if len(pending) > 2 else 0.0
+            offline_ts = pending[5] if len(pending) > 5 else None
+            age = now - registered_ts
+            offline_pending_s = (time.monotonic() - offline_ts) if offline_ts else -1.0
+            log.warning(
+                "Pending raid timed out after %.0fs: %s -> (ID: %s). EventSub event never arrived. offline->pending=%.0fs",
+                age,
+                from_login,
+                to_id,
+                offline_pending_s,
+            )
+
+    async def _register_pending_raid(
+        self,
+        from_broadcaster_login: str,
+        to_broadcaster_id: str,
+        to_broadcaster_login: str,
+        target_stream_data: dict | None = None,
+        is_partner_raid: bool = False,
+        viewer_count: int = 0,
+        offline_trigger_ts: float | None = None,
+    ):
+        """
+        Registriert einen Raid, der auf EventSub Bestätigung wartet.
+
+        Wird aufgerufen nach erfolgreichem API-Call, bevor der Raid tatsächlich beim Ziel ankommt.
+        Erstellt dynamisch eine channel.raid EventSub subscription für das Ziel.
+
+        Args:
+            from_broadcaster_login: Login des Raiding-Streamers
+            to_broadcaster_id: User-ID des Raid-Ziels
+            to_broadcaster_login: Login des Raid-Ziels
+            target_stream_data: Stream-Daten des Ziels (optional)
+            is_partner_raid: True wenn es ein Partner-Raid ist (für Partner-Message)
+            viewer_count: Viewer-Count beim Raid-Start (für Partner-Message)
+        """
+        registered_ts = time.time()
+        self._pending_raids[to_broadcaster_id] = (
+            from_broadcaster_login,
+            target_stream_data,
+            registered_ts,
+            is_partner_raid,
+            viewer_count,
+            offline_trigger_ts,
+        )
+        offline_to_pending_ms = (
+            (time.monotonic() - offline_trigger_ts) * 1000 if offline_trigger_ts else None
+        )
+        log.info(
+            "Pending raid registered: %s -> %s (ID: %s). Creating EventSub subscription... offline->pending=%s",
+            from_broadcaster_login,
+            to_broadcaster_login,
+            to_broadcaster_id,
+            f"{offline_to_pending_ms:.0f}ms" if offline_to_pending_ms is not None else "n/a",
+        )
+
+        # Dynamische EventSub subscription erstellen
+        if self._cog and hasattr(self._cog, "subscribe_raid_target_dynamic"):
+            try:
+                success = await self._cog.subscribe_raid_target_dynamic(
+                    to_broadcaster_id, to_broadcaster_login
+                )
+                if success:
+                    log.info(
+                        "EventSub channel.raid subscription created for %s",
+                        to_broadcaster_login,
+                    )
+                else:
+                    log.warning(
+                        "Failed to create EventSub subscription for %s - raid message may not be sent",
+                        to_broadcaster_login,
+                    )
+            except Exception:
+                log.exception(
+                    "Error creating dynamic EventSub subscription for %s",
+                    to_broadcaster_login,
+                )
+        else:
+            log.warning(
+                "Cog reference not set - cannot create dynamic EventSub subscription for %s",
+                to_broadcaster_login,
+            )
+
+    async def on_raid_arrival(
+        self,
+        to_broadcaster_id: str,
+        to_broadcaster_login: str,
+        from_broadcaster_login: str,
+        viewer_count: int,
+        from_broadcaster_id: str | None = None,
+    ):
+        """
+        Wird aufgerufen, wenn ein channel.raid EventSub Event eintrifft.
+
+        Sendet entweder:
+        - Partner-Message (bei Partner-Raids)
+        - Recruitment-Message (bei Non-Partner-Raids)
+        """
+        pending = self._pending_raids.pop(to_broadcaster_id, None)
+        if not pending:
+            from_broadcaster_key = str(from_broadcaster_id or "").strip()
+            if not from_broadcaster_key:
+                from_broadcaster_key = (
+                    self._resolve_streamer_id_by_login(from_broadcaster_login) or ""
+                )
+            if from_broadcaster_key:
+                self.mark_manual_raid_started(from_broadcaster_key, ttl_seconds=180.0)
+                log.info(
+                    "External/manual raid detected via EventSub: %s -> %s. "
+                    "Suppressing next offline auto-raid for broadcaster_id=%s (ttl=180s/3min)",
+                    from_broadcaster_login,
+                    to_broadcaster_login,
+                    from_broadcaster_key,
+                )
+            log.debug(
+                "Raid arrival ignored (not pending): %s -> %s",
+                from_broadcaster_login,
+                to_broadcaster_login,
+            )
+            return
+
+        expected_from = pending[0] if len(pending) > 0 else from_broadcaster_login
+        target_stream_data = pending[1] if len(pending) > 1 else None
+        registered_ts = pending[2] if len(pending) > 2 else time.time()
+        is_partner_raid = pending[3] if len(pending) > 3 else False
+        registered_viewer_count = pending[4] if len(pending) > 4 else viewer_count
+        offline_trigger_ts = pending[5] if len(pending) > 5 else None
+
+        # Verify it's the same raid we started
+        if expected_from.lower() != from_broadcaster_login.lower():
+            log.warning(
+                "Raid arrival mismatch: expected from %s, got from %s",
+                expected_from,
+                from_broadcaster_login,
+            )
+            return
+
+        log.info(
+            "✅ Raid arrival confirmed: %s -> %s (%d viewers, partner_raid=%s, api->arrival=%.0fs, offline->arrival=%.0fs)",
+            from_broadcaster_login,
+            to_broadcaster_login,
+            viewer_count,
+            is_partner_raid,
+            time.time() - registered_ts,
+            (time.monotonic() - offline_trigger_ts) if offline_trigger_ts else -1.0,
+        )
+
+        # silent_raid Check: Streamer kann Raid-Nachrichten im Chat unterdrücken
+        silent_raid = False
+        try:
+            with get_conn() as conn:
+                _sr_row = conn.execute(
+                    "SELECT silent_raid FROM twitch_streamers WHERE LOWER(twitch_login) = ?",
+                    (to_broadcaster_login.lower(),),
+                ).fetchone()
+                silent_raid = bool(int((_sr_row[0] if _sr_row else 0) or 0))
+        except Exception:
+            log.debug(
+                "Raid arrival: silent_raid lookup failed for %s",
+                to_broadcaster_login,
+                exc_info=True,
+            )
+
+        if silent_raid:
+            log.info(
+                "Raid message suppressed (silent_raid): %s -> %s",
+                from_broadcaster_login,
+                to_broadcaster_login,
+            )
+            return
+
+        # Partner-Raid: Sende Partner-Message
+        if is_partner_raid:
+            await self._send_partner_raid_message(
+                from_broadcaster_login=from_broadcaster_login,
+                to_broadcaster_login=to_broadcaster_login,
+                to_broadcaster_id=to_broadcaster_id,
+                viewer_count=viewer_count,
+            )
+        # Non-Partner-Raid: Sende Recruitment-Message
+        else:
+            await self._send_recruitment_message_now(
+                from_broadcaster_login=from_broadcaster_login,
+                to_broadcaster_login=to_broadcaster_login,
+                target_stream_data=target_stream_data,
+            )
+
+    async def _send_partner_raid_message(
+        self,
+        from_broadcaster_login: str,
+        to_broadcaster_login: str,
+        to_broadcaster_id: str,
+        viewer_count: int,
+    ):
+        """
+        Sendet eine Bestätigungs-Nachricht im Chat des geraideten Partners.
+
+        Diese Nachricht zeigt dem Partner-Streamer, dass der Raid durch
+        das Deadlock Streamer-Netzwerk kam, um den Mehrwert zu verdeutlichen.
+
+        Wird aufgerufen NACH dem EventSub channel.raid Event, d.h. der Raid
+        ist bereits beim Ziel angekommen.
+        """
+        if not self.chat_bot:
+            log.debug("Chat bot not available for partner raid message")
+            return
+
+        try:
+            # Erfolgreiche Netzwerk-Raids für dieses Ziel zählen (inkl. aktuellem Raid)
+            received_raid_count = self._get_received_network_raid_count(to_broadcaster_id)
+            if received_raid_count <= 0:
+                received_raid_count = 1
+
+            viewer_word = "Viewer" if viewer_count == 1 else "Viewern"
+
+            # 1. Channel beitreten (falls noch nicht joined)
+            await self.chat_bot.join(to_broadcaster_login, channel_id=to_broadcaster_id)
+
+            # 2. Kurze Verzögerung, damit der Bot bereit ist und der Raid-Alert durch ist
+            await asyncio.sleep(5.0)
+
+            # 3. Nachricht vorbereiten
+            message = (
+                f"Hey @{to_broadcaster_login}! 🎮 "
+                f"@{from_broadcaster_login} hat dich gerade mit {viewer_count} {viewer_word} geraidet. "
+                f"Das ist dein Raid Nr. {received_raid_count} aus dem Deadlock Streamer-Netzwerk. ❤️"
+            )
+
+            # 4. Nachricht senden
+            if hasattr(self.chat_bot, "_send_chat_message"):
+
+                class MockChannel:
+                    def __init__(self, login, uid):
+                        self.name = login
+                        self.id = uid
+
+                success = await self.chat_bot._send_chat_message(
+                    MockChannel(to_broadcaster_login, to_broadcaster_id),
+                    message,
+                    source="partner_raid",
+                )
+
+                if success:
+                    log.info(
+                        "✅ Sent partner raid message to %s (raided by %s with %d viewers, network_raid_no=%d)",
+                        to_broadcaster_login,
+                        from_broadcaster_login,
+                        viewer_count,
+                        received_raid_count,
+                    )
+                else:
+                    log.warning(
+                        "Failed to send partner raid message to %s",
+                        to_broadcaster_login,
+                    )
+            else:
+                log.debug(
+                    "Chat bot does not have _send_chat_message method, skipping partner raid message to %s",
+                    to_broadcaster_login,
+                )
+        except Exception:
+            log.exception(
+                "Failed to send partner raid message to %s (raided by %s)",
+                to_broadcaster_login,
+                from_broadcaster_login,
+            )
+
+    def _get_received_network_raid_count(self, to_broadcaster_id: str) -> int:
+        """
+        Anzahl erfolgreicher, vom Raid-Bot geloggter Raids auf dieses Ziel.
+
+        Die History enthält nur Raids, die von unseren Streamern über den Bot
+        ausgeführt wurden; damit entspricht der Wert den erhaltenen Netzwerk-Raids.
+        """
+        target_id = str(to_broadcaster_id or "").strip()
+        if not target_id:
+            return 0
+
+        try:
+            with get_conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM twitch_raid_history
+                    WHERE to_broadcaster_id = ?
+                      AND COALESCE(success, FALSE) IS TRUE
+                    """,
+                    (target_id,),
+                ).fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        except Exception:
+            log.debug(
+                "Could not count received network raids for %s",
+                target_id,
+                exc_info=True,
+            )
+            return 0
+
+    @staticmethod
+    def _parse_nonnegative_int(value: object) -> int | None:
+        try:
+            if value is None:
+                return None
+            parsed = int(value)
+            return parsed if parsed >= 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    async def _resolve_recruitment_followers_total(
+        self,
+        *,
+        login: str,
+        target_id: str | None,
+        target_stream_data: dict | None,
+    ) -> int | None:
+        cached_total = self._parse_nonnegative_int(
+            (target_stream_data or {}).get("followers_total")
+        )
+        if cached_total is not None:
+            return cached_total
+
+        resolved_target_id = str(target_id or "").strip()
+        if not resolved_target_id or not self.session:
+            return None
+
+        try:
+            from ..api.twitch_api import TwitchAPI
+        except Exception:
+            return None
+
+        user_token: str | None = None
+        try:
+            user_token = await self.auth_manager.get_valid_token(resolved_target_id, self.session)
+        except Exception:
+            user_token = None
+
+        try:
+            api = TwitchAPI(
+                self.auth_manager.client_id,
+                self.auth_manager.client_secret,
+                session=self.session,
+            )
+            followers_total = await api.get_followers_total(
+                resolved_target_id, user_token=user_token
+            )
+        except Exception:
+            log.debug("Follower-Check fehlgeschlagen fuer %s", login, exc_info=True)
+            return None
+
+        parsed_total = self._parse_nonnegative_int(followers_total)
+        if parsed_total is not None and isinstance(target_stream_data, dict):
+            target_stream_data["followers_total"] = parsed_total
+        return parsed_total
+
+    async def _send_recruitment_message_now(
+        self,
+        from_broadcaster_login: str,
+        to_broadcaster_login: str,
+        target_stream_data: dict | None = None,
+    ):
+        """
+        Sendet eine Einladungs-Nachricht im Chat des geraideten Nicht-Partners.
+
+        Diese Nachricht wird nur gesendet, wenn ein deutscher Deadlock-Streamer
+        (kein Partner) geraidet wird, um ihn zur Community einzuladen.
+
+        Zeigt dem Streamer minimale Stats als Teaser (Avg Viewer, Peak).
+        """
+        if not self.chat_bot:
+            log.debug("Chat bot not available for recruitment message")
+            return
+
+        # 1. Sofort beitreten, damit wir bereit sind
+        try:
+            target_id = None
+            if target_stream_data:
+                target_id = target_stream_data.get("user_id")
+
+            if not target_id:
+                # Fallback: ID über Login-Namen auflösen
+                users = await self.chat_bot.fetch_users(logins=[to_broadcaster_login])
+                if users:
+                    target_id = str(users[0].id)
+
+            if not target_id:
+                log.warning(
+                    "Could not resolve user ID for recruitment message to %s",
+                    to_broadcaster_login,
+                )
+                return
+
+            await self.chat_bot.join(to_broadcaster_login, channel_id=target_id)
+        except Exception:
+            log.debug("Konnte Channel %s nicht vorab beitreten", to_broadcaster_login)
+
+        # Follow-Status prüfen (Auto-Follow per API ist bei Twitch nicht mehr möglich).
+        if target_id and hasattr(self.chat_bot, "follow_channel"):
+            await self.chat_bot.follow_channel(target_id)
+
+        # 2. 15 Sekunden warten, damit der Streamer den Raid-Alert verarbeiten kann
+        log.info(
+            "Warte 15s vor Senden der Recruitment-Message an %s...",
+            to_broadcaster_login,
+        )
+        await asyncio.sleep(15.0)
+
+        try:
+            # 2. Anti-Spam Check: Haben wir diesen Streamer schon "kürzlich" geraidet?
+            # Wir prüfen, ob es mehr als 1 erfolgreichen Raid in den letzten 24 Stunden gab.
+            with get_conn() as conn:
+                raid_check = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM twitch_raid_history
+                    WHERE to_broadcaster_id = ?
+                      AND COALESCE(success, FALSE) IS TRUE
+                      AND executed_at > datetime('now', '-1 day')
+                    """,
+                    (target_id,),
+                ).fetchone()
+                recent_raids = raid_check[0] if raid_check else 0
+
+            if recent_raids > 2:
+                log.info(
+                    "Skipping recruitment message to %s (Anti-Spam: %d raids in last 24 hours)",
+                    to_broadcaster_login,
+                    recent_raids,
+                )
+                return
+
+            # 3. Bestimme die Anzahl der bisherigen Netzwerk-Raids für diesen Streamer
+            total_raids = self._get_received_network_raid_count(target_id)
+
+            # 4. Nachricht vorbereiten (mit Stats Teaser)
+            followers_total = await self._resolve_recruitment_followers_total(
+                login=to_broadcaster_login,
+                target_id=target_id,
+                target_stream_data=target_stream_data,
+            )
+            use_direct_invite = (
+                followers_total is not None
+                and followers_total <= RECRUIT_DIRECT_INVITE_MAX_FOLLOWERS
+            )
+            discord_invite = (
+                RECRUIT_DISCORD_INVITE_DIRECT if use_direct_invite else RECRUIT_DISCORD_INVITE
+            )
+
+            stats_teaser = ""
+            try:
+                with get_conn() as conn:
+                    stats = conn.execute(
+                        """
+                        SELECT
+                            ROUND(AVG(viewer_count)) as avg_viewers,
+                            MAX(viewer_count) as peak_viewers
+                        FROM twitch_stats_category
+                        WHERE streamer = ?
+                          AND viewer_count > 0
+                        """,
+                        (to_broadcaster_login.lower(),),
+                    ).fetchone()
+
+                if stats and stats[0]:
+                    avg_viewers = int(stats[0])
+                    peak_viewers = int(stats[1]) if stats[1] else 0
+                    if peak_viewers > 0:
+                        stats_teaser = f"Übrigens: Du hattest im Schnitt {avg_viewers} Viewer bei Deadlock, dein Peak war {peak_viewers}. "
+            except Exception:
+                log.debug("Could not fetch stats for %s", to_broadcaster_login, exc_info=True)
+
+            # Nachrichtenauswahl basierend auf Raid-Anzahl
+            if total_raids <= 1:
+                message = (
+                    f"Hey @{to_broadcaster_login}! Ich bin der Bot der deutschen Deadlock Community . "
+                    f"Ich manage hier die Raids bei Twitch Deadlock.. "
+                    f"Du wurdest gerade von @{from_broadcaster_login} geraidet, einem unserer Partner! <3 "
+                    f"Falls du bock hast kannst auch Teil der Community werden und Support erhalten – "
+                    f"schau gerne mal auf unserem Discord vorbei: {discord_invite} "
+                    f"Dir noch einen wunderschönen Stream <3"
+                )
+            elif total_raids == 2:
+                message = (
+                    f"Hey @{to_broadcaster_login}! Na, schon der 2. Raid von uns! ❤️ "
+                    f"@{from_broadcaster_login} bringt dir gerade Verstärkung aus dem Netzwerk vorbei. "
+                    f"{stats_teaser}"
+                    f"Unser Partner-Netzwerk wächst ständig und wir würden freuen uns über ein neues Gesicht freuen :). "
+                    f"Schau mal rein: {discord_invite} 🎮"
+                )
+            elif total_raids == 3:
+                message = (
+                    f"Hey @{to_broadcaster_login}! Aller guten Dinge sind 3! Das ist schon der 3. Raid aus der Community für dich. ❤️ "
+                    f"Hast du schon über eine Partnerschaft nachgedacht? Gemeinsam wachsen wir viel schneller! "
+                    f"Join uns: {discord_invite} 🎮"
+                )
+            else:  # 4. Raid und mehr
+                message = (
+                    f"Hey @{to_broadcaster_login}! So langsam wird es Zeit für eine Partnerschaft, oder? 😉 "
+                    f"Das ist schon der {total_raids}. Raid von uns (diesmal von @{from_broadcaster_login})! "
+                    f"{stats_teaser}"
+                    f"Komm in unser Netzwerk und profitiere von gegenseitigen Raids, Zugang zu der größten deutschen Deadlock Community und viel mehr. Schau doch gerne mal vorbei: {discord_invite} 🎮"
+                )
+
+            # 5. Sende Nachricht via Bot
+            # TwitchIO 3.x: Nutze _send_chat_message helper (MockChannel)
+            # Diese Methode existiert im chat_bot und funktioniert mit EventSub
+            try:
+                if hasattr(self.chat_bot, "_send_chat_message"):
+                    # Mock Channel-Objekt für die interne Methode
+                    class MockChannel:
+                        def __init__(self, login, uid):
+                            self.name = login
+                            self.id = uid
+
+                    success = await self.chat_bot._send_chat_message(
+                        MockChannel(to_broadcaster_login, target_id),
+                        message,
+                        source="recruitment",
+                    )
+
+                    if success:
+                        log.info(
+                            "Sent recruitment message in %s's chat (raided by %s)",
+                            to_broadcaster_login,
+                            from_broadcaster_login,
+                        )
+                    else:
+                        log.warning(
+                            "Failed to send recruitment message to %s (returned False)",
+                            to_broadcaster_login,
+                        )
+                else:
+                    log.debug(
+                        "Chat bot does not have _send_chat_message method, skipping recruitment message to %s",
+                        to_broadcaster_login,
+                    )
+            except Exception:
+                log.exception(
+                    "Failed to send recruitment message to %s (raided by %s)",
+                    to_broadcaster_login,
+                    from_broadcaster_login,
+                )
+
+        except Exception:
+            log.exception(
+                "Failed to send recruitment message to %s (raided by %s)",
+                to_broadcaster_login,
+                from_broadcaster_login,
+            )
+
+    def _get_recent_raid_targets(self, from_broadcaster_id: str, days: int) -> set[str]:
+        if not from_broadcaster_id or days <= 0:
+            return set()
+        cutoff = f"-{int(days)} days"
+        try:
+            with get_conn() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT to_broadcaster_id
+                    FROM twitch_raid_history
+                    WHERE from_broadcaster_id = ?
+                      AND COALESCE(success, FALSE) IS TRUE
+                      AND executed_at >= datetime('now', ?)
+                    """,
+                    (from_broadcaster_id, cutoff),
+                ).fetchall()
+            return {str(row[0]) for row in rows if row and row[0]}
+        except Exception:
+            log.debug(
+                "Failed to load recent raid targets for %s",
+                from_broadcaster_id,
+                exc_info=True,
+            )
+            return set()
+
+    async def _attach_followers_totals(self, candidates: list[dict]) -> None:
+        if not candidates or not self.session:
+            return
+        try:
+            from ..api.twitch_api import TwitchAPI
+        except Exception:
+            return
+
+        # 1. Candidates that still need a follower count
+        needs_total = [
+            c for c in candidates if c.get("followers_total") is None
+        ]
+        if not needs_total:
+            return
+
+        # 2. Bulk-query PG stream_sessions cache for known logins
+        logins_needed = [
+            (c.get("user_login") or "").lower() for c in needs_total
+            if (c.get("user_login") or "").strip()
+        ]
+        if logins_needed:
+            try:
+                _ph = ",".join("?" * len(logins_needed))
+                with get_conn() as conn:
+                    _db_rows = conn.execute(
+                        f"""
+                        SELECT streamer_login, COALESCE(followers_end, followers_start) AS follower_total
+                          FROM twitch_stream_sessions
+                         WHERE streamer_login IN ({_ph})
+                           AND COALESCE(followers_end, followers_start) IS NOT NULL
+                         ORDER BY COALESCE(ended_at, started_at) DESC
+                        """,
+                        logins_needed,
+                    ).fetchall()
+                # Keep only most recent hit per login
+                _db_map: dict[str, int] = {}
+                for _r in _db_rows:
+                    _login = str(_r[0]).lower()
+                    if _login not in _db_map and _r[1] is not None:
+                        _db_map[_login] = int(_r[1])
+                # Write DB values into candidates
+                for c in needs_total:
+                    _clogin = (c.get("user_login") or "").lower()
+                    if _clogin in _db_map:
+                        c["followers_total"] = _db_map[_clogin]
+            except Exception:
+                log.debug("followers_totals: DB cache query failed", exc_info=True)
+
+        # 3. Parallel API fallback for remaining candidates (no DB hit)
+        api_needed = [
+            c for c in needs_total if c.get("followers_total") is None
+            and str(c.get("user_id") or "").strip()
+        ]
+        if not api_needed:
+            return
+
+        api = TwitchAPI(
+            self.auth_manager.client_id,
+            self.auth_manager.client_secret,
+            session=self.session,
+        )
+
+        async def _fetch_one(candidate: dict) -> None:
+            user_id = str(candidate.get("user_id") or "").strip()
+            try:
+                token = await self.auth_manager.get_valid_token(user_id, self.session)
+            except Exception:
+                return
+            if not token:
+                return
+            try:
+                followers = await api.get_followers_total(user_id, user_token=token)
+            except Exception:
+                return
+            if followers is not None:
+                candidate["followers_total"] = int(followers)
+
+        await asyncio.gather(*(_fetch_one(c) for c in api_needed), return_exceptions=True)
+
+    async def _select_fairest_candidate(
+        self, candidates: list[dict], from_broadcaster_id: str
+    ) -> dict | None:
+        """
+        Wählt den Raid-Kandidaten mit den wenigsten Viewern.
+        Bei Gleichstand: Wenigste Follower (wenn verfügbar), danach kürzeste Stream-Zeit.
+        Ziele der letzten Tage werden vermieden, sofern Alternativen existieren.
+        """
+        if not candidates:
+            return None
+
+        recent_targets = self._get_recent_raid_targets(
+            from_broadcaster_id, RAID_TARGET_COOLDOWN_DAYS
+        )
+        if recent_targets:
+            filtered = [c for c in candidates if str(c.get("user_id") or "") not in recent_targets]
+        else:
+            filtered = []
+
+        pool = filtered or candidates
+
+        await self._attach_followers_totals(pool)
+
+        def _safe_int(value: object, default: int) -> int:
+            try:
+                if value is None:
+                    return default
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _sort_key(candidate: dict) -> tuple[int, int, str]:
+            viewers = _safe_int(candidate.get("viewer_count"), 10**9)
+            followers = _safe_int(candidate.get("followers_total"), 10**9)
+            started_at = candidate.get("started_at") or "9999-99-99"
+            return (viewers, followers, started_at)
+
+        pool.sort(key=_sort_key)
+
+        selected = pool[0]
+        log.info(
+            "Raid target selection (min viewers): %s (viewers=%s, followers=%s, recent_filtered=%d) from %d candidates",
+            selected.get("user_login"),
+            selected.get("viewer_count"),
+            selected.get("followers_total"),
+            max(0, len(candidates) - len(pool)),
+            len(candidates),
+        )
+
+        return selected
+
+    def _is_blacklisted(self, target_id: str, target_login: str) -> bool:
+        """Prüft, ob ein Ziel auf der Blacklist steht."""
+        try:
+            with get_conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT 1 FROM twitch_raid_blacklist
+                    WHERE (target_id IS NOT NULL AND target_id = ?)
+                       OR lower(target_login) = lower(?)
+                    """,
+                    (target_id, target_login),
+                ).fetchone()
+                return bool(row)
+        except Exception:
+            log.error("Error checking blacklist", exc_info=True)
+            return False
+
+    def _add_to_blacklist(self, target_id: str, target_login: str, reason: str):
+        """Fügt ein Ziel zur Blacklist hinzu."""
+        try:
+            with get_conn() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO twitch_raid_blacklist (target_id, target_login, reason)
+                    VALUES (?, ?, ?)
+                    """,
+                    (target_id, target_login, reason),
+                )
+                # autocommit – no explicit commit needed
+            log.info(
+                "Added %s (ID: %s) to raid blacklist. Reason: %s",
+                target_login,
+                target_id,
+                reason,
+            )
+        except Exception:
+            log.error("Error adding to blacklist", exc_info=True)
+
+    def _is_retryable_raid_error(self, error: str | None) -> bool:
+        """Return True for raid target errors where we should try another target."""
+        if not error:
+            return False
+        msg = error.lower()
+        retryable_markers = (
+            "cannot be raided",
+            "does not allow you to raid",
+            "do not allow you to raid",
+            "not allow you to raid",
+            "settings do not allow you to raid",
+            "not accepting raids",
+            "does not allow raids",
+            "raids are disabled",
+        )
+        return any(marker in msg for marker in retryable_markers)
+
+    async def handle_streamer_offline(
+        self,
+        broadcaster_id: str,
+        broadcaster_login: str,
+        viewer_count: int,
+        stream_duration_sec: int,
+        online_partners: list[dict],
+        api=None,
+        category_id: str | None = None,
+        offline_trigger_ts: float | None = None,
+    ) -> str | None:
+        """
+        Wird aufgerufen, wenn ein Streamer offline geht.
+        Versucht automatisch zu raiden, falls möglich.
+
+        Features:
+        - Auto-Retry bei Fehlern (z.B. Ziel hat Raids deaktiviert)
+        - Blacklist-Management für nicht raidbare Kanäle
+        """
+        flow_start_ts = offline_trigger_ts if offline_trigger_ts is not None else time.monotonic()
+        offline_trigger_ts = flow_start_ts
+
+        # Prüfen, ob Auto-Raid durch manuellen Raid unterdrückt ist
+        if self.is_offline_auto_raid_suppressed(broadcaster_id):
+            log.info(
+                "Auto-raid suppressed for %s (manual raid detected recently)",
+                broadcaster_login,
+            )
+            return None
+
+        # Prüfen, ob Streamer Auto-Raid aktiviert hat
+        with get_conn() as conn:
+            _s_row = conn.execute(
+                "SELECT raid_bot_enabled FROM twitch_streamers WHERE twitch_user_id = ?",
+                (broadcaster_id,),
+            ).fetchone()
+        with get_conn() as conn:
+            _a_row = conn.execute(
+                "SELECT raid_enabled FROM twitch_raid_auth WHERE twitch_user_id = ?",
+                (broadcaster_id,),
+            ).fetchone()
+        row = (
+            (_s_row[0] if _s_row else None),
+            (_a_row[0] if _a_row else None),
+        ) if (_s_row is not None or _a_row is not None) else None
+
+        if not row:
+            log.debug("Streamer %s not found in DB", broadcaster_login)
+            return None
+
+        raid_bot_enabled, raid_auth_enabled = row
+        if not raid_bot_enabled:
+            log.debug("Raid bot disabled for %s (setting)", broadcaster_login)
+            return None
+        if not raid_auth_enabled:
+            log.debug("Raid bot disabled for %s (no auth)", broadcaster_login)
+            return None
+
+        log.info(
+            "Auto-raid pipeline started for %s (id=%s): viewers=%d, stream_duration=%ds, online_partners=%d",
+            broadcaster_login,
+            broadcaster_id,
+            viewer_count,
+            stream_duration_sec,
+            len(online_partners),
+        )
+
+        # Retry-Loop Setup
+        max_attempts = 3
+        exclude_ids = {broadcaster_id}
+        cached_de_streams = None  # Cache für Fallback-Streams um API zu schonen
+
+        # Blacklist einmalig bulk-laden für den gesamten Retry-Loop
+        blacklisted_ids: set[str] = set()
+        blacklisted_logins: set[str] = set()
+        try:
+            with get_conn() as conn:
+                for _bl_row in conn.execute(
+                    "SELECT target_id, lower(target_login) FROM twitch_raid_blacklist"
+                ).fetchall():
+                    if _bl_row[0]:
+                        blacklisted_ids.add(str(_bl_row[0]))
+                    blacklisted_logins.add(str(_bl_row[1]))
+        except Exception:
+            log.error("Error loading blacklist", exc_info=True)
+
+        for attempt in range(max_attempts):
+            attempt_start_ts = time.monotonic()
+            target = None
+            is_partner_raid = False
+            candidates_count = 0
+
+            # 1. Partner-Kandidaten filtern
+            # Wir prüfen Blacklist und bereits versuchte IDs
+            partner_candidates = [
+                s
+                for s in online_partners
+                if s.get("user_id") not in exclude_ids
+                and bool(s.get("raid_enabled", True))
+                and str(s.get("user_id") or "") not in blacklisted_ids
+                and (s.get("user_login") or "").lower() not in blacklisted_logins
+            ]
+
+            if partner_candidates:
+                # Partner vorhanden -> Auswahl nach niedrigsten Viewern
+                is_partner_raid = True
+                target = await self._select_fairest_candidate(partner_candidates, broadcaster_id)
+                candidates_count = len(partner_candidates)
+
+            # 2. Fallback (Deadlock-DE), falls kein Partner gefunden
+            if not target and api and category_id:
+                if cached_de_streams is None:
+                    try:
+                        log.info(
+                            "No partners online for %s, fetching Deadlock-DE fallback",
+                            broadcaster_login,
+                        )
+                        cached_de_streams = await api.get_streams_by_category(
+                            category_id, language="de", limit=50
+                        )
+                    except Exception:
+                        log.exception("Failed to get Deadlock-DE streams for fallback raid")
+                        cached_de_streams = []
+
+                # Fallback-Kandidaten filtern
+                fallback_candidates = [
+                    s
+                    for s in cached_de_streams
+                    if s.get("user_id") not in exclude_ids
+                    and str(s.get("user_id") or "") not in blacklisted_ids
+                    and (s.get("user_login") or "").lower() not in blacklisted_logins
+                ]
+
+                if fallback_candidates:
+                    target = await self._select_fairest_candidate(
+                        fallback_candidates, broadcaster_id
+                    )
+                    candidates_count = len(fallback_candidates)
+
+            if not target:
+                log.info(
+                    "No valid raid target found for %s (Attempt %d/%d, total_since_offline=%.0fms)",
+                    broadcaster_login,
+                    attempt + 1,
+                    max_attempts,
+                    (time.monotonic() - flow_start_ts) * 1000.0,
+                )
+                return None
+
+            # 3. Raid ausführen
+                target_id = target["user_id"]
+                target_login = target["user_login"]
+                target_started_at = target.get("started_at", "")
+
+                selection_ms = (time.monotonic() - attempt_start_ts) * 1000.0
+                log.info(
+                    "Executing raid attempt %d/%d: %s -> %s (selection %.0fms, candidates=%d)",
+                    attempt + 1,
+                    max_attempts,
+                    broadcaster_login,
+                    target_login,
+                    selection_ms,
+                    candidates_count,
+                )
+
+                api_call_start = time.monotonic()
+                success, error = await self.raid_executor.start_raid(
+                    from_broadcaster_id=broadcaster_id,
+                    from_broadcaster_login=broadcaster_login,
+                    to_broadcaster_id=target_id,
+                    to_broadcaster_login=target_login,
+                    viewer_count=viewer_count,
+                stream_duration_sec=stream_duration_sec,
+                target_stream_started_at=target_started_at,
+                    candidates_count=candidates_count,
+                    session=self.session,
+                    reason="auto_raid_on_offline",
+                )
+                api_call_ms = (time.monotonic() - api_call_start) * 1000.0
+                total_ms = (time.monotonic() - flow_start_ts) * 1000.0
+
+                if success:
+                    # Pending Raid registrieren (Nachricht wird erst nach EventSub gesendet)
+                    # Funktioniert für Partner-Raids UND Non-Partner-Raids
+                    await self._register_pending_raid(
+                        from_broadcaster_login=broadcaster_login,
+                        to_broadcaster_id=target_id,
+                        to_broadcaster_login=target_login,
+                        target_stream_data=target,
+                        is_partner_raid=is_partner_raid,
+                        viewer_count=viewer_count,
+                        offline_trigger_ts=offline_trigger_ts,
+                    )
+                    log.info(
+                        "Raid attempt %d/%d succeeded (%s -> %s) api=%.0fms, total_since_offline=%.0fms",
+                        attempt + 1,
+                        max_attempts,
+                        broadcaster_login,
+                        target_login,
+                        api_call_ms,
+                        total_ms,
+                    )
+                    return target_login
+
+                # Fehler-Behandlung
+                exclude_ids.add(target_id)  # Diesen Kandidaten nicht nochmal versuchen
+
+            # Check auf "Cannot be raided"/Raid-Settings (HTTP 400)
+            if self._is_retryable_raid_error(error):
+                if is_partner_raid:
+                    log.warning(
+                        "Raid failed: Partner target %s does not allow raids. Skipping without blacklist.",
+                        target_login,
+                    )
+                else:
+                    log.warning(
+                        "Raid failed: Target %s does not allow raids. Blacklisting and retrying.",
+                        target_login,
+                    )
+                    self._add_to_blacklist(target_id, target_login, error)
+                continue  # Nächster Versuch
+
+            # Bei anderen Fehlern (z.B. API Down, Auth Error) brechen wir ab
+            log.error(
+                "Raid failed with non-retriable error after %.0fms (api=%.0fms, attempt=%d/%d): %s",
+                total_ms,
+                api_call_ms,
+                attempt + 1,
+                max_attempts,
+                error,
+            )
+            return None
+
+        return None

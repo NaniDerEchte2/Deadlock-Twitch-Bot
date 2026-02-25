@@ -1,0 +1,793 @@
+"""Auth mixin for DashboardV2Server — Twitch OAuth and Discord admin session management."""
+
+from __future__ import annotations
+
+import secrets
+import time
+from typing import Any
+from urllib.parse import urlencode, urlparse, urlsplit, urlunsplit
+
+import aiohttp
+from aiohttp import web
+
+from .. import storage
+from ..core.constants import log
+
+TWITCH_OAUTH_AUTHORIZE_URL = "https://id.twitch.tv/oauth2/authorize"
+TWITCH_OAUTH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"  # noqa: S105
+TWITCH_HELIX_USERS_URL = "https://api.twitch.tv/helix/users"
+DISCORD_API_BASE_URL = "https://discord.com/api/v10"
+TWITCH_ADMIN_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fadmin"
+
+
+class _DashboardAuthMixin:
+    """Twitch OAuth login/callback and Discord admin session management."""
+
+    # ------------------------------------------------------------------ #
+    # OAuth configuration helpers                                          #
+    # ------------------------------------------------------------------ #
+
+    def _is_oauth_configured(self) -> bool:
+        return bool(self._oauth_client_id and self._oauth_client_secret)
+
+    def _build_oauth_redirect_uri(self) -> str | None:
+        configured = (self._oauth_redirect_uri or "").strip()
+        if not configured:
+            return None
+
+        candidate = configured if "://" in configured else f"https://{configured}"
+        try:
+            parsed = urlparse(candidate)
+        except Exception:
+            log.warning("TWITCH_DASHBOARD_AUTH_REDIRECT_URI is invalid and cannot be parsed")
+            return None
+
+        scheme = (parsed.scheme or "").strip().lower()
+        host = (parsed.hostname or "").strip().lower()
+        path = (parsed.path or "").rstrip("/")
+
+        if parsed.username or parsed.password:
+            log.warning("TWITCH_DASHBOARD_AUTH_REDIRECT_URI must not contain user info")
+            return None
+        if scheme not in {"https", "http"}:
+            log.warning("TWITCH_DASHBOARD_AUTH_REDIRECT_URI must use http(s)")
+            return None
+        if scheme == "http" and host not in {"127.0.0.1", "localhost", "::1"}:
+            log.warning(
+                "TWITCH_DASHBOARD_AUTH_REDIRECT_URI must use https unless host is localhost"
+            )
+            return None
+        if not parsed.netloc:
+            log.warning("TWITCH_DASHBOARD_AUTH_REDIRECT_URI is missing host")
+            return None
+        if path == "/twitch/raid/callback":
+            log.warning(
+                "TWITCH_DASHBOARD_AUTH_REDIRECT_URI points to raid callback and is not allowed"
+            )
+            return None
+        if path != "/twitch/auth/callback":
+            log.warning("TWITCH_DASHBOARD_AUTH_REDIRECT_URI must point to /twitch/auth/callback")
+            return None
+
+        return urlunsplit((scheme, parsed.netloc, "/twitch/auth/callback", "", ""))
+
+    @staticmethod
+    def _render_oauth_page(title: str, body_html: str) -> str:
+        import html
+        return (
+            "<!doctype html><html lang='de'><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            f"<title>{html.escape(title, quote=True)}</title>"
+            "<style>"
+            "body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;}"
+            ".wrap{max-width:760px;margin:0 auto;padding:36px 18px;}"
+            ".card{background:#111827;border:1px solid #1f2937;border-radius:12px;padding:20px;}"
+            "h1{margin:0 0 12px 0;font-size:24px;}"
+            "p{line-height:1.5;margin:10px 0;}"
+            "code{background:#0b1220;border:1px solid #23304a;padding:2px 6px;border-radius:6px;}"
+            "a{color:#93c5fd;}"
+            "</style></head><body><div class='wrap'><div class='card'>"
+            f"<h1>{html.escape(title)}</h1>{body_html}</div></div></body></html>"
+        )
+
+    def _normalize_next_path(self, raw_path: str | None) -> str:
+        fallback = "/twitch/dashboard-v2"
+        candidate = (raw_path or "").strip()
+        if not candidate:
+            return fallback
+        parsed = urlparse(candidate)
+        if parsed.scheme or parsed.netloc:
+            return fallback
+        if not candidate.startswith("/"):
+            return fallback
+        if not candidate.startswith("/twitch"):
+            return fallback
+        return candidate
+
+    @staticmethod
+    def _safe_internal_redirect(
+        location: str | None, *, fallback: str = "/twitch/dashboard-v2"
+    ) -> str:
+        candidate = (location or "").strip()
+        if not candidate:
+            return fallback
+        try:
+            parts = urlsplit(candidate)
+        except Exception:
+            return fallback
+        if parts.scheme or parts.netloc:
+            return fallback
+        if not candidate.startswith("/"):
+            return fallback
+        return candidate
+
+    @staticmethod
+    def _safe_oauth_authorize_redirect(location: str | None) -> str:
+        candidate = (location or "").strip()
+        if not candidate:
+            return TWITCH_OAUTH_AUTHORIZE_URL
+        try:
+            parts = urlsplit(candidate)
+        except Exception:
+            return TWITCH_OAUTH_AUTHORIZE_URL
+        host = (parts.netloc or "").split("@")[-1].split(":", 1)[0].strip().lower()
+        if parts.scheme != "https" or host != "id.twitch.tv" or parts.path != "/oauth2/authorize":
+            return TWITCH_OAUTH_AUTHORIZE_URL
+        return candidate
+
+    @staticmethod
+    def _canonical_post_login_destination(next_path: str | None) -> str:
+        fallback = "/twitch/dashboard-v2"
+        candidate = (next_path or "").strip()
+        if not candidate:
+            return fallback
+        try:
+            parts = urlsplit(candidate)
+        except Exception:
+            return fallback
+        if parts.scheme or parts.netloc:
+            return fallback
+
+        normalized_path = (parts.path or "").rstrip("/") or "/"
+        if normalized_path == "/twitch/stats":
+            return "/twitch/stats"
+        if normalized_path == "/twitch/dashboards":
+            return "/twitch/dashboards"
+        if normalized_path == "/twitch/dashboard-v2":
+            return "/twitch/dashboard-v2"
+        return fallback
+
+    def _build_dashboard_login_url(self, request: web.Request) -> str:
+        next_path = self._normalize_next_path(
+            request.rel_url.path_qs if request.rel_url else "/twitch/dashboard-v2"
+        )
+        if self._should_use_discord_admin_login(request):
+            return self._build_discord_admin_login_url(request, next_path=next_path)
+        return f"/twitch/auth/login?{urlencode({'next': next_path})}"
+
+    # ------------------------------------------------------------------ #
+    # Twitch OAuth session management                                      #
+    # ------------------------------------------------------------------ #
+
+    def _cleanup_auth_state(self) -> None:
+        now = time.time()
+        expired_states = [
+            key
+            for key, row in self._oauth_states.items()
+            if now - float(row.get("created_at", 0.0)) > self._oauth_state_ttl_seconds
+        ]
+        for key in expired_states:
+            self._oauth_states.pop(key, None)
+
+        expired_sessions = [
+            sid
+            for sid, row in self._auth_sessions.items()
+            if float(row.get("expires_at", 0.0)) <= now
+        ]
+        for sid in expired_sessions:
+            self._auth_sessions.pop(sid, None)
+
+        # Hard cap to prevent unbounded growth under heavy abuse
+        _MAX_STATES = 500
+        if len(self._oauth_states) > _MAX_STATES:
+            oldest = sorted(
+                self._oauth_states.items(),
+                key=lambda kv: float(kv[1].get("created_at", 0)),
+            )
+            for k, _ in oldest[: len(self._oauth_states) - _MAX_STATES]:
+                self._oauth_states.pop(k, None)
+
+        _MAX_SESSIONS = 2000
+        if len(self._auth_sessions) > _MAX_SESSIONS:
+            oldest_s = sorted(
+                self._auth_sessions.items(),
+                key=lambda kv: float(kv[1].get("created_at", 0)),
+            )
+            for k, _ in oldest_s[: len(self._auth_sessions) - _MAX_SESSIONS]:
+                self._auth_sessions.pop(k, None)
+
+    def _get_dashboard_auth_session(self, request: web.Request) -> dict[str, Any] | None:
+        self._cleanup_auth_state()
+        session_id = (request.cookies.get(self._session_cookie_name) or "").strip()
+        if not session_id:
+            return None
+        session = self._auth_sessions.get(session_id)
+        if not session:
+            return None
+
+        now = time.time()
+        expires_at = float(session.get("expires_at", 0.0))
+        if expires_at <= now:
+            self._auth_sessions.pop(session_id, None)
+            return None
+
+        session["expires_at"] = now + self._session_ttl_seconds
+        return session
+
+    def _set_session_cookie(
+        self, response: web.StreamResponse, request: web.Request, session_id: str
+    ) -> None:
+        response.set_cookie(
+            self._session_cookie_name,
+            session_id,
+            max_age=self._session_ttl_seconds,
+            httponly=True,
+            secure=self._is_secure_request(request),
+            samesite="Lax",
+            path="/",
+        )
+
+    def _clear_session_cookie(self, response: web.StreamResponse, request: web.Request) -> None:
+        response.del_cookie(
+            self._session_cookie_name,
+            path="/",
+            httponly=True,
+            samesite="Lax",
+            secure=self._is_secure_request(request),
+        )
+
+    def _create_dashboard_session(
+        self, *, twitch_login: str, twitch_user_id: str, display_name: str
+    ) -> str:
+        self._cleanup_auth_state()
+        session_id = secrets.token_urlsafe(32)
+        now = time.time()
+        self._auth_sessions[session_id] = {
+            "twitch_login": twitch_login,
+            "twitch_user_id": twitch_user_id,
+            "display_name": display_name or twitch_login,
+            "is_partner": True,
+            "created_at": now,
+            "expires_at": now + self._session_ttl_seconds,
+        }
+        return session_id
+
+    def _is_partner_allowed(
+        self, *, twitch_login: str, twitch_user_id: str
+    ) -> dict[str, Any] | None:
+        login = (twitch_login or "").strip().lower()
+        user_id = (twitch_user_id or "").strip()
+        if not login and not user_id:
+            return None
+
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT twitch_login, twitch_user_id
+                FROM twitch_streamers_partner_state
+                WHERE is_partner_active = 1
+                  AND (
+                      LOWER(twitch_login) = LOWER(?)
+                      OR (? != '' AND twitch_user_id = ?)
+                  )
+                LIMIT 1
+                """,
+                (login, user_id, user_id),
+            ).fetchone()
+
+        if not row:
+            return None
+
+        if hasattr(row, "keys"):
+            return {
+                "twitch_login": str(row["twitch_login"] or ""),
+                "twitch_user_id": str(row["twitch_user_id"] or ""),
+            }
+        return {
+            "twitch_login": str(row[0] or ""),
+            "twitch_user_id": str(row[1] or ""),
+        }
+
+    async def _exchange_code_for_user(self, code: str, redirect_uri: str) -> dict[str, str] | None:
+        if not self._is_oauth_configured():
+            return None
+
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                TWITCH_OAUTH_TOKEN_URL,
+                data={
+                    "client_id": self._oauth_client_id,
+                    "client_secret": self._oauth_client_secret,
+                    "code": code,
+                    "grant_type": "authorization_code",
+                    "redirect_uri": redirect_uri,
+                },
+            ) as token_resp:
+                if token_resp.status != 200:
+                    log.warning(
+                        "Dashboard OAuth exchange failed with status %s",
+                        token_resp.status,
+                    )
+                    return None
+                token_data = await token_resp.json()
+
+            access_token = str(token_data.get("access_token") or "").strip()
+            if not access_token:
+                return None
+
+            async with session.get(
+                TWITCH_HELIX_USERS_URL,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Client-Id": str(self._oauth_client_id),
+                },
+            ) as user_resp:
+                if user_resp.status != 200:
+                    log.warning(
+                        "Dashboard OAuth user lookup failed with status %s",
+                        user_resp.status,
+                    )
+                    return None
+                user_data = await user_resp.json()
+
+        users = user_data.get("data") if isinstance(user_data, dict) else None
+        if not isinstance(users, list) or not users:
+            return None
+        user = users[0] or {}
+        return {
+            "twitch_login": str(user.get("login") or "").strip().lower(),
+            "twitch_user_id": str(user.get("id") or "").strip(),
+            "display_name": str(user.get("display_name") or user.get("login") or "").strip(),
+        }
+
+    # ------------------------------------------------------------------ #
+    # Discord admin OAuth helpers                                          #
+    # ------------------------------------------------------------------ #
+
+    def _cleanup_discord_admin_state(self) -> None:
+        now = time.time()
+        expired_states = [
+            key
+            for key, row in self._discord_admin_oauth_states.items()
+            if now - float(row.get("created_at", 0.0)) > self._discord_admin_state_ttl
+        ]
+        for key in expired_states:
+            self._discord_admin_oauth_states.pop(key, None)
+
+        expired_sessions = [
+            key
+            for key, row in self._discord_admin_sessions.items()
+            if float(row.get("expires_at", 0.0)) <= now
+        ]
+        for key in expired_sessions:
+            self._discord_admin_sessions.pop(key, None)
+
+        max_states = 1000
+        if len(self._discord_admin_oauth_states) > max_states:
+            oldest_states = sorted(
+                self._discord_admin_oauth_states.items(),
+                key=lambda item: float(item[1].get("created_at", 0.0)),
+            )
+            for key, _ in oldest_states[: len(self._discord_admin_oauth_states) - max_states]:
+                self._discord_admin_oauth_states.pop(key, None)
+
+        max_sessions = 5000
+        if len(self._discord_admin_sessions) > max_sessions:
+            oldest_sessions = sorted(
+                self._discord_admin_sessions.items(),
+                key=lambda item: float(item[1].get("created_at", 0.0)),
+            )
+            for key, _ in oldest_sessions[: len(self._discord_admin_sessions) - max_sessions]:
+                self._discord_admin_sessions.pop(key, None)
+
+    def _set_discord_admin_cookie(
+        self,
+        response: web.StreamResponse,
+        request: web.Request,
+        session_id: str,
+    ) -> None:
+        response.set_cookie(
+            self._discord_admin_cookie_name,
+            session_id,
+            max_age=self._discord_admin_session_ttl,
+            httponly=True,
+            secure=self._is_secure_request(request),
+            samesite="Lax",
+            path="/",
+        )
+
+    def _clear_discord_admin_cookie(
+        self, response: web.StreamResponse, request: web.Request
+    ) -> None:
+        response.del_cookie(
+            self._discord_admin_cookie_name,
+            path="/",
+            httponly=True,
+            samesite="Lax",
+            secure=self._is_secure_request(request),
+        )
+
+    def _get_discord_admin_session(self, request: web.Request) -> dict[str, Any] | None:
+        if not self._discord_admin_required:
+            return None
+        self._cleanup_discord_admin_state()
+        session_id = (request.cookies.get(self._discord_admin_cookie_name) or "").strip()
+        if not session_id:
+            return None
+        session = self._discord_admin_sessions.get(session_id)
+        if not session:
+            return None
+        now = time.time()
+        if float(session.get("expires_at", 0.0)) <= now:
+            self._discord_admin_sessions.pop(session_id, None)
+            return None
+        session["expires_at"] = now + self._discord_admin_session_ttl
+        session["last_seen_at"] = now
+        session.setdefault("auth_type", "discord_admin")
+        return session
+
+    def _is_discord_admin_request(self, request: web.Request) -> bool:
+        return bool(self._get_discord_admin_session(request))
+
+    async def _exchange_discord_admin_code(
+        self,
+        code: str,
+        redirect_uri: str,
+    ) -> dict[str, Any] | None:
+        payload = {
+            "client_id": self._discord_admin_client_id,
+            "client_secret": self._discord_admin_client_secret,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+        }
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{DISCORD_API_BASE_URL}/oauth2/token",
+                data=payload,
+                headers=headers,
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    log.warning(
+                        "Discord admin OAuth exchange failed (status=%s body=%s)",
+                        response.status,
+                        self._sanitize_log_value(body[:200]),
+                    )
+                    return None
+                data = await response.json()
+        return data if isinstance(data, dict) else None
+
+    async def _fetch_discord_admin_user(self, access_token: str) -> dict[str, Any] | None:
+        if not access_token:
+            return None
+        timeout = aiohttp.ClientTimeout(total=20)
+        headers = {"Authorization": f"Bearer {access_token}"}
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                f"{DISCORD_API_BASE_URL}/users/@me", headers=headers
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    log.warning(
+                        "Discord admin user lookup failed (status=%s body=%s)",
+                        response.status,
+                        self._sanitize_log_value(body[:200]),
+                    )
+                    return None
+                data = await response.json()
+        return data if isinstance(data, dict) else None
+
+    async def _check_discord_admin_membership(self, user_id: int) -> tuple[bool, str]:
+        if user_id == self._discord_admin_owner_user_id:
+            return True, "owner_override"
+
+        discord_bot = None
+        raid_bot = getattr(self, "_raid_bot", None)
+        if raid_bot is not None:
+            auth_manager = getattr(raid_bot, "auth_manager", None)
+            discord_bot = getattr(auth_manager, "_discord_bot", None) if auth_manager else None
+            if discord_bot is None:
+                discord_bot = getattr(raid_bot, "_discord_bot", None)
+
+        guilds: list[Any] = []
+        seen: set[int] = set()
+        for guild_id in self._discord_admin_guild_ids:
+            guild = discord_bot.get_guild(guild_id) if discord_bot else None
+            if guild and guild.id not in seen:
+                guilds.append(guild)
+                seen.add(guild.id)
+        if not guilds and discord_bot:
+            guilds = list(getattr(discord_bot, "guilds", []) or [])
+
+        for guild in guilds:
+            member = guild.get_member(user_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(user_id)
+                except Exception:
+                    member = None
+            if member is None:
+                continue
+            perms = getattr(member, "guild_permissions", None)
+            if perms and bool(getattr(perms, "administrator", False)):
+                return True, f"guild_admin:{guild.id}"
+            role_ids = {
+                int(role.id) for role in getattr(member, "roles", []) if getattr(role, "id", None)
+            }
+            if self._discord_admin_moderator_role_id in role_ids:
+                return True, f"moderator_role:{guild.id}"
+        return False, "missing_admin_or_moderator_role"
+
+    # ------------------------------------------------------------------ #
+    # Twitch OAuth routes                                                  #
+    # ------------------------------------------------------------------ #
+
+    async def auth_login(self, request: web.Request) -> web.StreamResponse:
+        """Kick off Twitch OAuth login for dashboard access."""
+        next_path = self._normalize_next_path(request.query.get("next"))
+
+        if self._check_v2_auth(request):
+            destination = self._canonical_post_login_destination(next_path)
+            raise web.HTTPFound(destination)
+
+        if not self._check_rate_limit(request, max_requests=10, window_seconds=60.0):
+            return web.Response(text="Zu viele Anfragen. Bitte warte kurz.", status=429)
+
+        if not self._is_oauth_configured():
+            return web.Response(
+                text="Twitch OAuth ist aktuell nicht konfiguriert.",
+                status=503,
+            )
+
+        self._cleanup_auth_state()
+        redirect_uri = self._build_oauth_redirect_uri()
+        if not redirect_uri:
+            return web.Response(
+                text=(
+                    "Twitch OAuth Redirect-URI ist nicht konfiguriert oder ungültig. "
+                    "Bitte eine gültige /twitch/auth/callback URL konfigurieren."
+                ),
+                status=503,
+            )
+        state = secrets.token_urlsafe(24)
+        self._oauth_states[state] = {
+            "created_at": time.time(),
+            "next_path": next_path,
+            "redirect_uri": redirect_uri,
+        }
+        auth_url = f"{TWITCH_OAUTH_AUTHORIZE_URL}?{urlencode({'client_id': self._oauth_client_id, 'redirect_uri': redirect_uri, 'response_type': 'code', 'state': state})}"
+        safe_auth_url = self._safe_oauth_authorize_redirect(auth_url)
+        raise web.HTTPFound(safe_auth_url)
+
+    async def auth_callback(self, request: web.Request) -> web.StreamResponse:
+        """Handle Twitch OAuth callback, verify partner status, and create session."""
+        if not self._check_rate_limit(request, max_requests=10, window_seconds=60.0):
+            return web.Response(text="Zu viele Anfragen. Bitte warte kurz.", status=429)
+
+        if not self._is_oauth_configured():
+            return web.Response(text="OAuth ist nicht konfiguriert.", status=503)
+
+        self._cleanup_auth_state()
+
+        error = (request.query.get("error") or "").strip()
+        if error:
+            return web.Response(
+                text=f"OAuth-Fehler: {error}. Bitte Login erneut starten.",
+                status=401,
+            )
+
+        state = (request.query.get("state") or "").strip()
+        code = (request.query.get("code") or "").strip()
+        if not state or not code:
+            return web.Response(text="Fehlender OAuth state/code.", status=400)
+
+        state_data = self._oauth_states.pop(state, None)
+        if not state_data:
+            return web.Response(text="OAuth state ungültig oder abgelaufen.", status=400)
+
+        user = await self._exchange_code_for_user(code, str(state_data.get("redirect_uri") or ""))
+        if not user:
+            return web.Response(
+                text="OAuth-Austausch fehlgeschlagen. Bitte erneut versuchen.",
+                status=401,
+            )
+
+        partner = self._is_partner_allowed(
+            twitch_login=user.get("twitch_login") or "",
+            twitch_user_id=user.get("twitch_user_id") or "",
+        )
+        if not partner:
+            log.warning(
+                "AUDIT dashboard login denied: twitch=%s peer=%s",
+                self._sanitize_log_value(user.get("twitch_login")),
+                self._sanitize_log_value(self._peer_host(request)),
+            )
+            return web.Response(
+                text=(
+                    f"Kein Zugriff: Twitch-Account '{user.get('display_name') or user.get('twitch_login')}' "
+                    "ist nicht als Streamer-Partner freigegeben."
+                ),
+                status=403,
+            )
+
+        session_id = self._create_dashboard_session(
+            twitch_login=partner.get("twitch_login") or user.get("twitch_login") or "",
+            twitch_user_id=partner.get("twitch_user_id") or user.get("twitch_user_id") or "",
+            display_name=user.get("display_name") or "",
+        )
+        log.info(
+            "AUDIT dashboard login success: twitch=%s peer=%s",
+            self._sanitize_log_value(partner.get("twitch_login")),
+            self._sanitize_log_value(self._peer_host(request)),
+        )
+        destination = self._safe_internal_redirect(
+            self._normalize_next_path(state_data.get("next_path")),
+            fallback="/twitch/dashboard-v2",
+        )
+        response = web.HTTPFound(destination)
+        self._set_session_cookie(response, request, session_id)
+        raise response
+
+    # ------------------------------------------------------------------ #
+    # Discord admin OAuth routes                                           #
+    # ------------------------------------------------------------------ #
+
+    async def discord_auth_login(self, request: web.Request) -> web.StreamResponse:
+        if not self._check_rate_limit(request, max_requests=10, window_seconds=60.0):
+            raise web.HTTPTooManyRequests(
+                text="Too many login attempts. Please wait a minute and try again.",
+                headers={"Retry-After": "60"},
+            )
+        if not self._discord_admin_required:
+            raise web.HTTPFound("/twitch/admin")
+        existing = self._get_discord_admin_session(request)
+        next_path = self._normalize_discord_admin_next_path(request.query.get("next"))
+        if existing:
+            destination = self._canonical_discord_admin_post_login_path(next_path)
+            raise web.HTTPFound(destination)
+
+        redirect_uri = self._normalized_discord_admin_redirect_uri()
+        if not redirect_uri:
+            expected_redirect = (
+                str(self._discord_admin_redirect_uri or "").strip()
+                or "https://admin.earlysalty.de/twitch/auth/discord/callback"
+            )
+            return web.Response(
+                text=(
+                    "Discord OAuth Redirect URI ist ungültig. "
+                    f"Erwartet wird exakt: {expected_redirect}."
+                ),
+                status=503,
+            )
+
+        self._cleanup_discord_admin_state()
+        state = secrets.token_urlsafe(32)
+        self._discord_admin_oauth_states[state] = {
+            "created_at": time.time(),
+            "next_path": next_path,
+            "redirect_uri": redirect_uri,
+        }
+        query = urlencode(
+            {
+                "client_id": self._discord_admin_client_id,
+                "redirect_uri": redirect_uri,
+                "response_type": "code",
+                "scope": "identify",
+                "state": state,
+            }
+        )
+        raise web.HTTPFound(f"{DISCORD_API_BASE_URL}/oauth2/authorize?{query}")
+
+    async def discord_auth_callback(self, request: web.Request) -> web.StreamResponse:
+        if not self._check_rate_limit(request, max_requests=20, window_seconds=60.0):
+            raise web.HTTPTooManyRequests(
+                text="Too many OAuth callback requests. Please wait a minute and try again.",
+                headers={"Retry-After": "60"},
+            )
+        if not self._discord_admin_required:
+            raise web.HTTPFound("/twitch/admin")
+
+        error = (request.query.get("error") or "").strip()
+        if error:
+            return web.Response(text=f"Discord OAuth Fehler: {error}", status=401)
+
+        state = (request.query.get("state") or "").strip()
+        code = (request.query.get("code") or "").strip()
+        if not state or not code:
+            return web.Response(text="Fehlender OAuth state/code.", status=400)
+
+        self._cleanup_discord_admin_state()
+        state_data = self._discord_admin_oauth_states.pop(state, None)
+        if not state_data:
+            return web.Response(text="OAuth state ungültig oder abgelaufen.", status=400)
+
+        token_data = await self._exchange_discord_admin_code(
+            code,
+            str(state_data.get("redirect_uri") or ""),
+        )
+        access_token = str((token_data or {}).get("access_token") or "").strip()
+        if not access_token:
+            return web.Response(text="OAuth Austausch fehlgeschlagen.", status=401)
+
+        user = await self._fetch_discord_admin_user(access_token)
+        if not user:
+            return web.Response(text="Discord User konnte nicht geladen werden.", status=401)
+
+        user_id_raw = str(user.get("id") or "").strip()
+        if not user_id_raw.isdigit():
+            return web.Response(text="Ungültige Discord User-ID.", status=401)
+        user_id = int(user_id_raw)
+        allowed, reason = await self._check_discord_admin_membership(user_id)
+        if not allowed:
+            log.warning(
+                "AUDIT twitch-dashboard discord login denied: user=%s reason=%s peer=%s",
+                user_id,
+                self._sanitize_log_value(reason),
+                self._sanitize_log_value(self._peer_host(request)),
+            )
+            return web.Response(
+                text=(
+                    "Kein Zugriff. Es wird Administrator-Recht oder die Moderator-Rolle benötigt."
+                ),
+                status=403,
+            )
+
+        username = str(user.get("username") or "").strip()
+        global_name = str(user.get("global_name") or "").strip()
+        discriminator = str(user.get("discriminator") or "0").strip()
+        if global_name:
+            display_name = global_name
+        elif discriminator and discriminator != "0":
+            display_name = f"{username}#{discriminator}"
+        else:
+            display_name = username or f"User {user_id}"
+
+        now = time.time()
+        session_id = secrets.token_urlsafe(32)
+        self._discord_admin_sessions[session_id] = {
+            "auth_type": "discord_admin",
+            "user_id": user_id,
+            "username": username,
+            "display_name": display_name,
+            "reason": reason,
+            "created_at": now,
+            "last_seen_at": now,
+            "expires_at": now + self._discord_admin_session_ttl,
+        }
+
+        log.info(
+            "AUDIT twitch-dashboard discord login success: user=%s reason=%s peer=%s",
+            user_id,
+            self._sanitize_log_value(reason),
+            self._sanitize_log_value(self._peer_host(request)),
+        )
+
+        destination = self._canonical_discord_admin_post_login_path(state_data.get("next_path"))
+        response = web.HTTPFound(destination)
+        self._set_discord_admin_cookie(response, request, session_id)
+        raise response
+
+    async def discord_auth_logout(self, request: web.Request) -> web.StreamResponse:
+        session_id = (request.cookies.get(self._discord_admin_cookie_name) or "").strip()
+        if session_id:
+            self._discord_admin_sessions.pop(session_id, None)
+        login_url = (
+            TWITCH_ADMIN_DISCORD_LOGIN_URL if self._discord_admin_required else "/twitch/admin"
+        )
+        response = web.HTTPFound(login_url)
+        self._clear_discord_admin_cookie(response, request)
+        raise response
