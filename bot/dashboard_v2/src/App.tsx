@@ -15,6 +15,9 @@ import { Category } from '@/pages/Category';
 import { useStreamerList, useAuthStatus } from '@/hooks/useAnalytics';
 import type { TimeRange } from '@/types/analytics';
 import { Shield, ShieldCheck, ShieldAlert, Wifi, AlertTriangle } from 'lucide-react';
+import { AuthScopes } from '@/pages/AuthScopes';
+import { ScopeProvider } from '@/hooks/useScopes';
+import { ScopeSummaryBanner } from '@/components/scopes/ScopeSummaryBanner';
 
 // Error Boundary to prevent white screen on crashes
 interface ErrorBoundaryProps {
@@ -171,6 +174,8 @@ function Dashboard() {
           canViewAllStreamers={authStatus?.permissions?.viewAllStreamers || false}
         />
 
+        <ScopeSummaryBanner onOpenTab={() => setActiveTab('scopes')} />
+
         <TabNavigation activeTab={activeTab} onTabChange={setActiveTab} />
 
         {/* Tab Content */}
@@ -222,6 +227,8 @@ function Dashboard() {
             onNavigate={setActiveTab}
           />
         )}
+
+        {activeTab === 'scopes' && <AuthScopes />}
       </div>
     </div>
   );
@@ -230,9 +237,11 @@ function Dashboard() {
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <ErrorBoundary>
-        <Dashboard />
-      </ErrorBoundary>
+      <ScopeProvider>
+        <ErrorBoundary>
+          <Dashboard />
+        </ErrorBoundary>
+      </ScopeProvider>
     </QueryClientProvider>
   );
 }
