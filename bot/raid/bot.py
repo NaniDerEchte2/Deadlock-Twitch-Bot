@@ -1610,62 +1610,62 @@ class RaidBot:
                 return None
 
             # 3. Raid ausführen
-                target_id = target["user_id"]
-                target_login = target["user_login"]
-                target_started_at = target.get("started_at", "")
+            target_id = target["user_id"]
+            target_login = target["user_login"]
+            target_started_at = target.get("started_at", "")
 
-                selection_ms = (time.monotonic() - attempt_start_ts) * 1000.0
+            selection_ms = (time.monotonic() - attempt_start_ts) * 1000.0
+            log.info(
+                "Executing raid attempt %d/%d: %s -> %s (selection %.0fms, candidates=%d)",
+                attempt + 1,
+                max_attempts,
+                broadcaster_login,
+                target_login,
+                selection_ms,
+                candidates_count,
+            )
+
+            api_call_start = time.monotonic()
+            success, error = await self.raid_executor.start_raid(
+                from_broadcaster_id=broadcaster_id,
+                from_broadcaster_login=broadcaster_login,
+                to_broadcaster_id=target_id,
+                to_broadcaster_login=target_login,
+                viewer_count=viewer_count,
+                stream_duration_sec=stream_duration_sec,
+                target_stream_started_at=target_started_at,
+                candidates_count=candidates_count,
+                session=self.session,
+                reason="auto_raid_on_offline",
+            )
+            api_call_ms = (time.monotonic() - api_call_start) * 1000.0
+            total_ms = (time.monotonic() - flow_start_ts) * 1000.0
+
+            if success:
+                # Pending Raid registrieren (Nachricht wird erst nach EventSub gesendet)
+                # Funktioniert für Partner-Raids UND Non-Partner-Raids
+                await self._register_pending_raid(
+                    from_broadcaster_login=broadcaster_login,
+                    to_broadcaster_id=target_id,
+                    to_broadcaster_login=target_login,
+                    target_stream_data=target,
+                    is_partner_raid=is_partner_raid,
+                    viewer_count=viewer_count,
+                    offline_trigger_ts=offline_trigger_ts,
+                )
                 log.info(
-                    "Executing raid attempt %d/%d: %s -> %s (selection %.0fms, candidates=%d)",
+                    "Raid attempt %d/%d succeeded (%s -> %s) api=%.0fms, total_since_offline=%.0fms",
                     attempt + 1,
                     max_attempts,
                     broadcaster_login,
                     target_login,
-                    selection_ms,
-                    candidates_count,
+                    api_call_ms,
+                    total_ms,
                 )
+                return target_login
 
-                api_call_start = time.monotonic()
-                success, error = await self.raid_executor.start_raid(
-                    from_broadcaster_id=broadcaster_id,
-                    from_broadcaster_login=broadcaster_login,
-                    to_broadcaster_id=target_id,
-                    to_broadcaster_login=target_login,
-                    viewer_count=viewer_count,
-                stream_duration_sec=stream_duration_sec,
-                target_stream_started_at=target_started_at,
-                    candidates_count=candidates_count,
-                    session=self.session,
-                    reason="auto_raid_on_offline",
-                )
-                api_call_ms = (time.monotonic() - api_call_start) * 1000.0
-                total_ms = (time.monotonic() - flow_start_ts) * 1000.0
-
-                if success:
-                    # Pending Raid registrieren (Nachricht wird erst nach EventSub gesendet)
-                    # Funktioniert für Partner-Raids UND Non-Partner-Raids
-                    await self._register_pending_raid(
-                        from_broadcaster_login=broadcaster_login,
-                        to_broadcaster_id=target_id,
-                        to_broadcaster_login=target_login,
-                        target_stream_data=target,
-                        is_partner_raid=is_partner_raid,
-                        viewer_count=viewer_count,
-                        offline_trigger_ts=offline_trigger_ts,
-                    )
-                    log.info(
-                        "Raid attempt %d/%d succeeded (%s -> %s) api=%.0fms, total_since_offline=%.0fms",
-                        attempt + 1,
-                        max_attempts,
-                        broadcaster_login,
-                        target_login,
-                        api_call_ms,
-                        total_ms,
-                    )
-                    return target_login
-
-                # Fehler-Behandlung
-                exclude_ids.add(target_id)  # Diesen Kandidaten nicht nochmal versuchen
+            # Fehler-Behandlung
+            exclude_ids.add(target_id)  # Diesen Kandidaten nicht nochmal versuchen
 
             # Check auf "Cannot be raided"/Raid-Settings (HTTP 400)
             if self._is_retryable_raid_error(error):

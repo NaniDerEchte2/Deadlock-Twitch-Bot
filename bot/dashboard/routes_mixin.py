@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 from typing import Any
 
 from aiohttp import web
@@ -470,6 +471,14 @@ class _DashboardRoutesMixin:
 
         try:
             with storage.get_conn() as conn:
+                def _to_iso(val: Any) -> Any:
+                    """Convert datetime-like objects to ISO strings for JSON serialization."""
+                    return val.isoformat() if hasattr(val, "isoformat") else val
+
+                def _json_default(obj: Any) -> str:
+                    """Fallback serializer for json.dumps to handle datetime objects safely."""
+                    return obj.isoformat() if hasattr(obj, "isoformat") else str(obj)
+
                 # 1. Active Monitored Channels
                 rows = conn.execute("""
                     SELECT s.twitch_login, l.last_viewer_count
@@ -547,7 +556,7 @@ class _DashboardRoutesMixin:
                     ORDER BY ts_utc ASC
                 """).fetchall()
                 market_history = [
-                    {"ts": r[0], "total_viewers": r[1], "streamer_count": r[2]}
+                    {"ts": _to_iso(r[0]), "total_viewers": r[1], "streamer_count": r[2]}
                     for r in history_rows
                 ]
 
@@ -564,7 +573,10 @@ class _DashboardRoutesMixin:
                 """,
                     ("%?%",),
                 ).fetchall()
-                questions = [{"content": r[0], "streamer": r[1], "ts": r[2]} for r in question_rows]
+                questions = [
+                    {"content": r[0], "streamer": r[1], "ts": _to_iso(r[2])}
+                    for r in question_rows
+                ]
 
                 # --- 4. Meta Snapshot & Sentiment (1h) ---
                 deadlock_terms = [
@@ -674,20 +686,22 @@ class _DashboardRoutesMixin:
                     ).fetchall()
                     overlap = [{"a": ro[0], "b": ro[1], "shared": ro[2]} for ro in rows_overlap]
 
+                payload = {
+                    "total_monitored": len(channels),
+                    "total_viewers": total_viewers,
+                    "avg_chat_health": avg_health,
+                    "avg_lurker_ratio": avg_lurker,
+                    "total_messages": len(recent_msgs),
+                    "market_history": market_history,
+                    "questions": questions,
+                    "channels": channels,
+                    "meta_snapshot": meta_snapshot,
+                    "sentiment": sent_data,
+                    "overlap": overlap,
+                }
+
                 return web.json_response(
-                    {
-                        "total_monitored": len(channels),
-                        "total_viewers": total_viewers,
-                        "avg_chat_health": avg_health,
-                        "avg_lurker_ratio": avg_lurker,
-                        "total_messages": len(recent_msgs),
-                        "market_history": market_history,
-                        "questions": questions,
-                        "channels": channels,
-                        "meta_snapshot": meta_snapshot,
-                        "sentiment": sent_data,
-                        "overlap": overlap,
-                    }
+                    payload, dumps=lambda data: json.dumps(data, default=_json_default)
                 )
         except Exception as e:
             log.exception("Market API Error")
