@@ -106,11 +106,12 @@ export function useTagAnalysis(days: TimeRange, limit = 30) {
 export function useRankings(
   metric: 'viewers' | 'growth' | 'retention' | 'chat',
   days: TimeRange,
-  limit = 20
+  limit = 20,
+  excludeExternal = true
 ) {
   return useQuery({
-    queryKey: ['rankings', metric, days, limit],
-    queryFn: () => fetchRankings(metric, days, limit),
+    queryKey: ['rankings', metric, days, limit, excludeExternal],
+    queryFn: () => fetchRankings(metric, days, limit, excludeExternal),
     staleTime: STALE_TIME,
   });
 }
@@ -132,10 +133,14 @@ export function useStreamerList() {
   });
 }
 
-export function useCategoryComparison(streamer: string | null, days: TimeRange) {
+export function useCategoryComparison(
+  streamer: string | null,
+  days: TimeRange,
+  excludeExternal = true
+) {
   return useQuery({
-    queryKey: ['category-comparison', streamer, days],
-    queryFn: () => fetchCategoryComparison(streamer, days),
+    queryKey: ['category-comparison', streamer, days, excludeExternal],
+    queryFn: () => fetchCategoryComparison(streamer, days, excludeExternal),
     staleTime: STALE_TIME,
     enabled: !!streamer,
   });
@@ -301,11 +306,12 @@ export function useCategoryLeaderboard(
   streamer: string | null,
   days: number,
   limit = 25,
-  sort: 'avg' | 'peak' = 'avg'
+  sort: 'avg' | 'peak' = 'avg',
+  excludeExternal = false
 ) {
   return useQuery({
-    queryKey: ['category-leaderboard', streamer, days, limit, sort],
-    queryFn: () => fetchCategoryLeaderboard(streamer, days, limit, sort),
+    queryKey: ['category-leaderboard', streamer, days, limit, sort, excludeExternal],
+    queryFn: () => fetchCategoryLeaderboard(streamer, days, limit, sort, excludeExternal),
     staleTime: STALE_TIME,
   });
 }

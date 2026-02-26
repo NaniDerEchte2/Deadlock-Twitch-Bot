@@ -30,18 +30,20 @@ export function Category({ streamer, days, onStreamerSelect, onNavigate }: Categ
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [page, setPage] = useState(0);
   const [activeView] = useState<'category' | 'tracked'>('category');
+  // When true: hide streamers with external reach (>100 Ø-Viewer) from the overview
+  const [excludeExternal, setExcludeExternal] = useState(false);
 
   const { data: activitySeries } = useCategoryActivitySeries(days);
 
   const { data: catLeaderboard, isLoading: loadingCat } = useQuery({
-    queryKey: ['category-leaderboard-all', days],
-    queryFn: () => fetchCategoryLeaderboard(null, days, 300, 'avg'),
+    queryKey: ['category-leaderboard-all', days, excludeExternal],
+    queryFn: () => fetchCategoryLeaderboard(null, days, 300, 'avg', excludeExternal),
     staleTime: 5 * 60 * 1000,
   });
 
   const { data: trackedLeaderboard, isLoading: loadingTracked } = useQuery({
-    queryKey: ['tracked-leaderboard-all', days],
-    queryFn: () => fetchCategoryLeaderboard(null, days, 300, 'avg'),
+    queryKey: ['tracked-leaderboard-all', days, excludeExternal],
+    queryFn: () => fetchCategoryLeaderboard(null, days, 300, 'avg', excludeExternal),
     staleTime: 5 * 60 * 1000,
   });
 
@@ -218,6 +220,20 @@ export function Category({ streamer, days, onStreamerSelect, onNavigate }: Categ
               </button>
             ))}
           </div>
+
+          {/* External-reach filter */}
+          <button
+            onClick={() => { setExcludeExternal(e => !e); setPage(0); }}
+            title="Streamer mit externer Reichweite (Ø > 100 Viewer) ausblenden"
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+              excludeExternal
+                ? 'bg-accent/15 text-accent border-accent/30'
+                : 'bg-background text-text-secondary border-border hover:text-white'
+            }`}
+          >
+            <Filter className="w-3 h-3" />
+            Nur organisch
+          </button>
         </div>
 
         {/* Result count */}

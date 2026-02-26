@@ -579,56 +579,21 @@ class RaidAuthManager:
         return refreshed_count
 
     async def snapshot_and_flag_reauth(self) -> int:
-        """Setzt needs_reauth=1 für alle und löscht Klartext-Tokens.
-        Gibt Anzahl betroffener Zeilen zurück."""
+        """Setzt needs_reauth=1 für alle. Gibt Anzahl betroffener Zeilen zurück."""
         with get_conn() as conn:
             conn.execute("""
                 UPDATE twitch_raid_auth SET
-                    legacy_access_token  = NULL,
-                    legacy_refresh_token = NULL,
-                    legacy_scopes        = scopes,
-                    legacy_saved_at      = CURRENT_TIMESTAMP,
-                    needs_reauth         = TRUE,
-                    access_token         = 'ENC',
-                    refresh_token        = 'ENC'
+                    needs_reauth  = TRUE,
+                    access_token  = 'ENC',
+                    refresh_token = 'ENC'
                 WHERE access_token <> 'ENC'
             """)
             count = conn.execute("SELECT changes()").fetchone()[0]
         log.info(
-            "snapshot_and_flag_reauth: %d Tokens auf needs_reauth=1 gesetzt und Klartext gelöscht",
+            "snapshot_and_flag_reauth: %d Tokens auf needs_reauth=1 gesetzt",
             count,
         )
         return count
-
-    def clear_legacy_tokens_for_fully_authed(self) -> int:
-        """
-        Entfernt legacy_* Snapshots für Streamer mit needs_reauth=0.
-        Diese Daten sind nach erfolgreichem Re-Auth nicht mehr nötig.
-        """
-        with get_conn() as conn:
-            conn.execute(
-                """
-                UPDATE twitch_raid_auth
-                   SET legacy_access_token  = NULL,
-                       legacy_refresh_token = NULL,
-                       legacy_scopes        = NULL,
-                       legacy_saved_at      = NULL
-                 WHERE needs_reauth IS FALSE
-                   AND (
-                       legacy_access_token IS NOT NULL
-                    OR legacy_refresh_token IS NOT NULL
-                    OR legacy_scopes IS NOT NULL
-                    OR legacy_saved_at IS NOT NULL
-                   )
-                """
-            )
-            count = conn.execute("SELECT changes()").fetchone()[0]
-        if count:
-            log.info(
-                "legacy_* Snapshots für %d fully-authed Streamer entfernt (needs_reauth=0)",
-                count,
-            )
-        return int(count or 0)
 
     def save_auth(
         self,
@@ -726,15 +691,7 @@ class RaidAuthManager:
             )
             # Re-Auth abgeschlossen: needs_reauth zurücksetzen
             conn.execute(
-                """
-                UPDATE twitch_raid_auth
-                   SET needs_reauth = FALSE,
-                       legacy_access_token = NULL,
-                       legacy_refresh_token = NULL,
-                       legacy_scopes = NULL,
-                       legacy_saved_at = NULL
-                WHERE twitch_user_id = ?
-                """,
+                "UPDATE twitch_raid_auth SET needs_reauth = FALSE WHERE twitch_user_id = %s",
                 (twitch_user_id,),
             )
             copied = backfill_tracked_stats_from_category(conn, twitch_login)

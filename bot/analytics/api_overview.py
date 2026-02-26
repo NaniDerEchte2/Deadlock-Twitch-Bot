@@ -956,27 +956,198 @@ class _AnalyticsOverviewMixin:
             return web.json_response(demo, status=200)
 
     async def _api_v2_viewer_profiles(self, request: web.Request) -> web.Response:
-        """Placeholder viewer profile endpoint until full implementation is ready."""
+        """Viewer behavioral profiles based on cross-streamer exclusivity."""
         self._require_v2_auth(request)
-        return web.json_response(
-            {
-                "dataAvailable": False,
-                "message": "Viewer-Profile sind noch nicht berechnet.",
-                "profiles": {},
-                "exclusivityDistribution": [],
-            }
-        )
+
+        streamer = request.query.get("streamer", "").strip().lower() or None
+        if not streamer:
+            return web.json_response({"error": "streamer required"}, status=400)
+
+        _empty = {
+            "dataAvailable": False,
+            "message": "Keine Daten vorhanden",
+            "profiles": {"exclusive": 0, "loyalMulti": 0, "casual": 0, "explorer": 0, "passive": 0, "total": 0},
+            "exclusivityDistribution": [],
+        }
+
+        try:
+            with storage.get_conn() as conn:
+                dist_rows = conn.execute(
+                    """
+                    WITH per_viewer AS (
+                        SELECT cr.chatter_login,
+                               COUNT(DISTINCT cr.streamer_login) AS streamer_count,
+                               SUM(cr.total_messages) AS total_messages
+                        FROM twitch_chatter_rollup cr
+                        WHERE cr.chatter_login IN (
+                            SELECT DISTINCT chatter_login
+                            FROM twitch_chatter_rollup
+                            WHERE LOWER(streamer_login) = %s
+                        )
+                        GROUP BY cr.chatter_login
+                    )
+                    SELECT streamer_count, COUNT(*) AS viewer_count
+                    FROM per_viewer
+                    GROUP BY streamer_count
+                    ORDER BY streamer_count
+                    """,
+                    (streamer,),
+                ).fetchall()
+
+                passive_row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS passive
+                    FROM twitch_chatter_rollup
+                    WHERE LOWER(streamer_login) = %s
+                      AND total_sessions >= 3
+                      AND total_messages = 0
+                    """,
+                    (streamer,),
+                ).fetchone()
+
+            if not dist_rows:
+                return web.json_response(_empty)
+
+            dist = {r[0]: r[1] for r in dist_rows}
+            total_viewers = sum(r[1] for r in dist_rows)
+
+            # TODO(human): Refine viewer classification thresholds below.
+            # Current logic: exclusive=1 streamer, loyalMulti=2-3, explorer=8+, passive=silent ≥3 sessions
+            # Consider: should "exclusive" require minimum sessions? Should passive override exclusive?
+            exclusive_count = dist.get(1, 0)
+            loyal_multi_count = sum(dist.get(i, 0) for i in range(2, 4))
+            explorer_count = sum(v for k, v in dist.items() if k >= 8)
+            passive_count = int(passive_row[0]) if passive_row and passive_row[0] else 0
+            casual_count = max(0, total_viewers - exclusive_count - loyal_multi_count - explorer_count - passive_count)
+
+            return web.json_response({
+                "dataAvailable": True,
+                "profiles": {
+                    "exclusive": exclusive_count,
+                    "loyalMulti": loyal_multi_count,
+                    "casual": casual_count,
+                    "explorer": explorer_count,
+                    "passive": passive_count,
+                    "total": total_viewers,
+                },
+                "exclusivityDistribution": [
+                    {"streamerCount": int(r[0]), "viewerCount": int(r[1])}
+                    for r in dist_rows
+                ],
+            })
+        except Exception:
+            log.exception("Error in viewer profiles API")
+            from .demo_data import get_viewer_profiles
+            demo = get_viewer_profiles()
+            demo["message"] = "Fallback: Demo-Daten wegen Fehler"
+            return web.json_response(demo, status=200)
 
     async def _api_v2_audience_sharing(self, request: web.Request) -> web.Response:
-        """Placeholder audience sharing endpoint until full implementation is ready."""
+        """Cross-streamer audience overlap with inflow/outflow and Jaccard similarity."""
         self._require_v2_auth(request)
-        return web.json_response(
-            {
-                "dataAvailable": False,
-                "message": "Audience-Sharing ist noch nicht berechnet.",
-                "current": [],
-                "timeline": [],
-                "totalUniqueViewers": 0,
-                "dataQuality": {"months": 0, "minSharedFilter": 0},
-            }
-        )
+
+        streamer = request.query.get("streamer", "").strip().lower() or None
+        days = min(max(int(request.query.get("days", "30")), 7), 365)
+        if not streamer:
+            return web.json_response({"error": "streamer required"}, status=400)
+
+        since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        try:
+            with storage.get_conn() as conn:
+                my_total_row = conn.execute(
+                    "SELECT COUNT(DISTINCT chatter_login) AS total FROM twitch_chatter_rollup WHERE LOWER(streamer_login) = %s",
+                    (streamer,),
+                ).fetchone()
+                my_total = int(my_total_row[0]) if my_total_row and my_total_row[0] else 0
+
+                shared_rows = conn.execute(
+                    """
+                    SELECT
+                        cr2.streamer_login                                                    AS other_streamer,
+                        COUNT(DISTINCT cr1.chatter_login)                                    AS shared_viewers,
+                        COUNT(DISTINCT CASE WHEN cr2.first_seen_at >= %s THEN cr1.chatter_login END) AS inflow,
+                        COUNT(DISTINCT CASE WHEN cr2.last_seen_at < %s THEN cr1.chatter_login END)   AS outflow,
+                        COUNT(DISTINCT cr2.chatter_login)                                    AS other_total
+                    FROM twitch_chatter_rollup cr1
+                    JOIN twitch_chatter_rollup cr2
+                        ON cr1.chatter_login = cr2.chatter_login
+                       AND LOWER(cr2.streamer_login) != LOWER(cr1.streamer_login)
+                    WHERE LOWER(cr1.streamer_login) = %s
+                    GROUP BY cr2.streamer_login
+                    HAVING COUNT(DISTINCT cr1.chatter_login) >= 3
+                    ORDER BY shared_viewers DESC
+                    LIMIT 20
+                    """,
+                    (since_date, since_date, streamer),
+                ).fetchall()
+
+                if not shared_rows:
+                    return web.json_response({
+                        "dataAvailable": False,
+                        "message": "Keine Daten vorhanden",
+                        "current": [],
+                        "timeline": [],
+                        "totalUniqueViewers": my_total,
+                        "dataQuality": {"months": 0, "minSharedFilter": 3},
+                    })
+
+                top_streamers = [r[0] for r in shared_rows[:5]]
+                top_placeholders = ",".join(["%s"] * len(top_streamers))
+                timeline_rows = conn.execute(
+                    f"""
+                    SELECT
+                        strftime('%Y-%m', CASE
+                            WHEN cr1.first_seen_at > cr2.first_seen_at THEN cr1.first_seen_at
+                            ELSE cr2.first_seen_at END) AS month,
+                        cr2.streamer_login AS other_streamer,
+                        COUNT(DISTINCT cr1.chatter_login) AS shared_viewers_that_month
+                    FROM twitch_chatter_rollup cr1
+                    JOIN twitch_chatter_rollup cr2
+                        ON cr1.chatter_login = cr2.chatter_login
+                       AND LOWER(cr2.streamer_login) IN ({top_placeholders})
+                       AND LOWER(cr2.streamer_login) != LOWER(cr1.streamer_login)
+                    WHERE LOWER(cr1.streamer_login) = %s
+                    GROUP BY month, cr2.streamer_login
+                    ORDER BY month
+                    """,
+                    (*top_streamers, streamer),
+                ).fetchall()
+
+            current_data = []
+            months_set: set[str] = set()
+            for r in shared_rows:
+                shared_count = int(r[1])
+                other_total = int(r[4]) if r[4] else 0
+                union_total = my_total + other_total - shared_count
+                jaccard = round(shared_count / union_total, 3) if union_total > 0 else 0
+                current_data.append({
+                    "streamer": r[0],
+                    "sharedViewers": shared_count,
+                    "inflow": int(r[2]) if r[2] else 0,
+                    "outflow": int(r[3]) if r[3] else 0,
+                    "jaccardSimilarity": jaccard,
+                })
+
+            timeline_data = []
+            for r in timeline_rows:
+                if r[0]:
+                    months_set.add(r[0])
+                timeline_data.append({
+                    "month": r[0] or "",
+                    "streamer": r[1],
+                    "sharedViewers": int(r[2]) if r[2] else 0,
+                })
+
+            return web.json_response({
+                "dataAvailable": True,
+                "current": current_data,
+                "timeline": timeline_data,
+                "totalUniqueViewers": my_total,
+                "dataQuality": {"months": len(months_set), "minSharedFilter": 3},
+            })
+        except Exception:
+            log.exception("Error in audience sharing API")
+            from .demo_data import get_audience_sharing
+            demo = get_audience_sharing()
+            demo["message"] = "Fallback: Demo-Daten wegen Fehler"
+            return web.json_response(demo, status=200)

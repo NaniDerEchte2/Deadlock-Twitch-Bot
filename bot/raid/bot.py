@@ -210,7 +210,6 @@ class RaidBot:
                             else:
                                 raise
                         else:
-                            self.auth_manager.clear_legacy_tokens_for_fully_authed()
                             last_token_refresh = now
 
                 # Token Blacklist Cleanup (alle 3.5h)

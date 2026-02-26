@@ -10,7 +10,7 @@ from aiohttp import web
 
 from .. import storage
 from ..core.constants import log
-from .live import DashboardLiveMixin
+from .live import DashboardLiveMixin, _REQUIRED_SCOPES, _CRITICAL_SCOPES, _SCOPE_COLUMN_LABELS
 
 TWITCH_DASHBOARDS_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboards"
 TWITCH_DASHBOARD_V2_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
@@ -134,6 +134,67 @@ class _DashboardRoutesMixin:
             else "/twitch/auth/logout"
         )
 
+        # Look up scopes for the logged-in user
+        session = self._get_dashboard_auth_session(request)
+        twitch_login = (session or {}).get("twitch_login", "")
+        missing_scopes: list[str] = []
+        missing_critical: list[str] = []
+        if twitch_login:
+            try:
+                with storage.get_conn() as conn:
+                    row = conn.execute(
+                        "SELECT scopes FROM twitch_raid_auth WHERE LOWER(twitch_login) = LOWER(?)",
+                        [twitch_login],
+                    ).fetchone()
+                if row:
+                    token_scopes = set((row[0] or "").split())
+                    missing_scopes = [s for s in _REQUIRED_SCOPES if s not in token_scopes]
+                    missing_critical = [s for s in missing_scopes if s in _CRITICAL_SCOPES]
+                else:
+                    missing_scopes = list(_REQUIRED_SCOPES)
+                    missing_critical = [s for s in _REQUIRED_SCOPES if s in _CRITICAL_SCOPES]
+            except Exception:
+                log.exception("stats_entry: failed to load scopes for %s", twitch_login)
+
+        # Build scope status HTML block
+        if twitch_login and missing_scopes:
+            scope_items = "".join(
+                f"<li style='margin-bottom:4px;'>"
+                f"<span style='color:{'#f87171' if s in _CRITICAL_SCOPES else '#fbbf24'};margin-right:6px;'>"
+                f"{'⚠' if s in _CRITICAL_SCOPES else '○'}</span>"
+                f"<code style='font-size:12px;background:#1f2937;padding:1px 5px;border-radius:4px;'>{html.escape(s)}</code>"
+                f"<span style='color:#94a3b8;font-size:12px;margin-left:6px;'>{html.escape(_SCOPE_COLUMN_LABELS.get(s, ''))}</span>"
+                f"</li>"
+                for s in missing_scopes
+            )
+            critical_note = (
+                f"<p style='color:#f87171;font-size:13px;margin-top:8px;'>"
+                f"⚠ {len(missing_critical)} kritische Scope(s) fehlen — einige Features sind deaktiviert.</p>"
+                if missing_critical else ""
+            )
+            scope_panel = (
+                "<div style='background:#111827;border:1px solid #7f1d1d;border-radius:12px;"
+                "padding:18px;margin-bottom:20px;'>"
+                "<h3 style='margin:0 0 10px;color:#fca5a5;font-size:15px;'>Fehlende OAuth-Scopes</h3>"
+                f"<p style='color:#94a3b8;font-size:13px;margin:0 0 10px;'>"
+                f"Für <strong style='color:#e2e8f0;'>{html.escape(twitch_login)}</strong> fehlen "
+                f"{len(missing_scopes)} von {len(_REQUIRED_SCOPES)} Scopes. "
+                f"Bitte neu authentifizieren.</p>"
+                f"<ul style='list-style:none;margin:0;padding:0;'>{scope_items}</ul>"
+                f"{critical_note}"
+                "</div>"
+            )
+        elif twitch_login:
+            scope_panel = (
+                "<div style='background:#111827;border:1px solid #14532d;border-radius:12px;"
+                "padding:14px 18px;margin-bottom:20px;display:flex;align-items:center;gap:10px;'>"
+                "<span style='color:#4ade80;font-size:18px;'>✓</span>"
+                "<span style='color:#86efac;font-size:14px;'>Alle OAuth-Scopes vorhanden</span>"
+                "</div>"
+            )
+        else:
+            scope_panel = ""
+
         page_html = (
             "<!doctype html><html lang='de'><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -152,6 +213,7 @@ class _DashboardRoutesMixin:
             "<div class='top'><h1 style='margin:0;'>Twitch Dashboard Zugang</h1>"
             f"<a class='logout' href='{logout_url}'>Logout</a></div>"
             "<p class='muted'>Beta ist jetzt für verifizierte Streamer-Partner freigeschaltet.</p>"
+            f"{scope_panel}"
             "<div class='cards'>"
             "<div class='card'><h2 style='margin-top:0;'>Stats Dashboard (Alt)</h2>"
             "<p class='muted'>Bestehendes Dashboard für die bisherigen Stats-Ansichten.</p>"

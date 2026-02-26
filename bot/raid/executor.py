@@ -250,7 +250,7 @@ class RaidExecutor:
                     viewer_count,
                     stream_duration_sec,
                     history_reason,
-                    1 if success else 0,
+                    bool(success),
                     error_message,
                     target_stream_started_at,
                     candidates_count,

@@ -1124,25 +1124,6 @@ class _EventSubMixin:
                             )
                         except aiohttp.ClientResponseError as exc:
                             if int(getattr(exc, "status", 0) or 0) == 401:
-                                if hasattr(self, "_clear_legacy_snapshot_for_user"):
-                                    try:
-                                        cleared = bool(
-                                            self._clear_legacy_snapshot_for_user(
-                                                str(bid),
-                                                reason="eventsub_401_invalid_oauth",
-                                            )
-                                        )
-                                        if cleared:
-                                            log.warning(
-                                                "EventSub Webhook: legacy_* Snapshot für %s nach 401 entfernt (needs_reauth bleibt 1)",
-                                                login or bid,
-                                            )
-                                    except Exception:
-                                        log.debug(
-                                            "EventSub Webhook: Konnte legacy_* Snapshot nach 401 nicht entfernen für %s",
-                                            login or bid,
-                                            exc_info=True,
-                                        )
                                 log.warning(
                                     "EventSub Webhook: %s fehlgeschlagen für %s (HTTP 401 Invalid OAuth token). "
                                     "Weitere Broadcaster-Subscriptions werden übersprungen.",
@@ -1338,12 +1319,12 @@ class _EventSubMixin:
             return None
 
     async def _resolve_eventsub_broadcaster_token(self, broadcaster_user_id: str) -> str | None:
-        """Gibt den Broadcaster-Token für eine bestimmte User-ID zurück (falls vorhanden).
-        Klartext-Fallbacks sind deaktiviert (ENC-only Read)."""
-        if hasattr(self, "_resolve_broadcaster_token_with_legacy"):
-            return await self._resolve_broadcaster_token_with_legacy(broadcaster_user_id)
-        # Fallback falls Mixin nicht eingebunden
+        """Gibt den Broadcaster-Token für eine bestimmte User-ID zurück.
+        Gibt None zurück wenn needs_reauth=True oder kein Token vorhanden."""
         try:
+            # Kein Token für User die noch re-authen müssen
+            if hasattr(self, "_is_fully_authed") and not await self._is_fully_authed(str(broadcaster_user_id)):
+                return None
             raid_bot = getattr(self, "_raid_bot", None)
             auth_manager = getattr(raid_bot, "auth_manager", None) if raid_bot else None
             session = getattr(raid_bot, "session", None) if raid_bot else None

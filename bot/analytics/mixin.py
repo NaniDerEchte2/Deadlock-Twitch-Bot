@@ -448,7 +448,7 @@ class TwitchAnalyticsMixin:
             event.get("user_login") or event.get("user_name") or ""
         ).strip().lower() or None
         tier = (event.get("tier") or "1000").strip()
-        is_gift = int(bool(event.get("is_gift")))
+        is_gift = bool(event.get("is_gift"))
         gifter_login = (
             event.get("gifter_login") or event.get("gifter_user_login") or ""
         ).strip().lower() or None

@@ -1512,10 +1512,6 @@ def ensure_schema(conn) -> None:
             last_refreshed_at    TEXT,
             raid_enabled         BOOLEAN DEFAULT TRUE,
             created_at           TEXT DEFAULT CURRENT_TIMESTAMP,
-            legacy_access_token  TEXT,
-            legacy_refresh_token TEXT,
-            legacy_scopes        TEXT,
-            legacy_saved_at      TEXT,
             needs_reauth         BOOLEAN DEFAULT FALSE,
             reauth_notified_at   TEXT,
             access_token_enc     BYTEA,
@@ -1529,6 +1525,9 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_raid_auth_login ON twitch_raid_auth(twitch_login)"
     )
+    # Legacy-Plaintext-Spalten für Backward-Compat verfügbar halten (werden bei neuen Flows nicht genutzt)
+    for _col in ("legacy_access_token", "legacy_refresh_token", "legacy_scopes", "legacy_saved_at"):
+        conn.execute(f"ALTER TABLE twitch_raid_auth ADD COLUMN IF NOT EXISTS {_col} TEXT")
 
     # 15) Social media platform OAuth (encrypted)
     conn.execute(

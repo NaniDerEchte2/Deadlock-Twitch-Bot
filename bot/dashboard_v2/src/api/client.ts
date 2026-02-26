@@ -171,12 +171,14 @@ export async function fetchTagAnalysis(
 export async function fetchRankings(
   metric: 'viewers' | 'growth' | 'retention' | 'chat',
   days: TimeRange,
-  limit: number = 20
+  limit: number = 20,
+  excludeExternal = true
 ): Promise<RankingEntry[]> {
   return fetchApi<RankingEntry[]>('/rankings', {
     metric,
     days,
     limit,
+    ...(excludeExternal && { exclude_external: '1' }),
   });
 }
 
@@ -214,11 +216,13 @@ export async function fetchAuthStatus(): Promise<AuthStatus> {
 // Category Comparison
 export async function fetchCategoryComparison(
   streamer: string | null,
-  days: TimeRange
+  days: TimeRange,
+  excludeExternal = true
 ): Promise<CategoryComparison> {
   return fetchApi('/category-comparison', {
     streamer: streamer || '',
     days,
+    ...(excludeExternal && { exclude_external: '1' }),
   });
 }
 
@@ -404,12 +408,14 @@ export async function fetchCategoryLeaderboard(
   streamer: string | null,
   days: number,
   limit: number = 25,
-  sort: 'avg' | 'peak' = 'avg'
+  sort: 'avg' | 'peak' = 'avg',
+  excludeExternal = false
 ): Promise<CategoryLeaderboard> {
   return fetchApi<CategoryLeaderboard>('/category-leaderboard', {
     streamer: streamer || '',
     days,
     limit,
     sort,
+    ...(excludeExternal && { exclude_external: '1' }),
   });
 }

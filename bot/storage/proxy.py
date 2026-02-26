@@ -397,10 +397,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_raid_auth_login ON twitch_raid_auth(twitch_login)"
     )
-    _add_column_if_missing(conn, "twitch_raid_auth", "legacy_access_token", "TEXT")
-    _add_column_if_missing(conn, "twitch_raid_auth", "legacy_refresh_token", "TEXT")
-    _add_column_if_missing(conn, "twitch_raid_auth", "legacy_scopes", "TEXT")
-    _add_column_if_missing(conn, "twitch_raid_auth", "legacy_saved_at", "TEXT")
     _add_column_if_missing(conn, "twitch_raid_auth", "needs_reauth", "INTEGER DEFAULT 0")
     _add_column_if_missing(conn, "twitch_raid_auth", "reauth_notified_at", "TEXT")
     # Encrypted token storage (Phase 0: Encryption Foundation)

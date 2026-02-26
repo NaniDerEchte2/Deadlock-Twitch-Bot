@@ -10,7 +10,6 @@ import {
   GraduationCap,
   DollarSign,
   Globe,
-  KeyRound,
 } from 'lucide-react';
 
 export type TabId =
@@ -23,8 +22,7 @@ export type TabId =
   | 'schedule'
   | 'coaching'
   | 'monetization'
-  | 'category'
-  | 'scopes';
+  | 'category';
 
 interface Tab {
   id: TabId;
@@ -43,7 +41,6 @@ const tabs: Tab[] = [
   { id: 'coaching', label: 'Coaching', icon: GraduationCap },
   { id: 'monetization', label: 'Monetization', icon: DollarSign },
   { id: 'category', label: 'Kategorie', icon: Globe },
-  { id: 'scopes', label: 'Scopes', icon: KeyRound },
 ];
 
 interface TabNavigationProps {

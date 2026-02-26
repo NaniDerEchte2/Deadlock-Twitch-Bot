@@ -24,17 +24,28 @@ log = logging.getLogger("TwitchStreams.AnalyticsV2")
 class _AnalyticsInsightsMixin:
     """Mixin providing insights, coaching, chat analytics, and monetization endpoints."""
 
-    def _get_category_percentiles(self, conn, since_date: str) -> dict[str, Any]:
-        """Get per-streamer AVG viewer_count from stats_category and compute percentiles."""
+    def _get_category_percentiles(
+        self, conn, since_date: str, threshold: float | None = None
+    ) -> dict[str, Any]:
+        """Get per-streamer AVG viewer_count from stats_category and compute percentiles.
+
+        When threshold is set, streamers with avg_viewers above it are excluded
+        (external-reach filter – e.g. EXTERNAL_REACH_AVG_THRESHOLD = 100).
+        """
+        having_clause = "HAVING AVG(viewer_count) <= ?" if threshold is not None else ""
+        params: list = [since_date]
+        if threshold is not None:
+            params.append(threshold)
         rows = conn.execute(
-            """
+            f"""
             SELECT streamer, AVG(viewer_count) as avg_vc
             FROM twitch_stats_category
             WHERE ts_utc >= ?
             GROUP BY streamer
+            {having_clause}
             ORDER BY avg_vc
         """,
-            [since_date],
+            params,
         ).fetchall()
 
         if not rows:

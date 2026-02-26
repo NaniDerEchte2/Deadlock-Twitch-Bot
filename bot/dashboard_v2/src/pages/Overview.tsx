@@ -79,8 +79,6 @@ export function Overview({ streamer, days, onSessionClick }: OverviewProps) {
           color="purple"
         />
 
-        {/* TODO(human): Add conditional display when follower data is unreliable
-            Options: frontend heuristic or backend flag like retentionReliable */}
         <KpiCard
           title="Follower"
           value={`${summary.followersDelta >= 0 ? '+' : ''}${formatNumber(summary.followersDelta)}`}

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { Scale, Users, TrendingUp, Target, AlertCircle, Loader2, Crown } from 'lucide-react';
+import { Scale, Users, TrendingUp, Target, AlertCircle, Loader2, Crown, Filter } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchCategoryComparison, fetchViewerOverlap, fetchCategoryLeaderboard } from '@/api/client';
 import type { CategoryComparison, ViewerOverlap, CategoryLeaderboard } from '@/types/analytics';
@@ -14,10 +14,12 @@ interface ComparisonProps {
 
 export function Comparison({ streamer, days }: ComparisonProps) {
   const [leaderboardSort, setLeaderboardSort] = useState<'avg' | 'peak'>('avg');
+  // Exclude streamers with external reach (YouTube/Social-Media Publikum) from category stats
+  const [excludeExternal, setExcludeExternal] = useState(true);
 
   const { data: comparison, isLoading: loadingComparison } = useQuery<CategoryComparison>({
-    queryKey: ['categoryComparison', streamer, days],
-    queryFn: () => fetchCategoryComparison(streamer, days),
+    queryKey: ['categoryComparison', streamer, days, excludeExternal],
+    queryFn: () => fetchCategoryComparison(streamer, days, excludeExternal),
     enabled: !!streamer,
   });
 
@@ -28,8 +30,8 @@ export function Comparison({ streamer, days }: ComparisonProps) {
   });
 
   const { data: leaderboard } = useQuery<CategoryLeaderboard>({
-    queryKey: ['categoryLeaderboard', streamer, days, leaderboardSort],
-    queryFn: () => fetchCategoryLeaderboard(streamer, days, 25, leaderboardSort),
+    queryKey: ['categoryLeaderboard', streamer, days, leaderboardSort, excludeExternal],
+    queryFn: () => fetchCategoryLeaderboard(streamer, days, 25, leaderboardSort, excludeExternal),
     enabled: !!streamer,
   });
 
@@ -58,9 +60,23 @@ export function Comparison({ streamer, days }: ComparisonProps) {
         animate={{ opacity: 1, y: 0 }}
         className="bg-card rounded-xl border border-border p-6"
       >
-        <div className="flex items-center gap-3 mb-6">
-          <Scale className="w-6 h-6 text-primary" />
-          <h2 className="text-xl font-bold text-white">Deadlock Kategorie-Vergleich</h2>
+        <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+          <div className="flex items-center gap-3">
+            <Scale className="w-6 h-6 text-primary" />
+            <h2 className="text-xl font-bold text-white">Deadlock Kategorie-Vergleich</h2>
+          </div>
+          <button
+            onClick={() => setExcludeExternal(e => !e)}
+            title="Streamer mit externer Reichweite (YouTube, Social Media) aus dem Kategorie-Schnitt ausschließen"
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors border ${
+              excludeExternal
+                ? 'bg-accent/15 text-accent border-accent/30'
+                : 'bg-background text-text-secondary border-border hover:text-white'
+            }`}
+          >
+            <Filter className="w-3.5 h-3.5" />
+            Nur organische Streamer
+          </button>
         </div>
 
         {comparison && (
