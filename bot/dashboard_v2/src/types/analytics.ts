@@ -92,6 +92,8 @@ export interface ChatAnalytics {
   messagesPerMinute: number;
   chatterReturnRate: number;
   interactionRateActivePerViewer?: number;
+  interactionRateActivePerAvgViewer?: number;
+  interactionRateReliable?: boolean;
   activeRatio?: number;
   activeChatters?: number;
   lurkerRatio?: number;
@@ -107,6 +109,7 @@ export interface ChatAnalytics {
     sessionsWithChat: number;
     chatSessionCoverage: number;
     chattersApiCoverage: number;
+    passiveViewerSamples?: number;
   };
   topChatters: ChatterStats[];
   messageTypes: MessageTypeStat[];

@@ -11,6 +11,8 @@ export interface AudienceDemographicsData {
   peakHoursMethod?: string;
   interactiveRate: number;
   interactionRateActivePerViewer?: number;
+  interactionRateActivePerAvgViewer?: number;
+  interactionRateReliable?: boolean;
   loyaltyScore: number;
   timezone?: string;
   dataQuality?: {
@@ -22,6 +24,8 @@ export interface AudienceDemographicsData {
     peakSessionCount?: number;
     peakSessionsWithActivity?: number;
     interactiveSampleCount?: number;
+    interactionCoverage?: number;
+    passiveViewerSamples?: number;
   };
 }
 
@@ -55,7 +59,18 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
       : method === 'low_coverage'
         ? 'Zu geringe Datenbasis'
         : 'Echt-Daten';
-  const hasPeakData = method === 'real_samples' && data.peakActivityHours.length > 0;
+  const normalizedPeakHours = Array.from(
+    new Set(
+      (data.peakActivityHours ?? [])
+        .map((h) => Number(h))
+        .filter((h) => Number.isFinite(h))
+        .map((h) => Math.max(0, Math.min(23, Math.trunc(h))))
+    )
+  );
+  const hasPeakData = method === 'real_samples' && normalizedPeakHours.length > 0;
+  const interactionReliable =
+    data.interactionRateReliable ?? ((data.dataQuality?.passiveViewerSamples ?? 0) > 0);
+  const interactionCoveragePct = (data.dataQuality?.interactionCoverage ?? 0) * 100;
 
   return (
     <motion.div
@@ -166,7 +181,7 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
             <div className="text-xl font-bold text-white">{activityLabels[data.activityPattern]}</div>
             <div className="mt-2 text-sm text-text-secondary">
               {hasPeakData
-                ? `Peak-Zeiten (${data.timezone || 'UTC'}): ${data.peakActivityHours.map(h => `${h}:00`).join(', ')} Uhr`
+                ? `Peak-Zeiten (${data.timezone || 'UTC'}): ${normalizedPeakHours.map(h => `${h}:00`).join(', ')} Uhr`
                 : 'Peak-Zeiten: zu wenig Aktivitätsdaten'}
             </div>
             {data.peakHoursMethod && (
@@ -181,8 +196,14 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
                 <TrendingUp className="w-4 h-4" />
                 Interaktionsrate
               </div>
-              <div className="text-2xl font-bold text-primary">{data.interactiveRate.toFixed(1)}%</div>
-              <div className="text-xs text-text-secondary mt-1">Aktive Chatter / Ø Viewer</div>
+              <div className="text-2xl font-bold text-primary">
+                {interactionReliable ? `${data.interactiveRate.toFixed(1)}%` : '-'}
+              </div>
+              <div className="text-xs text-text-secondary mt-1">
+                {interactionReliable
+                  ? 'Aktive Chatter / getrackte Viewer'
+                  : `Nicht belastbar (Coverage ${interactionCoveragePct.toFixed(1)}%)`}
+              </div>
             </div>
             <div className="bg-background rounded-lg p-4 text-center">
               <div className="flex items-center justify-center gap-1 text-text-secondary text-sm mb-2">
@@ -204,8 +225,8 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
               <>
                 <div className="flex gap-1">
                   {Array.from({ length: 24 }, (_, i) => {
-                    const isPeak = data.peakActivityHours.includes(i);
-                    const isNearPeak = data.peakActivityHours.some(h => Math.abs(h - i) === 1);
+                    const isPeak = normalizedPeakHours.includes(i);
+                    const isNearPeak = normalizedPeakHours.some(h => Math.abs(h - i) === 1);
                     return (
                       <motion.div
                         key={i}
@@ -246,7 +267,7 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
               text={`Starke Community! ${data.loyaltyScore.toFixed(0)}% deiner Viewer kommen regelmäßig zurück.`}
             />
           )}
-          {method === 'real_samples' && data.interactiveRate > 15 && (
+          {method === 'real_samples' && interactionReliable && data.interactiveRate > 15 && (
             <InsightBadge
               type="success"
               text={`Hohe Interaktion: ${data.interactiveRate.toFixed(0)}% deiner Viewer chatten aktiv mit.`}

@@ -480,9 +480,13 @@ class _AnalyticsInsightsMixin:
                 chatter_return_rate = (
                     (returning_chatters / unique_chatters) * 100.0 if unique_chatters > 0 else 0.0
                 )
-                interaction_rate_active_per_viewer = (
+                # Prefer tracked-viewer based interaction to avoid >100% artifacts for small channels.
+                interaction_rate_active_per_viewer = active_ratio * 100.0
+                interaction_rate_active_per_avg_viewer = (
                     (active_chatters_count / avg_viewers) * 100.0 if avg_viewers > 0 else 0.0
                 )
+                passive_viewers = max(0, total_unique_viewers - active_chatters_count)
+                interaction_rate_reliable = passive_viewers > 0
                 chat_session_coverage_ratio = (
                     (sessions_with_chat / session_count) if session_count > 0 else 0.0
                 )
@@ -539,6 +543,10 @@ class _AnalyticsInsightsMixin:
                         "interactionRateActivePerViewer": round(
                             interaction_rate_active_per_viewer, 1
                         ),
+                        "interactionRateActivePerAvgViewer": round(
+                            interaction_rate_active_per_avg_viewer, 1
+                        ),
+                        "interactionRateReliable": interaction_rate_reliable,
                         "commandMessages": command_messages,
                         "nonCommandMessages": max(0, total_messages - command_messages),
                         "lurkerRatio": lurker_ratio,
@@ -591,6 +599,7 @@ class _AnalyticsInsightsMixin:
                             "sessionsWithChat": sessions_with_chat,
                             "chatSessionCoverage": chat_session_coverage_pct,
                             "chattersApiCoverage": chatters_api_coverage,
+                            "passiveViewerSamples": passive_viewers,
                         },
                     }
                 )

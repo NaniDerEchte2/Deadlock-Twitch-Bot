@@ -1112,10 +1112,12 @@ class _AnalyticsAudienceMixin:
                 weighted_interaction_sum = float(chat_stats[0]) if chat_stats and chat_stats[0] else 0
                 total_active_chatters = int(chat_stats[2] or 0) if chat_stats else 0
 
-                interaction_rate_raw = (
+                interaction_rate_per_avg_viewer_raw = (
                     weighted_interaction_sum / total_weight if total_weight > 0 else 0.0
                 )
-                interaction_rate_pct = max(0.0, min(100.0, interaction_rate_raw * 100.0))
+                interaction_rate_per_avg_viewer_pct = max(
+                    0.0, min(100.0, interaction_rate_per_avg_viewer_raw * 100.0)
+                )
 
                 # Distinct viewer cohorts with fallback when is_first_time_global is missing
                 viewer_rows = conn.execute(
@@ -1128,7 +1130,8 @@ class _AnalyticsAudienceMixin:
                             MAX(CASE WHEN sc.messages > 0 THEN 1 ELSE 0 END) AS active_flag,
                             MAX(CASE WHEN sc.messages = 0 AND sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) AS lurker_flag,
                             MAX(CASE WHEN sc.is_first_time_global IS TRUE THEN 1 ELSE 0 END) AS first_time_flag,
-                            MAX(CASE WHEN sc.is_first_time_global IS NOT NULL THEN 1 ELSE 0 END) AS has_first_flag
+                            MAX(CASE WHEN sc.is_first_time_global IS NOT NULL THEN 1 ELSE 0 END) AS has_first_flag,
+                            MAX(CASE WHEN sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) AS seen_flag
                         FROM twitch_session_chatters sc
                         JOIN twitch_stream_sessions s ON s.id = sc.session_id
                         WHERE s.started_at >= ? AND LOWER(s.streamer_login) = ? AND s.ended_at IS NOT NULL
@@ -1151,6 +1154,7 @@ class _AnalyticsAudienceMixin:
                         pu.lurker_flag,
                         pu.first_time_flag,
                         pu.has_first_flag,
+                        pu.seen_flag,
                         CASE
                             WHEN r.chatter_login IS NOT NULL AND r.first_seen_at < ?
                             THEN 1 ELSE 0
@@ -1172,7 +1176,8 @@ class _AnalyticsAudienceMixin:
                         "lurker": bool(row[4]),
                         "first_flag": bool(row[5]),
                         "has_first_flag": bool(row[6]),
-                        "seen_before": bool(row[7]),
+                        "seen_flag": bool(row[7]),
+                        "seen_before": bool(row[8]),
                     }
                     has_first_flag_data = has_first_flag_data or entry["has_first_flag"]
                     viewer_entries.append(entry)
@@ -1210,6 +1215,15 @@ class _AnalyticsAudienceMixin:
 
                 def _pct(part: int, whole: int) -> float:
                     return round((part / whole) * 100, 1) if whole > 0 else 0.0
+
+                active_viewers = sum(1 for v in viewer_entries if v["active"])
+                passive_viewers = max(0, total_viewers - active_viewers)
+                seen_via_chatters_viewers = sum(1 for v in viewer_entries if v["seen_flag"])
+                interaction_coverage = (
+                    round(seen_via_chatters_viewers / total_viewers, 3) if total_viewers > 0 else 0.0
+                )
+                interaction_rate_pct = _pct(active_viewers, total_viewers)
+                interaction_rate_reliable = passive_viewers > 0
 
                 viewer_type = [
                     {"label": "Dedicated Fans", "percentage": _pct(dedicated, total_viewers)},
@@ -1288,6 +1302,10 @@ class _AnalyticsAudienceMixin:
                         "peakHoursMethod": peak_hours_method,
                         "interactiveRate": round(interaction_rate_pct, 1),
                         "interactionRateActivePerViewer": round(interaction_rate_pct, 1),
+                        "interactionRateActivePerAvgViewer": round(
+                            interaction_rate_per_avg_viewer_pct, 1
+                        ),
+                        "interactionRateReliable": interaction_rate_reliable,
                         "loyaltyScore": loyalty_score,
                         "timezone": timezone_name,
                         "dataQuality": {
@@ -1299,6 +1317,8 @@ class _AnalyticsAudienceMixin:
                             "peakSessionCount": peak_session_count,
                             "peakSessionsWithActivity": peak_sessions_with_activity,
                             "interactiveSampleCount": total_active_chatters,
+                            "interactionCoverage": interaction_coverage,
+                            "passiveViewerSamples": passive_viewers,
                         },
                     }
                 )

@@ -304,6 +304,8 @@ export interface AudienceDemographicsResponse {
   peakHoursMethod?: string;
   interactiveRate: number;
   interactionRateActivePerViewer?: number;
+  interactionRateActivePerAvgViewer?: number;
+  interactionRateReliable?: boolean;
   loyaltyScore: number;
   timezone?: string;
   dataQuality?: {
@@ -315,6 +317,8 @@ export interface AudienceDemographicsResponse {
     peakSessionCount?: number;
     peakSessionsWithActivity?: number;
     interactiveSampleCount?: number;
+    interactionCoverage?: number;
+    passiveViewerSamples?: number;
   };
 }
 

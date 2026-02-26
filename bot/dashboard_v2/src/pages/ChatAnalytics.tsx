@@ -53,6 +53,9 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
     data.chatterReturnRate ?? (totalChatters ? (returningChatters / totalChatters) * 100 : 0);
   const interactionRate =
     data.interactionRateActivePerViewer ?? Math.min(100, (data.activeRatio ?? 0) * 100);
+  const interactionRateReliable =
+    data.interactionRateReliable ?? ((data.dataQuality?.passiveViewerSamples ?? 0) > 0);
+  const interactionCoverage = data.dataQuality?.chattersApiCoverage ?? 0;
   const hasHourlySamples = (data.hourlyActivity?.some(h => h.count > 0) ?? false);
   const dataMethod = data.dataQuality?.method ?? (data.totalMessages > 0 ? 'real_chat_messages' : 'no_data');
 
@@ -61,6 +64,11 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
       {dataMethod !== 'real_chat_messages' && (
         <div className="rounded-xl border border-border bg-background/60 p-4 text-sm text-text-secondary">
           Zu wenig belastbare Chat-Aktivitätsdaten für stabile Kohorten-/Zeitmuster.
+        </div>
+      )}
+      {!interactionRateReliable && totalTrackedViewers > 0 && (
+        <div className="rounded-xl border border-border bg-background/60 p-4 text-sm text-text-secondary">
+          Interaktionsrate ist derzeit nicht belastbar: es fehlen passive Viewer-Samples (Lurker/Chatters-API-Coverage {(interactionCoverage * 100).toFixed(1)}%).
         </div>
       )}
 
@@ -121,8 +129,12 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
           />
           <LoyaltyGauge
             label="Interaktionsrate"
-            percentage={interactionRate}
-            description="Aktive Chatter / Ø Viewer"
+            percentage={interactionRateReliable ? interactionRate : 0}
+            description={
+              interactionRateReliable
+                ? "Aktive Chatter / getrackte Viewer"
+                : `Nicht belastbar (${(interactionCoverage * 100).toFixed(1)}% Coverage)`
+            }
             color="from-primary to-success"
           />
         </div>

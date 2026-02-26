@@ -768,6 +768,33 @@ class _AnalyticsOverviewMixin:
                             COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id) AS viewer_id,
                             COUNT(DISTINCT sc.session_id) AS session_count,
                             SUM(COALESCE(sc.messages, 0)) AS msg_sum,
+                            SUM(
+                                CASE
+                                    WHEN sc.messages = 0 AND COALESCE(sc.seen_via_chatters_api, FALSE) IS TRUE
+                                    THEN 1 ELSE 0
+                                END
+                            ) AS lurk_samples,
+                            SUM(CASE WHEN sc.messages > 0 THEN 1 ELSE 0 END) AS active_samples,
+                            MAX(
+                                CASE
+                                    WHEN COALESCE(sc.seen_via_chatters_api, FALSE) IS TRUE
+                                    THEN 1 ELSE 0
+                                END
+                            ) AS seen_via_api,
+                            MIN(
+                                CASE
+                                    WHEN sc.messages = 0 AND COALESCE(sc.seen_via_chatters_api, FALSE) IS TRUE
+                                    THEN COALESCE(sc.first_message_at, sc.last_seen_at)
+                                    ELSE NULL
+                                END
+                            ) AS first_lurk_seen,
+                            MIN(
+                                CASE
+                                    WHEN sc.messages > 0
+                                    THEN COALESCE(sc.first_message_at, sc.last_seen_at)
+                                    ELSE NULL
+                                END
+                            ) AS first_active_seen,
                             MIN(sc.first_message_at) AS first_seen,
                             MAX(sc.last_seen_at) AS last_seen
                         FROM twitch_session_chatters sc
@@ -776,20 +803,44 @@ class _AnalyticsOverviewMixin:
                     )
                     SELECT
                         COUNT(*) AS total_viewers,
-                        COUNT(*) FILTER (WHERE msg_sum = 0) AS lurker_count,
-                        AVG(session_count) FILTER (WHERE msg_sum = 0) AS avg_sessions_lurkers
+                        COUNT(*) FILTER (WHERE seen_via_api = 1) AS seen_sample_viewers,
+                        COUNT(*) FILTER (WHERE seen_via_api = 1 AND msg_sum = 0) AS lurker_count,
+                        AVG(session_count) FILTER (WHERE seen_via_api = 1 AND msg_sum = 0) AS avg_sessions_lurkers,
+                        COUNT(*) FILTER (
+                            WHERE seen_via_api = 1
+                              AND lurk_samples > 0
+                        ) AS eligible_lurkers,
+                        COUNT(*) FILTER (
+                            WHERE seen_via_api = 1
+                              AND lurk_samples > 0
+                              AND active_samples > 0
+                              AND first_active_seen IS NOT NULL
+                              AND first_lurk_seen IS NOT NULL
+                              AND first_active_seen > first_lurk_seen
+                        ) AS converted_lurkers
                     FROM chatter
                     """,
                     [since_date, streamer.lower()],
                 ).fetchone()
 
                 total_viewers = int(agg_row[0]) if agg_row and agg_row[0] else 0
-                lurker_count = int(agg_row[1]) if agg_row and agg_row[1] else 0
-                avg_sessions_lurkers = float(agg_row[2]) if agg_row and agg_row[2] else 0.0
+                seen_sample_viewers = int(agg_row[1]) if agg_row and agg_row[1] else 0
+                lurker_count = int(agg_row[2]) if agg_row and agg_row[2] else 0
+                avg_sessions_lurkers = float(agg_row[3]) if agg_row and agg_row[3] else 0.0
+                eligible_lurkers = int(agg_row[4]) if agg_row and agg_row[4] else 0
+                converted_lurkers = int(agg_row[5]) if agg_row and agg_row[5] else 0
 
                 if total_viewers == 0:
                     return web.json_response(
                         {"dataAvailable": False, "message": "Keine Daten für den Zeitraum"},
+                        status=200,
+                    )
+                if seen_sample_viewers == 0:
+                    return web.json_response(
+                        {
+                            "dataAvailable": False,
+                            "message": "Zu wenig Chatter-API/Lurker-Daten im Zeitraum",
+                        },
                         status=200,
                     )
 
@@ -807,6 +858,12 @@ class _AnalyticsOverviewMixin:
                             COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id) AS viewer_id,
                             COUNT(DISTINCT sc.session_id) AS session_count,
                             SUM(COALESCE(sc.messages, 0)) AS msg_sum,
+                            MAX(
+                                CASE
+                                    WHEN COALESCE(sc.seen_via_chatters_api, FALSE) IS TRUE
+                                    THEN 1 ELSE 0
+                                END
+                            ) AS seen_via_api,
                             MIN(sc.first_message_at) AS first_seen,
                             MAX(sc.last_seen_at) AS last_seen
                         FROM twitch_session_chatters sc
@@ -816,6 +873,7 @@ class _AnalyticsOverviewMixin:
                     SELECT viewer_id, session_count, first_seen, last_seen
                     FROM chatter
                     WHERE msg_sum = 0
+                      AND seen_via_api = 1
                     ORDER BY session_count DESC
                     LIMIT 25
                     """,
@@ -842,16 +900,17 @@ class _AnalyticsOverviewMixin:
                         "dataAvailable": True,
                         "regularLurkers": regular_lurkers,
                         "lurkerStats": {
-                            "ratio": lurker_count / total_viewers if total_viewers else 0.0,
+                            "ratio": lurker_count / seen_sample_viewers if seen_sample_viewers else 0.0,
                             "avgSessions": avg_sessions_lurkers,
                             "totalLurkers": lurker_count,
-                            "totalViewers": total_viewers,
+                            "totalViewers": seen_sample_viewers,
                         },
-                        # Conversion von still zu aktiv ist schwer sauber zu messen; wir belassen sie vorerst bei 0.
                         "conversionStats": {
-                            "rate": 0.0,
-                            "eligible": lurker_count,
-                            "converted": 0,
+                            "rate": converted_lurkers / eligible_lurkers
+                            if eligible_lurkers
+                            else 0.0,
+                            "eligible": eligible_lurkers,
+                            "converted": converted_lurkers,
                         },
                     }
                 )
