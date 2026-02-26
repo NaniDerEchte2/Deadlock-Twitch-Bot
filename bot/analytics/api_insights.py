@@ -293,23 +293,26 @@ class _AnalyticsInsightsMixin:
                 chatter_rows = conn.execute(
                     """
                     WITH per_user AS (
-                        SELECT
-                            COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id) AS chatter_key,
-                            NULLIF(sc.chatter_login, '') AS chatter_login,
-                            COUNT(DISTINCT sc.session_id) AS session_count,
-                            SUM(sc.messages) AS total_messages,
-                            MAX(CASE WHEN sc.messages > 0 THEN 1 ELSE 0 END) AS active_flag,
-                            MAX(CASE WHEN sc.messages = 0 AND sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) AS lurker_flag,
-                            MAX(CASE WHEN sc.is_first_time_global IS TRUE THEN 1 ELSE 0 END) AS first_time_flag,
-                            MAX(CASE WHEN sc.is_first_time_global IS NOT NULL THEN 1 ELSE 0 END) AS has_first_flag,
-                            MAX(CASE WHEN sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) AS seen_flag
-                        FROM twitch_session_chatters sc
-                        JOIN twitch_stream_sessions s ON s.id = sc.session_id
-                        WHERE s.started_at >= ?
-                          AND LOWER(s.streamer_login) = ?
-                          AND s.ended_at IS NOT NULL
-                        GROUP BY chatter_key, chatter_login
-                        HAVING chatter_key IS NOT NULL
+                        SELECT *
+                        FROM (
+                            SELECT
+                                COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id) AS chatter_key,
+                                NULLIF(sc.chatter_login, '') AS chatter_login,
+                                COUNT(DISTINCT sc.session_id) AS session_count,
+                                SUM(sc.messages) AS total_messages,
+                                MAX(CASE WHEN sc.messages > 0 THEN 1 ELSE 0 END) AS active_flag,
+                                MAX(CASE WHEN sc.messages = 0 AND sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) AS lurker_flag,
+                                MAX(CASE WHEN sc.is_first_time_global IS TRUE THEN 1 ELSE 0 END) AS first_time_flag,
+                                MAX(CASE WHEN sc.is_first_time_global IS NOT NULL THEN 1 ELSE 0 END) AS has_first_flag,
+                                MAX(CASE WHEN sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) AS seen_flag
+                            FROM twitch_session_chatters sc
+                            JOIN twitch_stream_sessions s ON s.id = sc.session_id
+                            WHERE s.started_at >= ?
+                              AND LOWER(s.streamer_login) = ?
+                              AND s.ended_at IS NOT NULL
+                            GROUP BY 1, 2
+                        ) grouped_chatters
+                        WHERE chatter_key IS NOT NULL
                     ),
                     rollup AS (
                         SELECT LOWER(streamer_login) AS streamer_login, LOWER(chatter_login) AS chatter_login
