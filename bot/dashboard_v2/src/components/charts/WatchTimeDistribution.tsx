@@ -1,5 +1,6 @@
 import { motion } from 'framer-motion';
 import { Clock, TrendingUp, TrendingDown, Users, Timer } from 'lucide-react';
+import { NoDataCard } from '@/components/cards/NoDataCard';
 import type { WatchTimeDistribution as WatchTimeDistributionType } from '@/types/analytics';
 
 interface WatchTimeDistributionProps {
@@ -15,6 +16,15 @@ const SEGMENTS = [
 ] as const;
 
 export function WatchTimeDistribution({ data }: WatchTimeDistributionProps) {
+  if (!data || data.dataQuality?.method === 'insufficient_real_data' || data.dataQuality?.method === 'no_data') {
+    return (
+      <NoDataCard
+        message="Nicht genug Daten für Watch Time"
+        submessage="Zu wenig Chatters-API Coverage – wir zeigen Ergebnisse, sobald mehr echte Zuschauer-Samples vorliegen."
+      />
+    );
+  }
+
   const totalLoyalViewers = data.min30to60 + data.over60min;
   const hasPrevious = data.previous && data.previous.sessionCount !== undefined && data.previous.sessionCount > 0;
   const prevLoyalViewers = hasPrevious ? (data.previous!.min30to60 + data.previous!.over60min) : 0;

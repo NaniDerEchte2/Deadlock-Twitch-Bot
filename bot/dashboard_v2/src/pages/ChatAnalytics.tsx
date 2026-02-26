@@ -102,8 +102,8 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
           />
           <LoyaltyGauge
             label="Interaktionsrate"
-            percentage={Math.min(100, data.uniqueChatters / 10)}
-            description="Chatter pro 100 Viewer (geschätzt)"
+            percentage={Math.min(100, (data.activeRatio ?? 0) * 100)}
+            description="Aktive Chatter pro 100 Viewer"
             color="from-primary to-success"
           />
         </div>
@@ -155,6 +155,9 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
           <div className="flex items-center gap-3 mb-6">
             <TrendingUp className="w-6 h-6 text-success" />
             <h2 className="text-xl font-bold text-white">Aktivität nach Tageszeit</h2>
+            <span className="text-[11px] text-text-secondary border border-border/60 rounded-full px-2 py-0.5">
+              UTC
+            </span>
           </div>
           <div className="h-64 flex items-end gap-1">
             {Array.from({ length: 24 }).map((_, hour) => {

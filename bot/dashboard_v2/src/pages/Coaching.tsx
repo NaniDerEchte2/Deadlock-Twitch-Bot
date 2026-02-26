@@ -1126,6 +1126,7 @@ const METRIC_LABELS: Record<string, string> = {
 function PeerComparisonSection({ data }: { data: CoachingData }) {
   const pc = data.peerComparison;
   if (!pc || !pc.ownData) return null;
+  const percentile = Math.round((pc.ownRank / Math.max(pc.totalStreamers, 1)) * 100);
 
   return (
     <motion.div
@@ -1133,14 +1134,17 @@ function PeerComparisonSection({ data }: { data: CoachingData }) {
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: 0.6 }}
       className="bg-card rounded-xl border border-border p-6"
-    >
-      <div className="flex items-center gap-3 mb-6">
-        <Trophy className="w-6 h-6 text-warning" />
-        <h2 className="text-xl font-bold text-white">Peer-Vergleich</h2>
-        <span className="text-xs text-text-secondary ml-auto">
-          Rang {pc.ownRank} von {pc.totalStreamers}
-        </span>
-      </div>
+      >
+        <div className="flex items-center gap-3 mb-6">
+          <Trophy className="w-6 h-6 text-warning" />
+          <h2 className="text-xl font-bold text-white">Peer-Vergleich</h2>
+          <span className="text-xs text-text-secondary ml-auto">
+            Rang {pc.ownRank} von {pc.totalStreamers}
+          </span>
+        </div>
+        <div className="text-xs text-text-secondary mb-4">
+          Du bist in den Top {percentile}% aller Deadlock-Streamer (Ranking nach Ø Viewern).
+        </div>
 
       {/* Per-Metric Rankings */}
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-6">

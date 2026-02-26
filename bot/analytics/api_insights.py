@@ -290,28 +290,71 @@ class _AnalyticsInsightsMixin:
                 distinct_chatters_from_messages = len(distinct_chatters_set)
 
                 # Chatter cohort split + lurker stats from session-level chatter table.
-                cohort_stats = conn.execute(
+                chatter_rows = conn.execute(
                     """
+                    WITH per_user AS (
+                        SELECT
+                            COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id) AS chatter_key,
+                            NULLIF(sc.chatter_login, '') AS chatter_login,
+                            COUNT(DISTINCT sc.session_id) AS session_count,
+                            SUM(sc.messages) AS total_messages,
+                            MAX(CASE WHEN sc.messages > 0 THEN 1 ELSE 0 END) AS active_flag,
+                            MAX(CASE WHEN sc.messages = 0 AND sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) AS lurker_flag,
+                            MAX(CASE WHEN sc.is_first_time_global IS TRUE THEN 1 ELSE 0 END) AS first_time_flag,
+                            MAX(CASE WHEN sc.is_first_time_global IS NOT NULL THEN 1 ELSE 0 END) AS has_first_flag,
+                            MAX(CASE WHEN sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) AS seen_flag
+                        FROM twitch_session_chatters sc
+                        JOIN twitch_stream_sessions s ON s.id = sc.session_id
+                        WHERE s.started_at >= ?
+                          AND LOWER(s.streamer_login) = ?
+                          AND s.ended_at IS NOT NULL
+                        GROUP BY chatter_key, chatter_login
+                        HAVING chatter_key IS NOT NULL
+                    ),
+                    rollup AS (
+                        SELECT LOWER(streamer_login) AS streamer_login, LOWER(chatter_login) AS chatter_login
+                        FROM twitch_chatter_rollup
+                        WHERE LOWER(streamer_login) = ?
+                    )
                     SELECT
-                        COUNT(DISTINCT COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)) as unique_chatters,
-                        COUNT(
-                            DISTINCT CASE
-                                WHEN COALESCE(sc.is_first_time_global, FALSE) IS TRUE
-                                THEN COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)
-                            END
-                        ) as first_time_chatters,
-                        COUNT(DISTINCT sc.session_id) as sessions_with_chat,
-                        COUNT(*) as total_unique_viewers,
-                        SUM(
-                            CASE
-                                WHEN sc.messages = 0 AND sc.seen_via_chatters_api IS TRUE
-                                THEN 1
-                                ELSE 0
-                            END
-                        ) as lurkers,
-                        SUM(CASE WHEN sc.messages > 0 THEN 1 ELSE 0 END) as active_chatters_count,
-                        ROUND(AVG(CASE WHEN sc.messages > 0 THEN sc.messages ELSE NULL END), 1) as avg_messages_per_chatter,
-                        SUM(CASE WHEN sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) as chatters_api_seen
+                        pu.chatter_key,
+                        pu.chatter_login,
+                        pu.session_count,
+                        pu.total_messages,
+                        pu.active_flag,
+                        pu.lurker_flag,
+                        pu.first_time_flag,
+                        pu.has_first_flag,
+                        pu.seen_flag,
+                        CASE WHEN r.chatter_login IS NOT NULL THEN 1 ELSE 0 END AS seen_before
+                    FROM per_user pu
+                    LEFT JOIN rollup r ON r.chatter_login = LOWER(pu.chatter_login)
+                    """,
+                    [since_date, streamer_login, streamer_login],
+                ).fetchall()
+
+                chatter_entries = []
+                has_first_flag_data = False
+                for row in chatter_rows:
+                    entry = {
+                        "chatter_key": row[0],
+                        "chatter_login": row[1],
+                        "session_count": int(row[2] or 0),
+                        "total_messages": int(row[3] or 0),
+                        "active_flag": bool(row[4]),
+                        "lurker_flag": bool(row[5]),
+                        "first_time_flag": bool(row[6]),
+                        "has_first_flag": bool(row[7]),
+                        "seen_flag": bool(row[8]),
+                        "seen_before": bool(row[9]),
+                    }
+                    has_first_flag_data = has_first_flag_data or entry["has_first_flag"]
+                    chatter_entries.append(entry)
+
+                unique_chatters = len(chatter_entries)
+                sessions_with_chat_row = conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT sc.session_id)
                     FROM twitch_session_chatters sc
                     JOIN twitch_stream_sessions s ON s.id = sc.session_id
                     WHERE s.started_at >= ?
@@ -320,44 +363,45 @@ class _AnalyticsInsightsMixin:
                     """,
                     [since_date, streamer_login],
                 ).fetchone()
-                unique_chatters = int(cohort_stats[0]) if cohort_stats and cohort_stats[0] else 0
-                first_time_chatters = (
-                    int(cohort_stats[1]) if cohort_stats and cohort_stats[1] else 0
-                )
-                sessions_with_chat = int(cohort_stats[2]) if cohort_stats and cohort_stats[2] else 0
-                total_unique_viewers = (
-                    int(cohort_stats[3]) if cohort_stats and cohort_stats[3] else 0
-                )
-                lurker_count = int(cohort_stats[4]) if cohort_stats and cohort_stats[4] else 0
-                active_chatters_count = (
-                    int(cohort_stats[5]) if cohort_stats and cohort_stats[5] else 0
-                )
+                sessions_with_chat = int(sessions_with_chat_row[0]) if sessions_with_chat_row and sessions_with_chat_row[0] else 0
+
+                active_chatters_count = sum(1 for c in chatter_entries if c["active_flag"])
+                lurker_count = sum(1 for c in chatter_entries if c["lurker_flag"])
+                chatters_api_seen = sum(1 for c in chatter_entries if c["seen_flag"])
+                total_messages_per_user = sum(c["total_messages"] for c in chatter_entries)
                 avg_messages_per_chatter = (
-                    float(cohort_stats[6]) if cohort_stats and cohort_stats[6] else 0.0
+                    round(total_messages_per_user / active_chatters_count, 1) if active_chatters_count > 0 else 0.0
                 )
-                chatters_api_seen = int(cohort_stats[7]) if cohort_stats and cohort_stats[7] else 0
-                lurker_ratio = (
-                    round(lurker_count / total_unique_viewers, 3)
-                    if total_unique_viewers > 0
-                    else 0.0
-                )
-                active_ratio = (
-                    round(active_chatters_count / total_unique_viewers, 3)
-                    if total_unique_viewers > 0
-                    else 0.0
-                )
-                chatters_api_coverage = (
-                    round(chatters_api_seen / total_unique_viewers, 3)
-                    if total_unique_viewers > 0
-                    else 0.0
-                )
+
+                first_time_chatters = 0
+                for c in chatter_entries:
+                    if has_first_flag_data:
+                        is_first = c["first_time_flag"]
+                    else:
+                        is_first = not c["seen_before"] if c["chatter_login"] else True
+                    if is_first:
+                        first_time_chatters += 1
 
                 # Fallback for older rows where session_chatters may be sparse.
                 if unique_chatters == 0 and distinct_chatters_from_messages > 0:
                     unique_chatters = distinct_chatters_from_messages
-                    first_time_chatters = 0
+                    first_time_chatters = distinct_chatters_from_messages
+                    active_chatters_count = 0
+                    lurker_count = 0
+                    chatters_api_seen = 0
+                    avg_messages_per_chatter = 0.0
 
                 returning_chatters = max(0, unique_chatters - first_time_chatters)
+                total_unique_viewers = unique_chatters
+                lurker_ratio = (
+                    round(lurker_count / total_unique_viewers, 3) if total_unique_viewers > 0 else 0.0
+                )
+                active_ratio = (
+                    round(active_chatters_count / total_unique_viewers, 3) if total_unique_viewers > 0 else 0.0
+                )
+                chatters_api_coverage = (
+                    round(chatters_api_seen / total_unique_viewers, 3) if total_unique_viewers > 0 else 0.0
+                )
                 total_minutes = total_duration_seconds / 60.0 if total_duration_seconds > 0 else 0.0
                 messages_per_minute = (total_messages / total_minutes) if total_minutes > 0 else 0.0
                 chatter_return_rate = (

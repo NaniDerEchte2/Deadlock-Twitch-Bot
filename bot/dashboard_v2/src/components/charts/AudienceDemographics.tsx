@@ -66,6 +66,11 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
           </span>
         )}
       </div>
+      {isHeuristic && (
+        <div className="text-xs text-warning mb-4">
+          Hinweis: Regionale Verteilung ist geschätzt (Sprache + Sendezeiten) – keine echten Geo-Daten.
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Left Column - Charts */}

@@ -88,6 +88,17 @@ export interface ChatAnalytics {
   returningChatters: number;
   messagesPerMinute: number;
   chatterReturnRate: number;
+  activeRatio?: number;
+  activeChatters?: number;
+  lurkerRatio?: number;
+  lurkerCount?: number;
+  avgMessagesPerChatter?: number;
+  dataQuality?: {
+    sessions: number;
+    sessionsWithChat: number;
+    chatSessionCoverage: number;
+    chattersApiCoverage: number;
+  };
   topChatters: ChatterStats[];
   messageTypes: MessageTypeStat[];
   hourlyActivity: HourlyActivityStat[];
@@ -258,6 +269,10 @@ export interface WatchTimeDistribution {
   over60min: number;      // Loyale Zuschauer (%)
   avgWatchTime: number;   // Durchschnittliche Watch Time in Minuten
   medianWatchTime: number; // Median Watch Time in Minuten
+  dataQuality?: {
+    method: string;
+    coverage?: number;
+  };
   sessionCount?: number;
   previous?: {
     under5min: number;

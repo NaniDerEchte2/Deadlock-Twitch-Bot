@@ -51,6 +51,7 @@ export function Monetization({ streamer, days }: MonetizationProps) {
 
   const { ads, hype_train, bits, subs, window_days } = data;
   const noAds = ads.total === 0;
+  const viewerDropValue = ads.avg_viewer_drop_pct !== null ? fmtPct(ads.avg_viewer_drop_pct) : 'Keine Viewer-Timeline Daten';
 
   return (
     <div className="space-y-6">
@@ -78,8 +79,8 @@ export function Monetization({ streamer, days }: MonetizationProps) {
               <StatTile label="Ø Dauer" value={`${ads.avg_duration_s.toFixed(0)} s`} />
               <StatTile
                 label="Ø Viewer-Drop"
-                value={ads.avg_viewer_drop_pct !== null ? fmtPct(ads.avg_viewer_drop_pct) : '-'}
-                sub="nach Ad-Break"
+                value={viewerDropValue}
+                sub={ads.avg_viewer_drop_pct !== null ? 'nach Ad-Break' : undefined}
               />
             </div>
 

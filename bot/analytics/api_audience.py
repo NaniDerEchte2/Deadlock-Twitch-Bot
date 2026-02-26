@@ -78,8 +78,8 @@ class _AnalyticsAudienceMixin:
         else:
             coverage_real = len(real_minutes) / max(1, total_sessions)
 
-        # Decide whether real data is sufficient (>=30% coverage vs viewer count)
-        use_real = coverage_real >= 0.3 and len(real_minutes) >= 3
+        # Decide whether real data is sufficient (>=10% coverage and >=5 Samples)
+        use_real = coverage_real >= 0.1 and len(real_minutes) >= 5
 
         if use_real:
             total_viewers = len(real_minutes)
@@ -782,36 +782,104 @@ class _AnalyticsAudienceMixin:
 
                 total_weight = float(chat_stats[1]) if chat_stats and chat_stats[1] else 0
                 weighted_chat_rate_sum = float(chat_stats[0]) if chat_stats and chat_stats[0] else 0
-                total_chatters = float(chat_stats[2]) if chat_stats and chat_stats[2] else 0
-                total_returning = float(chat_stats[3]) if chat_stats and chat_stats[3] else 0
 
-                chat_rate = weighted_chat_rate_sum / total_weight if total_weight > 0 else 0
-                return_rate = total_returning / total_chatters if total_chatters > 0 else 0
+                chat_rate_raw = weighted_chat_rate_sum / total_weight if total_weight > 0 else 0
+                chat_rate = min(1.0, chat_rate_raw)
 
-                # Estimate viewer types
-                # High chat rate + high return = dedicated community
-                # Low chat rate + low return = casual viewers
-                if chat_rate > 0.15 and return_rate > 0.4:
-                    viewer_type = [
-                        {"label": "Dedicated Fans", "percentage": 45},
-                        {"label": "Regular Viewers", "percentage": 35},
-                        {"label": "Casual Viewers", "percentage": 15},
-                        {"label": "New Visitors", "percentage": 5},
-                    ]
-                elif chat_rate > 0.1:
-                    viewer_type = [
-                        {"label": "Dedicated Fans", "percentage": 25},
-                        {"label": "Regular Viewers", "percentage": 40},
-                        {"label": "Casual Viewers", "percentage": 25},
-                        {"label": "New Visitors", "percentage": 10},
-                    ]
-                else:
-                    viewer_type = [
-                        {"label": "Dedicated Fans", "percentage": 15},
-                        {"label": "Regular Viewers", "percentage": 30},
-                        {"label": "Casual Viewers", "percentage": 35},
-                        {"label": "New Visitors", "percentage": 20},
-                    ]
+                # Distinct viewer cohorts with fallback when is_first_time_global is missing
+                viewer_rows = conn.execute(
+                    """
+                    WITH per_user AS (
+                        SELECT
+                            COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id) AS user_id,
+                            NULLIF(sc.chatter_login, '') AS chatter_login,
+                            COUNT(DISTINCT sc.session_id) AS session_count,
+                            MAX(CASE WHEN sc.messages > 0 THEN 1 ELSE 0 END) AS active_flag,
+                            MAX(CASE WHEN sc.messages = 0 AND sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) AS lurker_flag,
+                            MAX(CASE WHEN sc.is_first_time_global IS TRUE THEN 1 ELSE 0 END) AS first_time_flag,
+                            MAX(CASE WHEN sc.is_first_time_global IS NOT NULL THEN 1 ELSE 0 END) AS has_first_flag
+                        FROM twitch_session_chatters sc
+                        JOIN twitch_stream_sessions s ON s.id = sc.session_id
+                        WHERE s.started_at >= ? AND LOWER(s.streamer_login) = ? AND s.ended_at IS NOT NULL
+                          AND COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id) IS NOT NULL
+                        GROUP BY user_id, chatter_login
+                    ),
+                    rollup AS (
+                        SELECT LOWER(streamer_login) AS streamer_login, LOWER(chatter_login) AS chatter_login
+                        FROM twitch_chatter_rollup
+                        WHERE LOWER(streamer_login) = ?
+                    )
+                    SELECT
+                        pu.user_id,
+                        pu.chatter_login,
+                        pu.session_count,
+                        pu.active_flag,
+                        pu.lurker_flag,
+                        pu.first_time_flag,
+                        pu.has_first_flag,
+                        CASE WHEN r.chatter_login IS NOT NULL THEN 1 ELSE 0 END AS seen_before
+                    FROM per_user pu
+                    LEFT JOIN rollup r ON r.chatter_login = LOWER(pu.chatter_login)
+                """,
+                    [since_date, streamer.lower(), streamer.lower()],
+                ).fetchall()
+
+                viewer_entries = []
+                has_first_flag_data = False
+                for row in viewer_rows:
+                    entry = {
+                        "user_id": row[0],
+                        "chatter_login": row[1],
+                        "session_count": int(row[2] or 0),
+                        "active": bool(row[3]),
+                        "lurker": bool(row[4]),
+                        "first_flag": bool(row[5]),
+                        "has_first_flag": bool(row[6]),
+                        "seen_before": bool(row[7]),
+                    }
+                    has_first_flag_data = has_first_flag_data or entry["has_first_flag"]
+                    viewer_entries.append(entry)
+
+                total_viewers = len(viewer_entries)
+                loyalty_returning = sum(1 for v in viewer_entries if v["session_count"] >= 2)
+
+                first_time_viewers = 0
+                returning_viewers = 0
+                dedicated = 0
+                casual = 0
+                new_viewers = 0
+
+                for v in viewer_entries:
+                    if has_first_flag_data:
+                        is_first = v["first_flag"]
+                    else:
+                        # Fallback: treat as returning if we have historical rollup for this login
+                        is_first = not v["seen_before"] if v["chatter_login"] else True
+
+                    if is_first:
+                        first_time_viewers += 1
+                        if v["active"]:
+                            casual += 1
+                        else:
+                            new_viewers += 1
+                    else:
+                        returning_viewers += 1
+                        if v["active"]:
+                            dedicated += 1
+
+                regular = max(0, returning_viewers - dedicated)
+
+                def _pct(part: int, whole: int) -> float:
+                    return round((part / whole) * 100, 1) if whole > 0 else 0.0
+
+                viewer_type = [
+                    {"label": "Dedicated Fans", "percentage": _pct(dedicated, total_viewers)},
+                    {"label": "Regular Viewers", "percentage": _pct(regular, total_viewers)},
+                    {"label": "Casual Viewers", "percentage": _pct(casual, total_viewers)},
+                    {"label": "New Visitors", "percentage": _pct(new_viewers, total_viewers)},
+                ]
+
+                loyalty_score = _pct(loyalty_returning, total_viewers)
 
                 # Activity pattern based on stream schedule
                 schedule_stats = conn.execute(
@@ -857,7 +925,7 @@ class _AnalyticsAudienceMixin:
                         "languageConfidence": language_confidence,
                         "peakActivityHours": peak_hours,
                         "interactiveRate": round(chat_rate * 100, 1),
-                        "loyaltyScore": round(return_rate * 100, 1),
+                        "loyaltyScore": loyalty_score,
                         "dataQuality": {
                             "confidence": confidence,
                             "sessions": session_samples,

@@ -22,6 +22,7 @@ export function ViewerProfiles({ data }: ViewerProfilesProps) {
   }
 
   const { profiles, exclusivityDistribution } = data;
+  const passiveNote = profiles.passive === 0;
 
   const pieData = Object.entries(PROFILE_LABELS).map(([key, label]) => ({
     name: label,
@@ -84,15 +85,20 @@ export function ViewerProfiles({ data }: ViewerProfilesProps) {
                 <span className="text-sm font-medium text-white">{entry.value}</span>
               </div>
             ))}
-            <div className="pt-2 border-t border-border">
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-text-secondary">Gesamt</span>
-                <span className="text-sm font-bold text-white">{profiles.total}</span>
-              </div>
+          <div className="pt-2 border-t border-border">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-text-secondary">Gesamt</span>
+              <span className="text-sm font-bold text-white">{profiles.total}</span>
             </div>
+            {passiveNote && (
+              <p className="text-[11px] text-text-secondary mt-2">
+                Passiv: Keine Daten (Lurker anonym).
+              </p>
+            )}
           </div>
         </div>
-      </motion.div>
+      </div>
+    </motion.div>
 
       {/* Exclusivity Distribution */}
       {exclusivityDistribution.length > 0 && (
