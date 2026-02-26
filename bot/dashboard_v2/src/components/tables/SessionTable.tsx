@@ -85,7 +85,7 @@ export function SessionTable({
                   </div>
                 </td>
                 <td className="px-5 py-3">
-                  <span className="text-white">{session.uniqueChatters}</span>
+                  <span className="text-white">{session.totalChatterSessions}</span>
                   <span className="text-text-secondary text-xs ml-1">
                     ({session.firstTimeChatters} neu)
                   </span>

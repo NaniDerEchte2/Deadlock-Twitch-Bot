@@ -13,7 +13,7 @@ export interface StreamSession {
   retention10m: number;
   retention20m: number;
   dropoffPct: number;
-  uniqueChatters: number;
+  totalChatterSessions: number;
   firstTimeChatters: number;
   returningChatters: number;
   followersStart: number;
@@ -28,7 +28,7 @@ export interface DailyStats {
   avgViewers: number;
   peakViewers: number;
   followerDelta: number;
-  uniqueChatters: number;
+  totalChatterSessions: number;
   streamCount: number;
 }
 
@@ -41,7 +41,7 @@ export interface MonthlyStats {
   avgViewers: number;
   peakViewers: number;
   followerDelta: number;
-  uniqueChatters: number;
+  totalChatterSessions: number;
   streamCount: number;
 }
 
@@ -83,17 +83,26 @@ export interface CalendarHeatmapData {
 
 export interface ChatAnalytics {
   totalMessages: number;
-  uniqueChatters: number;
+  totalChatterSessions: number;
+  /** Backwards compatibility alias from API */
+  uniqueChatters?: number;
+  totalTrackedViewers?: number;
   firstTimeChatters: number;
   returningChatters: number;
   messagesPerMinute: number;
   chatterReturnRate: number;
+  interactionRateActivePerViewer?: number;
   activeRatio?: number;
   activeChatters?: number;
   lurkerRatio?: number;
   lurkerCount?: number;
   avgMessagesPerChatter?: number;
+  timezone?: string;
   dataQuality?: {
+    method?: 'no_data' | 'real_chat_messages' | string;
+    coverage?: number;
+    sampleCount?: number;
+    confidence?: 'very_low' | 'low' | 'medium' | 'high';
     sessions: number;
     sessionsWithChat: number;
     chatSessionCoverage: number;
@@ -197,7 +206,7 @@ export interface DashboardOverview {
     followersGainedPerHour?: number;
     retention10m: number;
     retentionReliable?: boolean;
-    uniqueChatters: number;
+    totalChatterSessions: number;
     streamCount: number;
     // Neue Trend-Felder
     avgViewersTrend?: number;      // % Änderung vs. Vorperiode
@@ -270,8 +279,14 @@ export interface WatchTimeDistribution {
   avgWatchTime: number;   // Durchschnittliche Watch Time in Minuten
   medianWatchTime: number; // Median Watch Time in Minuten
   dataQuality?: {
-    method: string;
+    method: 'no_data' | 'low_coverage' | 'real_samples' | string;
     coverage?: number;
+    sample_count?: number;
+    viewer_base_count?: number;
+    required_min_samples?: number;
+    required_min_coverage?: number;
+    confidence?: 'very_low' | 'low' | 'medium' | 'high';
+    sessions?: number;
   };
   sessionCount?: number;
   previous?: {
@@ -343,6 +358,8 @@ export interface AudienceInsights {
     viewerReturnRate: number;     // % der Viewer die zurückkommen
     viewerReturnChange: number;   // % Änderung return rate
   };
+  distinctViewers?: number;
+  returnRateMethod?: string;
 }
 
 // API Response Types

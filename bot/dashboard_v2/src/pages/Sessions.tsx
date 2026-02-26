@@ -228,7 +228,7 @@ function SessionDetails({ sessionId, session }: SessionDetailsProps) {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <MetricBox label="Start Viewer" value={session.startViewers.toString()} />
           <MetricBox label="End Viewer" value={session.endViewers.toString()} />
-          <MetricBox label="Unique Chatter" value={session.uniqueChatters.toString()} icon={<MessageCircle className="w-4 h-4" />} />
+          <MetricBox label="Unique Chatter" value={session.totalChatterSessions.toString()} icon={<MessageCircle className="w-4 h-4" />} />
           <MetricBox
             label="Follower"
             value={`${session.followersEnd - session.followersStart >= 0 ? '+' : ''}${session.followersEnd - session.followersStart}`}

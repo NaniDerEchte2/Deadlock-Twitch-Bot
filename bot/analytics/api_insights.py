@@ -12,6 +12,7 @@ import logging
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import web
 
@@ -19,6 +20,13 @@ from ..storage import pg as storage
 from .coaching_engine import CoachingEngine
 
 log = logging.getLogger("TwitchStreams.AnalyticsV2")
+
+# Shared thresholds used by both _generate_insights and _generate_actions
+# to ensure consistent classification boundaries.
+RETENTION_LOW = 40.0   # % – below this → warn/act
+RETENTION_HIGH = 65.0  # % – above this → positive feedback
+CHAT_LOW = 5.0         # chatters/100 viewers – below this → warn/act
+CHAT_HIGH = 30.0       # chatters/100 viewers – above this → positive feedback
 
 
 class _AnalyticsInsightsMixin:
@@ -64,7 +72,8 @@ class _AnalyticsInsightsMixin:
         if not sorted_avgs:
             return 0.5
         below = sum(1 for v in sorted_avgs if v < value)
-        return below / len(sorted_avgs)
+        equal = sum(1 for v in sorted_avgs if v == value)
+        return (below + 0.5 * equal) / len(sorted_avgs)
 
     def _generate_insights(self, metrics: dict[str, Any]) -> list[dict[str, str]]:
         """Generate findings/insights from metrics."""
@@ -80,7 +89,7 @@ class _AnalyticsInsightsMixin:
                     "text": "Zu wenige Sessions mit >=3 Viewern fur aussagekraftige Retention-Werte.",
                 }
             )
-        elif ret_10m < 40:
+        elif ret_10m < RETENTION_LOW:
             insights.append(
                 {
                     "type": "neg",
@@ -88,7 +97,7 @@ class _AnalyticsInsightsMixin:
                     "text": f"10-Min Retention bei {ret_10m:.1f}%. Verbessere den Stream-Einstieg.",
                 }
             )
-        elif ret_10m > 65:
+        elif ret_10m > RETENTION_HIGH:
             insights.append(
                 {
                     "type": "pos",
@@ -107,7 +116,7 @@ class _AnalyticsInsightsMixin:
                     "text": "Zu wenige Sessions mit >=3 Viewern fur aussagekraftige Chat-Metriken.",
                 }
             )
-        elif chat_100 < 5:
+        elif chat_100 < CHAT_LOW:
             insights.append(
                 {
                     "type": "warn",
@@ -115,7 +124,7 @@ class _AnalyticsInsightsMixin:
                     "text": f"Nur {chat_100:.1f} Chatter/100 Peak-Viewer (Proxy). Mehr Interaktion fordern!",
                 }
             )
-        elif chat_100 > 30:
+        elif chat_100 > CHAT_HIGH:
             insights.append(
                 {
                     "type": "pos",
@@ -163,7 +172,7 @@ class _AnalyticsInsightsMixin:
         actions = []
 
         ret_10m = metrics.get("avg_retention_10m", 0)
-        if metrics.get("retention_sample_count", 0) >= 3 and ret_10m < 50:
+        if metrics.get("retention_sample_count", 0) >= 3 and ret_10m < RETENTION_LOW:
             actions.append(
                 {
                     "tag": "Retention",
@@ -173,7 +182,7 @@ class _AnalyticsInsightsMixin:
             )
 
         chat_100 = metrics.get("chat_per_100", 0)
-        if metrics.get("chat_sample_count", 0) >= 3 and chat_100 < 10:
+        if metrics.get("chat_sample_count", 0) >= 3 and chat_100 < CHAT_LOW:
             actions.append(
                 {
                     "tag": "Engagement",
@@ -203,12 +212,65 @@ class _AnalyticsInsightsMixin:
 
         return actions
 
+    @staticmethod
+    def _resolve_target_timezone(timezone_name: str | None) -> tuple[Any, str]:
+        tz_name = (timezone_name or "UTC").strip()
+        if not tz_name:
+            return UTC, "UTC"
+        if tz_name.upper() == "UTC":
+            return UTC, "UTC"
+        try:
+            return ZoneInfo(tz_name), tz_name
+        except ZoneInfoNotFoundError:
+            log.debug("Unknown timezone '%s' for chat analytics; falling back to UTC", tz_name)
+            return UTC, "UTC"
+
+    @staticmethod
+    def _coerce_timestamp(value: Any) -> datetime | None:
+        if value is None:
+            return None
+
+        parsed: datetime | None = None
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, (int, float)):
+            try:
+                parsed = datetime.fromtimestamp(float(value), tz=UTC)
+            except (TypeError, ValueError, OSError):
+                parsed = None
+        elif isinstance(value, str):
+            txt = value.strip()
+            if not txt:
+                return None
+            normalized = f"{txt[:-1]}+00:00" if txt.endswith("Z") else txt
+            try:
+                parsed = datetime.fromisoformat(normalized)
+            except ValueError:
+                for fmt in (
+                    "%Y-%m-%d %H:%M:%S.%f",
+                    "%Y-%m-%d %H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%S.%f",
+                    "%Y-%m-%dT%H:%M:%S",
+                ):
+                    try:
+                        parsed = datetime.strptime(txt, fmt)
+                        break
+                    except ValueError:
+                        continue
+        if parsed is None:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed
+
     async def _api_v2_chat_analytics(self, request: web.Request) -> web.Response:
         """Get chat analytics."""
         self._require_v2_auth(request)
 
         streamer = request.query.get("streamer", "").strip() or None
         days = min(max(int(request.query.get("days", "30")), 7), 365)
+        tz_requested = request.query.get("timezone", "UTC")
+        target_tz, timezone_name = self._resolve_target_timezone(tz_requested)
 
         try:
             with storage.get_conn() as conn:
@@ -223,7 +285,8 @@ class _AnalyticsInsightsMixin:
                     """
                     SELECT
                         COUNT(*) as session_count,
-                        COALESCE(SUM(s.duration_seconds), 0) as total_duration_seconds
+                        COALESCE(SUM(s.duration_seconds), 0) as total_duration_seconds,
+                        AVG(s.avg_viewers) as avg_viewers
                     FROM twitch_stream_sessions s
                     WHERE s.started_at >= ?
                       AND LOWER(s.streamer_login) = ?
@@ -235,6 +298,7 @@ class _AnalyticsInsightsMixin:
                 total_duration_seconds = (
                     float(session_stats[1]) if session_stats and session_stats[1] else 0.0
                 )
+                avg_viewers = float(session_stats[2]) if session_stats and session_stats[2] else 0.0
 
                 # True message counts from raw chat events in the selected time range.
                 all_messages = conn.execute(
@@ -255,7 +319,7 @@ class _AnalyticsInsightsMixin:
                 hour_counts = collections.Counter()
 
                 for r in all_messages:
-                    ts_str = r[0]
+                    ts_value = r[0]
                     content = r[1] or ""
                     is_cmd = r[2]
                     chatter_key = r[3] or r[4] or ""
@@ -269,23 +333,12 @@ class _AnalyticsInsightsMixin:
                     msg_type = self._classify_message(content)
                     type_counts[msg_type] += 1
 
-                    # Hourly Analysis
-                    try:
-                        # Assumes ISO format YYYY-MM-DDTHH:MM:SS...
-                        if "T" in ts_str:
-                            # Extract HH
-                            hour_str = ts_str.split("T")[1][:2]
-                            hour_counts[int(hour_str)] += 1
-                        elif " " in ts_str:
-                            # Fallback for YYYY-MM-DD HH:MM:SS
-                            hour_str = ts_str.split(" ")[1][:2]
-                            hour_counts[int(hour_str)] += 1
-                    except (TypeError, ValueError, IndexError):
-                        log.debug(
-                            "Skipping invalid chat message timestamp: %r",
-                            ts_str,
-                            exc_info=True,
-                        )
+                    # Hourly Analysis (timezone-aware, robust against datetime/string variants).
+                    parsed_ts = self._coerce_timestamp(ts_value)
+                    if parsed_ts is None:
+                        log.debug("Skipping invalid chat message timestamp: %r", ts_value)
+                    else:
+                        hour_counts[parsed_ts.astimezone(target_tz).hour] += 1
 
                 distinct_chatters_from_messages = len(distinct_chatters_set)
 
@@ -315,7 +368,10 @@ class _AnalyticsInsightsMixin:
                         WHERE chatter_key IS NOT NULL
                     ),
                     rollup AS (
-                        SELECT LOWER(streamer_login) AS streamer_login, LOWER(chatter_login) AS chatter_login
+                        SELECT
+                            LOWER(streamer_login) AS streamer_login,
+                            LOWER(chatter_login) AS chatter_login,
+                            first_seen_at
                         FROM twitch_chatter_rollup
                         WHERE LOWER(streamer_login) = ?
                     )
@@ -329,11 +385,14 @@ class _AnalyticsInsightsMixin:
                         pu.first_time_flag,
                         pu.has_first_flag,
                         pu.seen_flag,
-                        CASE WHEN r.chatter_login IS NOT NULL THEN 1 ELSE 0 END AS seen_before
+                        CASE
+                            WHEN r.chatter_login IS NOT NULL AND r.first_seen_at < ?
+                            THEN 1 ELSE 0
+                        END AS seen_before
                     FROM per_user pu
                     LEFT JOIN rollup r ON r.chatter_login = LOWER(pu.chatter_login)
                     """,
-                    [since_date, streamer_login, streamer_login],
+                    [since_date, streamer_login, streamer_login, since_date],
                 ).fetchall()
 
                 chatter_entries = []
@@ -354,7 +413,7 @@ class _AnalyticsInsightsMixin:
                     has_first_flag_data = has_first_flag_data or entry["has_first_flag"]
                     chatter_entries.append(entry)
 
-                unique_chatters = len(chatter_entries)
+                tracked_unique_viewers = len(chatter_entries)
                 sessions_with_chat_row = conn.execute(
                     """
                     SELECT COUNT(DISTINCT sc.session_id)
@@ -369,33 +428,44 @@ class _AnalyticsInsightsMixin:
                 sessions_with_chat = int(sessions_with_chat_row[0]) if sessions_with_chat_row and sessions_with_chat_row[0] else 0
 
                 active_chatters_count = sum(1 for c in chatter_entries if c["active_flag"])
-                lurker_count = sum(1 for c in chatter_entries if c["lurker_flag"])
+                lurker_count = sum(
+                    1 for c in chatter_entries if (not c["active_flag"]) and c["lurker_flag"]
+                )
                 chatters_api_seen = sum(1 for c in chatter_entries if c["seen_flag"])
                 total_messages_per_user = sum(c["total_messages"] for c in chatter_entries)
                 avg_messages_per_chatter = (
-                    round(total_messages_per_user / active_chatters_count, 1) if active_chatters_count > 0 else 0.0
+                    round(total_messages_per_user / active_chatters_count, 1)
+                    if active_chatters_count > 0
+                    else 0.0
                 )
 
                 first_time_chatters = 0
                 for c in chatter_entries:
-                    if has_first_flag_data:
+                    if not c["active_flag"]:
+                        continue
+                    if has_first_flag_data and c["has_first_flag"]:
                         is_first = c["first_time_flag"]
+                        # Historical lurker placeholders could store first_time_global=0.
+                        # If the chatter was not known before the window, treat as first-time.
+                        if (not is_first) and c["lurker_flag"] and (not c["seen_before"]):
+                            is_first = True
                     else:
                         is_first = not c["seen_before"] if c["chatter_login"] else True
                     if is_first:
                         first_time_chatters += 1
 
                 # Fallback for older rows where session_chatters may be sparse.
-                if unique_chatters == 0 and distinct_chatters_from_messages > 0:
-                    unique_chatters = distinct_chatters_from_messages
+                if active_chatters_count == 0 and distinct_chatters_from_messages > 0:
+                    active_chatters_count = distinct_chatters_from_messages
                     first_time_chatters = distinct_chatters_from_messages
-                    active_chatters_count = 0
                     lurker_count = 0
                     chatters_api_seen = 0
                     avg_messages_per_chatter = 0.0
 
+                unique_chatters = active_chatters_count
+                first_time_chatters = min(first_time_chatters, unique_chatters)
                 returning_chatters = max(0, unique_chatters - first_time_chatters)
-                total_unique_viewers = unique_chatters
+                total_unique_viewers = tracked_unique_viewers if tracked_unique_viewers > 0 else unique_chatters
                 lurker_ratio = (
                     round(lurker_count / total_unique_viewers, 3) if total_unique_viewers > 0 else 0.0
                 )
@@ -410,6 +480,31 @@ class _AnalyticsInsightsMixin:
                 chatter_return_rate = (
                     (returning_chatters / unique_chatters) * 100.0 if unique_chatters > 0 else 0.0
                 )
+                interaction_rate_active_per_viewer = (
+                    (active_chatters_count / avg_viewers) * 100.0 if avg_viewers > 0 else 0.0
+                )
+                chat_session_coverage_ratio = (
+                    (sessions_with_chat / session_count) if session_count > 0 else 0.0
+                )
+                chat_session_coverage_pct = round(chat_session_coverage_ratio * 100.0, 1)
+
+                if total_messages == 0:
+                    confidence = "very_low"
+                elif (
+                    chat_session_coverage_ratio >= 0.7
+                    and total_messages >= 500
+                    and session_count >= 10
+                ):
+                    confidence = "high"
+                elif (
+                    chat_session_coverage_ratio >= 0.4
+                    and total_messages >= 150
+                    and session_count >= 5
+                ):
+                    confidence = "medium"
+                else:
+                    confidence = "low"
+                data_method = "real_chat_messages" if total_messages > 0 else "no_data"
 
                 # Top chatters in selected period (not all-time rollup).
                 top = conn.execute(
@@ -433,11 +528,17 @@ class _AnalyticsInsightsMixin:
                 return web.json_response(
                     {
                         "totalMessages": total_messages,
+                        # Chatter fields only include active chatters (messages > 0).
+                        "totalChatterSessions": unique_chatters,
                         "uniqueChatters": unique_chatters,
+                        "totalTrackedViewers": total_unique_viewers,
                         "firstTimeChatters": first_time_chatters,
                         "returningChatters": returning_chatters,
                         "messagesPerMinute": round(messages_per_minute, 2),
                         "chatterReturnRate": round(chatter_return_rate, 1),
+                        "interactionRateActivePerViewer": round(
+                            interaction_rate_active_per_viewer, 1
+                        ),
                         "commandMessages": command_messages,
                         "nonCommandMessages": max(0, total_messages - command_messages),
                         "lurkerRatio": lurker_ratio,
@@ -445,6 +546,7 @@ class _AnalyticsInsightsMixin:
                         "activeChatters": active_chatters_count,
                         "activeRatio": active_ratio,
                         "avgMessagesPerChatter": avg_messages_per_chatter,
+                        "timezone": timezone_name,
                         "topChatters": [
                             {
                                 "login": r[0],
@@ -481,13 +583,13 @@ class _AnalyticsInsightsMixin:
                             {"hour": h, "count": hour_counts.get(h, 0)} for h in range(24)
                         ],
                         "dataQuality": {
+                            "method": data_method,
+                            "coverage": round(chat_session_coverage_ratio, 3),
+                            "sampleCount": total_messages,
+                            "confidence": confidence,
                             "sessions": session_count,
                             "sessionsWithChat": sessions_with_chat,
-                            "chatSessionCoverage": round(
-                                (sessions_with_chat / session_count) * 100.0, 1
-                            )
-                            if session_count > 0
-                            else 0.0,
+                            "chatSessionCoverage": chat_session_coverage_pct,
                             "chattersApiCoverage": chatters_api_coverage,
                         },
                     }
@@ -621,6 +723,15 @@ class _AnalyticsInsightsMixin:
 
                 drop_pcts: list = []
                 worst_ads: list = []
+                position_buckets: dict[str, list] = {
+                    "early_0_30m": [], "mid_30_60m": [], "late_60_90m": [], "endgame_90m": []
+                }
+                duration_buckets: dict[str, list] = {
+                    "30s": [], "60s": [], "90s": [], "120s_plus": []
+                }
+                auto_drops: list = []
+                manual_drops: list = []
+
                 for ad in ad_rows:
                     sid = int(ad["session_id"] or 0)
                     dur_s = float(ad["duration_seconds"] or 30)
@@ -636,15 +747,15 @@ class _AnalyticsInsightsMixin:
                     if not tl:
                         continue
                     dur_min = dur_s / 60.0
-                    pre = [v for m, v in tl if (min_into - 5) <= m < min_into]
+                    pre = [v for m, v in tl if (min_into - 3) <= m < min_into]
                     post_start = min_into + dur_min
-                    post = [v for m, v in tl if post_start <= m < (post_start + 5)]
+                    post = [v for m, v in tl if post_start <= m < (post_start + 2)]
                     if not pre or not post:
                         continue
                     pre_avg = sum(pre) / len(pre)
                     if pre_avg <= 0:
                         continue
-                    drop = (sum(post) / len(post) - pre_avg) / pre_avg * 100.0
+                    drop = (pre_avg - sum(post) / len(post)) / pre_avg * 100.0
                     drop_pcts.append(drop)
                     worst_ads.append(
                         {
@@ -652,13 +763,84 @@ class _AnalyticsInsightsMixin:
                             "duration_s": int(dur_s),
                             "drop_pct": round(drop, 1),
                             "is_automatic": bool(ad["is_automatic"]),
+                            "min_into_stream": round(min_into, 1),
                         }
                     )
 
+                    # Position bucketing
+                    if min_into < 30:
+                        position_buckets["early_0_30m"].append(drop)
+                    elif min_into < 60:
+                        position_buckets["mid_30_60m"].append(drop)
+                    elif min_into < 90:
+                        position_buckets["late_60_90m"].append(drop)
+                    else:
+                        position_buckets["endgame_90m"].append(drop)
+
+                    # Duration bucketing
+                    if dur_s <= 35:
+                        duration_buckets["30s"].append(drop)
+                    elif dur_s <= 65:
+                        duration_buckets["60s"].append(drop)
+                    elif dur_s <= 100:
+                        duration_buckets["90s"].append(drop)
+                    else:
+                        duration_buckets["120s_plus"].append(drop)
+
+                    # Auto vs manual
+                    if ad["is_automatic"]:
+                        auto_drops.append(drop)
+                    else:
+                        manual_drops.append(drop)
+
+                def _avg(lst: list) -> float | None:
+                    return round(sum(lst) / len(lst), 1) if lst else None
+
                 if drop_pcts:
                     ads["avg_viewer_drop_pct"] = round(sum(drop_pcts) / len(drop_pcts), 1)
-                worst_ads.sort(key=lambda x: x["drop_pct"])
+                worst_ads.sort(key=lambda x: x["drop_pct"], reverse=True)
                 ads["worst_ads"] = worst_ads[:5]
+
+                # Position impact
+                ads["position_impact"] = {
+                    bucket: {"avg_drop": _avg(drops), "count": len(drops)}
+                    for bucket, drops in position_buckets.items()
+                }
+
+                # Duration impact
+                ads["duration_impact"] = {
+                    bucket: {"avg_drop": _avg(drops), "count": len(drops)}
+                    for bucket, drops in duration_buckets.items()
+                }
+
+                # Auto vs manual comparison
+                ads["auto_vs_manual"] = {
+                    "auto_avg_drop": _avg(auto_drops),
+                    "manual_avg_drop": _avg(manual_drops),
+                    "auto_count": len(auto_drops),
+                    "manual_count": len(manual_drops),
+                }
+
+                # Best ad time recommendation
+                position_avgs = {
+                    k: sum(v) / len(v) for k, v in position_buckets.items() if v
+                }
+                if position_avgs:
+                    best_bucket = min(position_avgs, key=position_avgs.get)
+                    bucket_labels = {
+                        "early_0_30m": "ersten 30 Min",
+                        "mid_30_60m": "Min 30-60",
+                        "late_60_90m": "Min 60-90",
+                        "endgame_90m": "nach Min 90",
+                    }
+                    worst_bucket = max(position_avgs, key=position_avgs.get)
+                    ads["best_ad_time"] = (
+                        f"Nach {bucket_labels.get(best_bucket, best_bucket)} "
+                        f"(Ø -{position_avgs[best_bucket]:.1f}% statt "
+                        f"-{position_avgs[worst_bucket]:.1f}% {bucket_labels.get(worst_bucket, worst_bucket)})"
+                    )
+                else:
+                    ads["best_ad_time"] = None
 
                 # --- Hype Train ---
                 try:

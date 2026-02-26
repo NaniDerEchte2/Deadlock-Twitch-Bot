@@ -44,34 +44,53 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
     );
   }
 
+  const totalChatters = data.totalChatterSessions ?? data.uniqueChatters ?? 0;
+  const totalTrackedViewers = data.totalTrackedViewers ?? totalChatters;
+  const firstTimeChatters = data.firstTimeChatters ?? 0;
+  const returningChatters = data.returningChatters ?? Math.max(0, totalChatters - firstTimeChatters);
+  const messagesPerMinute = data.messagesPerMinute ?? 0;
+  const chatterReturnRate =
+    data.chatterReturnRate ?? (totalChatters ? (returningChatters / totalChatters) * 100 : 0);
+  const interactionRate =
+    data.interactionRateActivePerViewer ?? Math.min(100, (data.activeRatio ?? 0) * 100);
+  const hasHourlySamples = (data.hourlyActivity?.some(h => h.count > 0) ?? false);
+  const dataMethod = data.dataQuality?.method ?? (data.totalMessages > 0 ? 'real_chat_messages' : 'no_data');
+
   return (
     <div className="space-y-6">
+      {dataMethod !== 'real_chat_messages' && (
+        <div className="rounded-xl border border-border bg-background/60 p-4 text-sm text-text-secondary">
+          Zu wenig belastbare Chat-Aktivitätsdaten für stabile Kohorten-/Zeitmuster.
+        </div>
+      )}
+
       {/* Overview Stats */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           icon={<Users className="w-5 h-5" />}
-          label="Unique Chatter"
-          value={data.uniqueChatters.toLocaleString('de-DE')}
+          label="Aktive Chatter"
+          value={totalChatters.toLocaleString('de-DE')}
+          subtext={`Getrackte Viewer inkl. Lurker: ${totalTrackedViewers.toLocaleString('de-DE')}`}
           color="primary"
         />
         <StatCard
           icon={<TrendingUp className="w-5 h-5" />}
           label="Erstmalige Chatter"
-          value={data.firstTimeChatters.toLocaleString('de-DE')}
-          subtext={data.uniqueChatters > 0 ? `${((data.firstTimeChatters / data.uniqueChatters) * 100).toFixed(1)}%` : '-'}
+          value={firstTimeChatters.toLocaleString('de-DE')}
+          subtext={totalChatters > 0 ? `${((firstTimeChatters / totalChatters) * 100).toFixed(1)}%` : '-'}
           color="accent"
         />
         <StatCard
           icon={<Heart className="w-5 h-5" />}
           label="Wiederkehrende Chatter"
-          value={data.returningChatters.toLocaleString('de-DE')}
-          subtext={`${data.chatterReturnRate.toFixed(1)}% Return Rate`}
+          value={returningChatters.toLocaleString('de-DE')}
+          subtext={`${chatterReturnRate.toFixed(1)}% Return Rate`}
           color="success"
         />
         <StatCard
           icon={<MessageCircle className="w-5 h-5" />}
           label="Chat-Aktivität"
-          value={data.messagesPerMinute > 0 ? `${data.messagesPerMinute.toFixed(1)}/min` : '-'}
+          value={messagesPerMinute > 0 ? `${messagesPerMinute.toFixed(1)}/min` : '-'}
           color="warning"
         />
       </div>
@@ -90,20 +109,20 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <LoyaltyGauge
             label="Neue Zuschauer"
-            percentage={(data.firstTimeChatters / Math.max(1, data.uniqueChatters)) * 100}
+            percentage={(firstTimeChatters / Math.max(1, totalChatters)) * 100}
             description="Chatten zum ersten Mal"
             color="from-accent to-primary"
           />
           <LoyaltyGauge
             label="Stammzuschauer"
-            percentage={data.chatterReturnRate}
+            percentage={chatterReturnRate}
             description="Kommen regelmäßig zurück"
             color="from-success to-accent"
           />
           <LoyaltyGauge
             label="Interaktionsrate"
-            percentage={Math.min(100, (data.activeRatio ?? 0) * 100)}
-            description="Aktive Chatter pro 100 Viewer"
+            percentage={interactionRate}
+            description="Aktive Chatter / Ø Viewer"
             color="from-primary to-success"
           />
         </div>
@@ -156,35 +175,41 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
             <TrendingUp className="w-6 h-6 text-success" />
             <h2 className="text-xl font-bold text-white">Aktivität nach Tageszeit</h2>
             <span className="text-[11px] text-text-secondary border border-border/60 rounded-full px-2 py-0.5">
-              UTC
+              {data.timezone || 'UTC'}
             </span>
           </div>
-          <div className="h-64 flex items-end gap-1">
-            {Array.from({ length: 24 }).map((_, hour) => {
-              const stat = data.hourlyActivity?.find(h => h.hour === hour);
-              const count = stat?.count || 0;
-              const maxCount = Math.max(...(data.hourlyActivity?.map(h => h.count) || [1]));
-              const height = maxCount > 0 ? (count / maxCount) * 100 : 0;
-              
-              return (
-                <div key={hour} className="flex-1 flex flex-col items-center group relative">
-                  <motion.div
-                    initial={{ height: 0 }}
-                    animate={{ height: `${height}%` }}
-                    transition={{ duration: 0.5, delay: hour * 0.02 }}
-                    className={`w-full bg-success/50 rounded-t-sm group-hover:bg-success transition-colors ${height === 0 ? 'min-h-[2px] bg-border' : ''}`}
-                  />
-                  {/* Tooltip */}
-                  <div className="absolute bottom-full mb-2 hidden group-hover:block bg-popover text-white text-xs p-2 rounded z-10 whitespace-nowrap border border-border">
-                    {hour}:00 Uhr: {count} Nachrichten
+          {hasHourlySamples ? (
+            <div className="h-64 flex items-end gap-1">
+              {Array.from({ length: 24 }).map((_, hour) => {
+                const stat = data.hourlyActivity?.find(h => h.hour === hour);
+                const count = stat?.count || 0;
+                const maxCount = Math.max(...(data.hourlyActivity?.map(h => h.count) || [1]));
+                const height = maxCount > 0 ? (count / maxCount) * 100 : 0;
+
+                return (
+                  <div key={hour} className="flex-1 flex flex-col items-center group relative">
+                    <motion.div
+                      initial={{ height: 0 }}
+                      animate={{ height: `${height}%` }}
+                      transition={{ duration: 0.5, delay: hour * 0.02 }}
+                      className={`w-full bg-success/50 rounded-t-sm group-hover:bg-success transition-colors ${height === 0 ? 'min-h-[2px] bg-border' : ''}`}
+                    />
+                    {/* Tooltip */}
+                    <div className="absolute bottom-full mb-2 hidden group-hover:block bg-popover text-white text-xs p-2 rounded z-10 whitespace-nowrap border border-border">
+                      {hour}:00 Uhr: {count} Nachrichten
+                    </div>
+                    {hour % 4 === 0 && (
+                      <div className="text-[10px] text-text-secondary mt-1">{hour}h</div>
+                    )}
                   </div>
-                  {hour % 4 === 0 && (
-                    <div className="text-[10px] text-text-secondary mt-1">{hour}h</div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="h-64 rounded-lg border border-border bg-background/50 p-4 text-sm text-text-secondary flex items-center justify-center text-center">
+              Keine belastbaren Stundenmuster: zu wenig valide Chat-Timestamps.
+            </div>
+          )}
         </motion.div>
       </div>
 
@@ -230,19 +255,28 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
       >
         <h3 className="font-bold text-white mb-4">Chat-Insights</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <InsightItem
-            type={data.chatterReturnRate > 30 ? 'positive' : 'warning'}
-            text={data.chatterReturnRate > 30
-              ? `Starke Community! ${data.chatterReturnRate.toFixed(0)}% deiner Chatter kommen wieder.`
-              : `${data.chatterReturnRate.toFixed(0)}% Return Rate - versuche mehr Interaktion!`}
-          />
-          <InsightItem
-            type={data.firstTimeChatters > data.returningChatters ? 'info' : 'positive'}
-            text={data.firstTimeChatters > data.returningChatters
-              ? 'Viele neue Gesichter! Binde sie durch direkte Ansprache.'
-              : 'Deine Stammzuschauer sind loyal - belohne sie!'
-            }
-          />
+          {totalChatters > 0 ? (
+            <>
+              <InsightItem
+                type={chatterReturnRate > 30 ? 'positive' : 'warning'}
+                text={chatterReturnRate > 30
+                  ? `Starke Community! ${chatterReturnRate.toFixed(0)}% deiner Chatter kommen wieder.`
+                  : `${chatterReturnRate.toFixed(0)}% Return Rate - versuche mehr Interaktion!`}
+              />
+              <InsightItem
+                type={firstTimeChatters > returningChatters ? 'info' : 'positive'}
+                text={firstTimeChatters > returningChatters
+                  ? 'Viele neue Gesichter! Binde sie durch direkte Ansprache.'
+                  : 'Deine Stammzuschauer sind loyal - belohne sie!'
+                }
+              />
+            </>
+          ) : (
+            <InsightItem
+              type="info"
+              text="Keine aktiven Chatter im Zeitraum: Erst bei echten Chat-Samples werden Treue-Insights angezeigt."
+            />
+          )}
         </div>
       </motion.div>
     </div>

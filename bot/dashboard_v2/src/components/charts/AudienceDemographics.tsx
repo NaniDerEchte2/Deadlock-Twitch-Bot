@@ -1,20 +1,27 @@
 import { motion } from 'framer-motion';
-import { Globe, Users, Clock, Heart, MapPin, Activity, TrendingUp } from 'lucide-react';
+import { Globe, Users, Clock, Heart, Activity, TrendingUp } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 
 export interface AudienceDemographicsData {
-  estimatedRegions: { region: string; percentage: number }[];
   viewerTypes: { label: string; percentage: number }[];
   activityPattern: 'weekend-heavy' | 'weekday-focused' | 'balanced';
   primaryLanguage: string;
   languageConfidence: number;
   peakActivityHours: number[];
+  peakHoursMethod?: string;
   interactiveRate: number;
+  interactionRateActivePerViewer?: number;
   loyaltyScore: number;
+  timezone?: string;
   dataQuality?: {
     confidence: 'very_low' | 'low' | 'medium' | 'high';
-    method?: string;
+    method?: 'no_data' | 'low_coverage' | 'real_samples' | string;
     sessions?: number;
+    coverage?: number;
+    sampleCount?: number;
+    peakSessionCount?: number;
+    peakSessionsWithActivity?: number;
+    interactiveSampleCount?: number;
   };
 }
 
@@ -22,7 +29,6 @@ interface AudienceDemographicsProps {
   data: AudienceDemographicsData;
 }
 
-const REGION_COLORS = ['#7c3aed', '#8b5cf6', '#a78bfa', '#c4b5fd'];
 const VIEWER_COLORS = ['#10b981', '#34d399', '#6ee7b7', '#a7f3d0'];
 
 export function AudienceDemographics({ data }: AudienceDemographicsProps) {
@@ -42,7 +48,14 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
           : data.dataQuality?.confidence === 'high'
             ? 'hoch'
             : null;
-  const isHeuristic = data.dataQuality?.method?.toLowerCase().includes('heuristic');
+  const method = (data.dataQuality?.method || 'real_samples').toLowerCase();
+  const methodLabel =
+    method === 'no_data'
+      ? 'Keine Aktivitätsdaten'
+      : method === 'low_coverage'
+        ? 'Zu geringe Datenbasis'
+        : 'Echt-Daten';
+  const hasPeakData = method === 'real_samples' && data.peakActivityHours.length > 0;
 
   return (
     <motion.div
@@ -62,71 +75,13 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
         </div>
         {data.dataQuality && confidenceLabel && (
           <span className="text-xs px-3 py-1 rounded-full border border-border text-text-secondary">
-            {isHeuristic ? 'Heuristik' : 'Datenbasiert'} · Vertrauen: {confidenceLabel}
+            {methodLabel} · Vertrauen: {confidenceLabel}
           </span>
         )}
       </div>
-      {isHeuristic && (
-        <div className="text-xs text-warning mb-4">
-          Hinweis: Regionale Verteilung ist geschätzt (Sprache + Sendezeiten) – keine echten Geo-Daten.
-        </div>
-      )}
-
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Left Column - Charts */}
         <div className="space-y-6">
-          {/* Regional Distribution */}
-          <div>
-            <h4 className="text-sm font-medium text-text-secondary mb-3 flex items-center gap-2">
-              <MapPin className="w-4 h-4" />
-              Regionale Verteilung
-            </h4>
-            <div className="flex items-center gap-4">
-              <div className="w-32 h-32">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={data.estimatedRegions}
-                      dataKey="percentage"
-                      nameKey="region"
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={25}
-                      outerRadius={50}
-                      paddingAngle={2}
-                    >
-                      {data.estimatedRegions.map((_, index) => (
-                        <Cell key={index} fill={REGION_COLORS[index % REGION_COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: '#1f2937',
-                        border: '1px solid #374151',
-                        borderRadius: '8px',
-                      }}
-                      formatter={(value?: number) => [`${(value ?? 0).toFixed(1)}%`, 'Anteil']}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-              <div className="flex-1 space-y-2">
-                {data.estimatedRegions.map((region, i) => (
-                  <div key={region.region} className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <div
-                        className="w-3 h-3 rounded-full"
-                        style={{ backgroundColor: REGION_COLORS[i % REGION_COLORS.length] }}
-                      />
-                      <span className="text-sm text-text-secondary">{region.region}</span>
-                    </div>
-                    <span className="text-sm font-medium text-white">{region.percentage.toFixed(1)}%</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
           {/* Viewer Types */}
           <div>
             <h4 className="text-sm font-medium text-text-secondary mb-3 flex items-center gap-2">
@@ -210,8 +165,13 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
             </div>
             <div className="text-xl font-bold text-white">{activityLabels[data.activityPattern]}</div>
             <div className="mt-2 text-sm text-text-secondary">
-              Peak-Zeiten: {data.peakActivityHours.map(h => `${h}:00`).join(', ')} Uhr
+              {hasPeakData
+                ? `Peak-Zeiten (${data.timezone || 'UTC'}): ${data.peakActivityHours.map(h => `${h}:00`).join(', ')} Uhr`
+                : 'Peak-Zeiten: zu wenig Aktivitätsdaten'}
             </div>
+            {data.peakHoursMethod && (
+              <div className="mt-1 text-xs text-text-secondary">Methode: {data.peakHoursMethod}</div>
+            )}
           </div>
 
           {/* Engagement Scores */}
@@ -222,7 +182,7 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
                 Interaktionsrate
               </div>
               <div className="text-2xl font-bold text-primary">{data.interactiveRate.toFixed(1)}%</div>
-              <div className="text-xs text-text-secondary mt-1">Chatter / Viewer</div>
+              <div className="text-xs text-text-secondary mt-1">Aktive Chatter / Ø Viewer</div>
             </div>
             <div className="bg-background rounded-lg p-4 text-center">
               <div className="flex items-center justify-center gap-1 text-text-secondary text-sm mb-2">
@@ -238,33 +198,41 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
           <div className="bg-background rounded-lg p-4">
             <div className="text-sm text-text-secondary mb-3 flex items-center gap-2">
               <Clock className="w-4 h-4" />
-              Beste Sendezeiten
+              Beste Sendezeiten {data.timezone ? `(${data.timezone})` : '(UTC)'}
             </div>
-            <div className="flex gap-1">
-              {Array.from({ length: 24 }, (_, i) => {
-                const isPeak = data.peakActivityHours.includes(i);
-                const isNearPeak = data.peakActivityHours.some(h => Math.abs(h - i) === 1);
-                return (
-                  <motion.div
-                    key={i}
-                    initial={{ height: 0 }}
-                    animate={{ height: isPeak ? 32 : isNearPeak ? 20 : 8 }}
-                    transition={{ delay: i * 0.02 }}
-                    className={`flex-1 rounded-sm ${
-                      isPeak ? 'bg-primary' : isNearPeak ? 'bg-primary/50' : 'bg-border'
-                    }`}
-                    title={`${i}:00 Uhr${isPeak ? ' (Peak)' : ''}`}
-                  />
-                );
-              })}
-            </div>
-            <div className="flex justify-between mt-1 text-xs text-text-secondary">
-              <span>0:00</span>
-              <span>6:00</span>
-              <span>12:00</span>
-              <span>18:00</span>
-              <span>24:00</span>
-            </div>
+            {hasPeakData ? (
+              <>
+                <div className="flex gap-1">
+                  {Array.from({ length: 24 }, (_, i) => {
+                    const isPeak = data.peakActivityHours.includes(i);
+                    const isNearPeak = data.peakActivityHours.some(h => Math.abs(h - i) === 1);
+                    return (
+                      <motion.div
+                        key={i}
+                        initial={{ height: 0 }}
+                        animate={{ height: isPeak ? 32 : isNearPeak ? 20 : 8 }}
+                        transition={{ delay: i * 0.02 }}
+                        className={`flex-1 rounded-sm ${
+                          isPeak ? 'bg-primary' : isNearPeak ? 'bg-primary/50' : 'bg-border'
+                        }`}
+                        title={`${i}:00 Uhr${isPeak ? ' (Peak)' : ''}`}
+                      />
+                    );
+                  })}
+                </div>
+                <div className="flex justify-between mt-1 text-xs text-text-secondary">
+                  <span>0:00</span>
+                  <span>6:00</span>
+                  <span>12:00</span>
+                  <span>18:00</span>
+                  <span>24:00</span>
+                </div>
+              </>
+            ) : (
+              <div className="text-sm text-text-secondary border border-border rounded-lg p-3">
+                Keine belastbaren Peak-Zeiten: zu wenig Aktivitäts-Samples.
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -278,16 +246,16 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
               text={`Starke Community! ${data.loyaltyScore.toFixed(0)}% deiner Viewer kommen regelmäßig zurück.`}
             />
           )}
-          {data.interactiveRate > 15 && (
+          {method === 'real_samples' && data.interactiveRate > 15 && (
             <InsightBadge
               type="success"
               text={`Hohe Interaktion: ${data.interactiveRate.toFixed(0)}% deiner Viewer chatten aktiv mit.`}
             />
           )}
-          {data.estimatedRegions[0]?.percentage > 60 && (
+          {method !== 'real_samples' && (
             <InsightBadge
               type="info"
-              text={`Deine Hauptzielgruppe ist ${data.estimatedRegions[0].region} (${data.estimatedRegions[0].percentage.toFixed(0)}%).`}
+              text="Interaktions- und Peak-Muster werden mit mehr Chat-Aktivitätsdaten präziser."
             />
           )}
         </div>

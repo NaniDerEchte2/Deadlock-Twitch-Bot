@@ -381,37 +381,82 @@ class _DashboardRoutesMixin:
             <script>
                 let marketChart = null;
 
+                const showError = (msg) => {
+                    const kpi = document.getElementById('kpi');
+                    if (kpi) {
+                        kpi.innerHTML = `
+                            <div class="stat-box">
+                                <div class="stat-val" style="color:#f87171;">Fehler</div>
+                                <div class="stat-label">${msg}</div>
+                            </div>
+                        `;
+                    }
+                };
+
                 async function loadData() {
                     const res = await fetch('/twitch/api/market_data');
-                    const data = await res.json();
+                    let data = null;
+                    try {
+                        data = await res.json();
+                    } catch (err) {
+                        console.error('market_data: invalid JSON', err);
+                        showError('Daten konnten nicht geladen werden.');
+                        return;
+                    }
+
+                    if (!res.ok || !data || data.error) {
+                        const msg = (data && data.error) ? data.error : `${res.status} ${res.statusText}`;
+                        console.error('market_data: request failed', msg);
+                        showError(msg);
+                        return;
+                    }
+
+                    const {
+                        total_monitored = 0,
+                        total_viewers = 0,
+                        avg_chat_health = 0,
+                        total_messages = 0,
+                        avg_lurker_ratio = 0,
+                        market_history = [],
+                        questions = [],
+                        meta_snapshot = [],
+                        sentiment = { positive: 0, negative: 0, neutral: 0, pos_pct: 0, neg_pct: 0, neu_pct: 0 },
+                        overlap = [],
+                        channels = [],
+                    } = data || {};
+
+                    const safeNumber = (val) => {
+                        const num = Number(val);
+                        return Number.isFinite(num) ? num : 0;
+                    };
 
                     // KPIs
                     document.getElementById('kpi').innerHTML = `
                         <div class="stat-box">
-                            <div class="stat-val">${data.total_monitored}</div>
+                            <div class="stat-val">${total_monitored}</div>
                             <div class="stat-label">Active Monitored Channels</div>
                         </div>
                         <div class="stat-box">
-                            <div class="stat-val">${data.total_viewers.toLocaleString()}</div>
+                            <div class="stat-val">${safeNumber(total_viewers).toLocaleString()}</div>
                             <div class="stat-label">Total Deadlock Viewers (DACH)</div>
                         </div>
                         <div class="stat-box">
-                            <div class="stat-val">${data.avg_chat_health.toFixed(1)}%</div>
+                            <div class="stat-val">${safeNumber(avg_chat_health).toFixed(1)}%</div>
                             <div class="stat-label">Avg Chat Engagement</div>
                         </div>
                         <div class="stat-box">
-                            <div class="stat-val">${data.total_messages.toLocaleString()}</div>
+                            <div class="stat-val">${safeNumber(total_messages).toLocaleString()}</div>
                             <div class="stat-label">Messages Analyzed (1h)</div>
                         </div>
                         <div class="stat-box">
-                            <div class="stat-val">${data.avg_lurker_ratio.toFixed(1)}%</div>
+                            <div class="stat-val">${safeNumber(avg_lurker_ratio).toFixed(1)}%</div>
                             <div class="stat-label">Avg Lurker Ratio</div>
                         </div>
                     `;
 
                     // Market Chart
                     const ctx = document.getElementById('marketChart').getContext('2d');
-                    const chartLabels = data.market_history.map(h => {
+                    const chartLabels = market_history.map(h => {
                         const d = new Date(h.ts + 'Z');
                         return d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
                     });
@@ -421,7 +466,7 @@ class _DashboardRoutesMixin:
                         datasets: [
                             {
                                 label: 'Total Viewers',
-                                data: data.market_history.map(h => h.total_viewers),
+                                data: market_history.map(h => safeNumber(h.total_viewers)),
                                 borderColor: '#38bdf8',
                                 backgroundColor: 'rgba(56, 189, 248, 0.1)',
                                 fill: true,
@@ -429,7 +474,7 @@ class _DashboardRoutesMixin:
                             },
                             {
                                 label: 'Streamer Count',
-                                data: data.market_history.map(h => h.streamer_count * 10), // Scale for visibility
+                                data: market_history.map(h => safeNumber(h.streamer_count) * 10), // Scale for visibility
                                 borderColor: '#f472b6',
                                 borderDash: [5, 5],
                                 tension: 0.1,
@@ -459,15 +504,15 @@ class _DashboardRoutesMixin:
                     }
 
                     // Questions
-                    document.getElementById('questions').innerHTML = data.questions.map(q => `
+                    document.getElementById('questions').innerHTML = questions.map(q => `
                         <div class="question-item">
                             <div>${q.content}</div>
-                            <div class="question-meta">in @${q.streamer} • ${q.ts.split('T')[1].substring(0, 5)} Uhr</div>
+                            <div class="question-meta">in @${q.streamer} • ${(q.ts || '').split('T')[1]?.substring(0, 5) || '--:--'} Uhr</div>
                         </div>
                     `).join('');
 
                     // Meta Snapshot
-                    document.getElementById('meta-table').querySelector('tbody').innerHTML = data.meta_snapshot.map(m => `
+                    document.getElementById('meta-table').querySelector('tbody').innerHTML = meta_snapshot.map(m => `
                         <tr>
                             <td><strong>${m.term}</strong></td>
                             <td>${m.count}</td>
@@ -476,7 +521,7 @@ class _DashboardRoutesMixin:
                     `).join('');
 
                     // Sentiment
-                    const sent = data.sentiment;
+                    const sent = sentiment;
                     document.getElementById('sentiment-chart').innerHTML = `
                         <div style="display: flex; justify-content: space-around; font-size: 1.2rem;">
                             <div class="sentiment-pos">Positiv: ${sent.positive} (${sent.pos_pct}%)</div>
@@ -491,7 +536,7 @@ class _DashboardRoutesMixin:
                     `;
 
                     // Overlap
-                    document.getElementById('overlap-table').querySelector('tbody').innerHTML = data.overlap.map(o => `
+                    document.getElementById('overlap-table').querySelector('tbody').innerHTML = overlap.map(o => `
                         <tr>
                             <td>${o.a}</td>
                             <td>${o.b}</td>
@@ -501,7 +546,7 @@ class _DashboardRoutesMixin:
 
                     // Channels Table
                     const tbody = document.querySelector('#channels tbody');
-                    tbody.innerHTML = data.channels.map(c => `
+                    tbody.innerHTML = channels.map(c => `
                         <tr>
                             <td>
                                 <strong>${c.login}</strong>

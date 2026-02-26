@@ -137,7 +137,7 @@ class _AnalyticsPerformanceMixin:
                         SUM(CASE WHEN s.follower_delta IS NOT NULL
                              AND NOT (s.followers_end = 0 AND s.followers_start > 0)
                              THEN s.follower_delta ELSE 0 END) as follower_delta,
-                        SUM(s.unique_chatters) as unique_chatters,
+                        SUM(s.unique_chatters) as total_chatter_sessions,
                         COUNT(*) as stream_count
                     FROM twitch_stream_sessions s
                     WHERE s.started_at >= ?
@@ -174,7 +174,7 @@ class _AnalyticsPerformanceMixin:
                         "avgViewers": float(r[4]) if r[4] else 0,
                         "peakViewers": int(r[5]) if r[5] else 0,
                         "followerDelta": int(r[6]) if r[6] else 0,
-                        "uniqueChatters": int(r[7]) if r[7] else 0,
+                        "totalChatterSessions": int(r[7]) if r[7] else 0,
                         "streamCount": r[8],
                     }
                     for r in rows
@@ -350,7 +350,7 @@ class _AnalyticsPerformanceMixin:
                     if data["hours"]:
                         hour_counts = collections.Counter(data["hours"])
                         best_hour = hour_counts.most_common(1)[0][0]
-                        best_slot = f"{best_hour:02d}:00-{(best_hour + 4) % 24:02d}:00"
+                        best_slot = f"{best_hour:02d}:00"
                     else:
                         best_slot = "18:00-22:00"
 
@@ -1223,3 +1223,141 @@ class _AnalyticsPerformanceMixin:
                 "source": "legacy_stats_chart",
             }
         )
+
+    async def _api_v2_retention_curve(self, request: web.Request) -> web.Response:
+        """Aggregated viewer retention curve from twitch_session_viewers."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip().lower()
+        days = min(max(int(request.query.get("days", "30")), 7), 365)
+
+        if not streamer:
+            return web.json_response({"error": "Streamer required"}, status=400)
+
+        try:
+            with storage.get_conn() as conn:
+                since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+                # Get all session IDs for this streamer in range
+                session_rows = conn.execute(
+                    """
+                    SELECT id, peak_viewers
+                    FROM twitch_stream_sessions
+                    WHERE LOWER(streamer_login) = ? AND started_at >= ? AND ended_at IS NOT NULL
+                    ORDER BY started_at DESC
+                    LIMIT 50
+                    """,
+                    [streamer, since_date],
+                ).fetchall()
+
+                if not session_rows:
+                    return web.json_response({"retention_curve": [], "drop_events": [], "sessions_used": 0})
+
+                session_ids = [int(r[0]) for r in session_rows]
+                peak_by_session = {int(r[0]): int(r[1] or 1) for r in session_rows}
+
+                # Fetch all viewer timeline data for these sessions
+                placeholders = ",".join("?" * len(session_ids))
+                viewer_rows = conn.execute(
+                    f"""
+                    SELECT session_id, minutes_from_start, viewer_count
+                    FROM twitch_session_viewers
+                    WHERE session_id IN ({placeholders})
+                    ORDER BY session_id, minutes_from_start
+                    """,
+                    session_ids,
+                ).fetchall()
+
+                # Group by minute, collect retention values across sessions
+                from collections import defaultdict
+                minute_data: dict[int, list[float]] = defaultdict(list)
+                for vr in viewer_rows:
+                    sid = int(vr[0])
+                    minute = int(vr[1] or 0)
+                    count = int(vr[2] or 0)
+                    peak = peak_by_session.get(sid, 1)
+                    if peak > 0:
+                        minute_data[minute].append(count / peak)
+
+                if not minute_data:
+                    return web.json_response({"retention_curve": [], "drop_events": [], "sessions_used": 0})
+
+                # Build curve: median retention + P25/P75 per minute
+                def _percentile(values: list, pct: float) -> float:
+                    if not values:
+                        return 0.0
+                    s = sorted(values)
+                    idx = (len(s) - 1) * pct
+                    lo, hi = int(idx), min(int(idx) + 1, len(s) - 1)
+                    return s[lo] + (s[hi] - s[lo]) * (idx - lo)
+
+                max_minute = min(max(minute_data.keys()), 180)  # cap at 3h
+                curve = []
+                for minute in sorted(m for m in minute_data if m <= max_minute):
+                    vals = minute_data[minute]
+                    if len(vals) < 1:
+                        continue
+                    median_ret = _percentile(vals, 0.5)
+                    curve.append({
+                        "minute": minute,
+                        "median_retention": round(median_ret, 3),
+                        "p25": round(_percentile(vals, 0.25), 3),
+                        "p75": round(_percentile(vals, 0.75), 3),
+                        "sample_count": len(vals),
+                    })
+
+                # Detect drop events: >10% relative drop between consecutive minutes
+                # Annotate with ad_break type if possible
+                ad_times: set[int] = set()
+                try:
+                    ad_rows_q = conn.execute(
+                        f"""
+                        SELECT a.started_at, s.started_at AS session_start
+                        FROM twitch_ad_break_events a
+                        JOIN twitch_stream_sessions s ON s.id = a.session_id
+                        WHERE a.session_id IN ({placeholders})
+                        """,
+                        session_ids,
+                    ).fetchall()
+                    for ar in ad_rows_q:
+                        try:
+                            ad_dt = datetime.fromisoformat(str(ar[0]).replace("Z", "+00:00"))
+                            sess_dt = datetime.fromisoformat(str(ar[1]).replace("Z", "+00:00"))
+                            min_into = int((ad_dt - sess_dt).total_seconds() / 60.0)
+                            ad_times.add(min_into)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                drop_events = []
+                for i in range(1, len(curve)):
+                    prev_ret = curve[i - 1]["median_retention"]
+                    curr_ret = curve[i]["median_retention"]
+                    if prev_ret > 0:
+                        delta = (curr_ret - prev_ret) / prev_ret
+                        if delta < -0.10:
+                            minute = curve[i]["minute"]
+                            drop_events.append({
+                                "minute": minute,
+                                "drop_pct": round(abs(delta) * 100, 1),
+                                "type": "ad_break" if minute in ad_times else "unknown",
+                            })
+
+                # Average watch duration estimate (minute where median drops below 0.5)
+                avg_watch = None
+                for pt in curve:
+                    if pt["median_retention"] < 0.5:
+                        avg_watch = pt["minute"]
+                        break
+
+                return web.json_response({
+                    "retention_curve": curve,
+                    "drop_events": drop_events,
+                    "avg_watch_duration_min": avg_watch,
+                    "sessions_used": len(session_ids),
+                    "window_days": days,
+                })
+        except Exception as exc:
+            log.exception("Error in retention curve API")
+            return web.json_response({"error": str(exc)}, status=500)

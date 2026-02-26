@@ -1219,7 +1219,7 @@ class ModerationMixin:
             # Rollup pro Session
             existing = conn.execute(
                 """
-                SELECT messages, is_first_time_global
+                SELECT messages, is_first_time_global, seen_via_chatters_api
                   FROM twitch_session_chatters
                  WHERE session_id = ? AND chatter_login = ?
                 """,
@@ -1261,21 +1261,44 @@ class ModerationMixin:
                 )
 
             if existing:
+                existing_messages = int(existing[0] or 0)
+                existing_first_global = existing[1]
+                existing_seen_via_api = int(existing[2] or 0)
+
+                # Lurker rows created by chatters-api placeholders must be re-labeled
+                # when the first real chat message arrives.
+                if existing_seen_via_api and existing_messages == 0:
+                    resolved_first_global = is_first_global
+                elif existing_first_global is None:
+                    resolved_first_global = is_first_global
+                else:
+                    resolved_first_global = int(existing_first_global)
+
                 conn.execute(
                     """
                     UPDATE twitch_session_chatters
-                       SET messages = messages + 1
+                       SET messages = messages + 1,
+                           last_seen_at = ?,
+                           seen_via_chatters_api = 0,
+                           is_first_time_global = ?,
+                           chatter_id = COALESCE(chatter_id, ?)
                      WHERE session_id = ? AND chatter_login = ?
                     """,
-                    (session_id, chatter_login),
+                    (
+                        ts_iso,
+                        int(resolved_first_global),
+                        chatter_id,
+                        session_id,
+                        chatter_login,
+                    ),
                 )
             else:
                 conn.execute(
                     """
                     INSERT INTO twitch_session_chatters (
                         session_id, streamer_login, chatter_login, chatter_id, first_message_at,
-                        messages, is_first_time_global
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        messages, is_first_time_global, seen_via_chatters_api, last_seen_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
                     """,
                     (
                         session_id,
@@ -1285,5 +1308,6 @@ class ModerationMixin:
                         ts_iso,
                         1,
                         is_first_global,
+                        ts_iso,
                     ),
                 )

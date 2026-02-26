@@ -62,6 +62,9 @@ class _AnalyticsOverviewMixin:
             "/twitch/api/v2/category-activity-series",
             self._api_v2_category_activity_series,
         )
+        router.add_get("/twitch/api/v2/raid-analytics", self._api_v2_raid_analytics)
+        router.add_get("/twitch/api/v2/retention-curve", self._api_v2_retention_curve)
+        router.add_get("/twitch/api/v2/loyalty-curve", self._api_v2_loyalty_curve)
         # Serve the dashboard
         router.add_get("/twitch/dashboard-v2", self._serve_dashboard_v2)
         router.add_get("/twitch/dashboard-v2/{path:.*}", self._serve_dashboard_v2_assets)
@@ -298,7 +301,7 @@ class _AnalyticsOverviewMixin:
                          THEN s.follower_delta ELSE 0 END) as followers,
                     AVG(CASE
                         WHEN s.avg_viewers >= 3 AND s.peak_viewers > 0
-                        THEN LEAST(1.0, s.retention_10m, s.avg_viewers * 1.0 / NULLIF(s.peak_viewers, 0))
+                        THEN LEAST(1.0, s.retention_10m)
                         ELSE NULL
                     END) as retention
                 FROM twitch_stream_sessions s
@@ -475,17 +478,17 @@ class _AnalyticsOverviewMixin:
                      THEN s.follower_delta ELSE 0 END) as total_followers,
                 AVG(CASE
                     WHEN s.avg_viewers >= 3 AND s.peak_viewers > 0
-                    THEN LEAST(1.0, s.retention_5m, s.avg_viewers * 1.0 / NULLIF(s.peak_viewers, 0))
+                    THEN LEAST(1.0, s.retention_5m)
                     ELSE NULL
                 END) as avg_retention_5m,
                 AVG(CASE
                     WHEN s.avg_viewers >= 3 AND s.peak_viewers > 0
-                    THEN LEAST(1.0, s.retention_10m, s.avg_viewers * 1.0 / NULLIF(s.peak_viewers, 0))
+                    THEN LEAST(1.0, s.retention_10m)
                     ELSE NULL
                 END) as avg_retention_10m,
                 AVG(CASE
                     WHEN s.avg_viewers >= 3 AND s.peak_viewers > 0
-                    THEN LEAST(1.0, s.retention_20m, s.avg_viewers * 1.0 / NULLIF(s.peak_viewers, 0))
+                    THEN LEAST(1.0, s.retention_20m)
                     ELSE NULL
                 END) as avg_retention_20m,
                 AVG(s.dropoff_pct) as avg_dropoff,

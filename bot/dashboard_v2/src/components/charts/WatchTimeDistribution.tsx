@@ -16,11 +16,27 @@ const SEGMENTS = [
 ] as const;
 
 export function WatchTimeDistribution({ data }: WatchTimeDistributionProps) {
-  if (!data || data.dataQuality?.method === 'insufficient_real_data' || data.dataQuality?.method === 'no_data') {
+  const method = data?.dataQuality?.method;
+  const isNoData =
+    !data ||
+    method === 'no_data' ||
+    method === 'low_coverage' ||
+    method === 'insufficient_real_data' ||
+    method === 'no_real_data';
+
+  if (isNoData) {
+    const sampleCount = data?.dataQuality?.sample_count ?? 0;
+    const coveragePct = ((data?.dataQuality?.coverage ?? 0) * 100).toFixed(1);
+    const minSamples = data?.dataQuality?.required_min_samples ?? 25;
+    const minCoveragePct = ((data?.dataQuality?.required_min_coverage ?? 0.15) * 100).toFixed(0);
+    const submessage =
+      method === 'low_coverage'
+        ? `Echte Samples vorhanden (${sampleCount}), aber Coverage ${coveragePct}% ist noch unter der Schwelle (${minSamples} Samples und ${minCoveragePct}% Coverage).`
+        : 'Zu wenig echte Chatters-Samples – Ergebnisse werden angezeigt, sobald belastbare Daten vorliegen.';
     return (
       <NoDataCard
         message="Nicht genug Daten für Watch Time"
-        submessage="Zu wenig Chatters-API Coverage – wir zeigen Ergebnisse, sobald mehr echte Zuschauer-Samples vorliegen."
+        submessage={submessage}
       />
     );
   }

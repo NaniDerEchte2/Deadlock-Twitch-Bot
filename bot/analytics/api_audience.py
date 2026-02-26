@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import web
 
@@ -22,36 +24,283 @@ log = logging.getLogger("TwitchStreams.AnalyticsV2")
 class _AnalyticsAudienceMixin:
     """Mixin providing audience analytics endpoints."""
 
+    WATCH_TIME_MIN_SAMPLES = 25
+    WATCH_TIME_MIN_COVERAGE = 0.15
+    PEAK_SESSION_WINDOW = 30
+    PEAK_HALF_LIFE_SESSIONS = 8.0
+
+    @staticmethod
+    def _resolve_target_timezone(timezone_name: str | None) -> tuple[Any, str]:
+        tz_name = (timezone_name or "UTC").strip()
+        if not tz_name:
+            return UTC, "UTC"
+        if tz_name.upper() == "UTC":
+            return UTC, "UTC"
+        try:
+            return ZoneInfo(tz_name), tz_name
+        except ZoneInfoNotFoundError:
+            log.debug("Unknown timezone '%s' in audience analytics; fallback to UTC", tz_name)
+            return UTC, "UTC"
+
+    @staticmethod
+    def _coerce_timestamp(value: Any) -> datetime | None:
+        if value is None:
+            return None
+        parsed: datetime | None = None
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, (int, float)):
+            try:
+                parsed = datetime.fromtimestamp(float(value), tz=UTC)
+            except (TypeError, ValueError, OSError):
+                parsed = None
+        elif isinstance(value, str):
+            txt = value.strip()
+            if not txt:
+                return None
+            normalized = f"{txt[:-1]}+00:00" if txt.endswith("Z") else txt
+            try:
+                parsed = datetime.fromisoformat(normalized)
+            except ValueError:
+                for fmt in (
+                    "%Y-%m-%d %H:%M:%S.%f",
+                    "%Y-%m-%d %H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%S.%f",
+                    "%Y-%m-%dT%H:%M:%S",
+                ):
+                    try:
+                        parsed = datetime.strptime(txt, fmt)
+                        break
+                    except ValueError:
+                        continue
+        if parsed is None:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed
+
+    @staticmethod
+    def _quantile(values: list[float], q: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        if len(ordered) == 1:
+            return float(ordered[0])
+        pos = max(0.0, min(1.0, q)) * (len(ordered) - 1)
+        lower = int(math.floor(pos))
+        upper = int(math.ceil(pos))
+        if lower == upper:
+            return float(ordered[lower])
+        fraction = pos - lower
+        return float(ordered[lower] + (ordered[upper] - ordered[lower]) * fraction)
+
+    def _compute_weighted_peak_hours(
+        self,
+        conn,
+        streamer_login: str,
+        since_date: str,
+        target_tz: Any,
+    ) -> tuple[list[int], dict[str, Any]]:
+        session_rows = conn.execute(
+            """
+            SELECT s.id, s.started_at
+            FROM twitch_stream_sessions s
+            WHERE s.started_at >= ?
+              AND LOWER(s.streamer_login) = ?
+              AND s.ended_at IS NOT NULL
+            ORDER BY s.started_at DESC
+            LIMIT ?
+            """,
+            [since_date, streamer_login, self.PEAK_SESSION_WINDOW],
+        ).fetchall()
+        session_ids = [int(r[0]) for r in session_rows if r and r[0] is not None]
+        if not session_ids:
+            return [], {
+                "sessionCount": 0,
+                "sessionsWithActivity": 0,
+                "sampleCount": 0,
+                "coverage": 0.0,
+            }
+
+        # Exponential recency weighting: half-life in sessions.
+        session_weights = {
+            sid: math.pow(0.5, idx / self.PEAK_HALF_LIFE_SESSIONS)
+            for idx, sid in enumerate(session_ids)
+        }
+        per_session_hours: dict[int, dict[int, int]] = {sid: {} for sid in session_ids}
+        total_samples = 0
+
+        session_ids_json = json.dumps(session_ids)
+        rows = conn.execute(
+            """
+            SELECT cm.session_id, cm.message_ts
+            FROM twitch_chat_messages cm
+            WHERE cm.session_id IN (
+                SELECT CAST(value AS BIGINT)
+                FROM json_array_elements_text(%s) AS t(value)
+            )
+            """,
+            (session_ids_json,),
+        ).fetchall()
+        for row in rows:
+            sid = int(row[0]) if row and row[0] is not None else None
+            if sid is None or sid not in per_session_hours:
+                continue
+            parsed = self._coerce_timestamp(row[1])
+            if parsed is None:
+                continue
+            hour = parsed.astimezone(target_tz).hour
+            per_session_hours[sid][hour] = per_session_hours[sid].get(hour, 0) + 1
+            total_samples += 1
+
+        sessions_with_activity = sum(1 for sid in session_ids if per_session_hours[sid])
+        coverage = sessions_with_activity / max(1, len(session_ids))
+
+        # Light outlier protection: winsorize per-hour session counts at p90.
+        hour_caps: dict[int, float] = {}
+        for hour in range(24):
+            hour_values = [float(per_session_hours[sid].get(hour, 0)) for sid in session_ids]
+            hour_caps[hour] = max(1.0, self._quantile(hour_values, 0.90))
+
+        weighted_scores = {hour: 0.0 for hour in range(24)}
+        for sid in session_ids:
+            session_weight = session_weights[sid]
+            for hour in range(24):
+                raw_count = float(per_session_hours[sid].get(hour, 0))
+                capped_count = min(raw_count, hour_caps[hour])
+                weighted_scores[hour] += session_weight * capped_count
+
+        ordered_hours = sorted(
+            weighted_scores.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+        peak_hours = [hour for hour, score in ordered_hours if score > 0][:3]
+        return peak_hours, {
+            "sessionCount": len(session_ids),
+            "sessionsWithActivity": sessions_with_activity,
+            "sampleCount": total_samples,
+            "coverage": round(coverage, 3),
+        }
+
+    def _backfill_last_seen_from_messages(self, conn, session_ids: list[int]) -> int:
+        """Backfill missing/older last_seen_at using max message_ts per chatter+session."""
+        normalized_ids = sorted({int(sid) for sid in session_ids if sid is not None})
+        if not normalized_ids:
+            return 0
+
+        session_ids_json = json.dumps(normalized_ids)
+        rows = conn.execute(
+            """
+            SELECT
+                cm.session_id,
+                LOWER(NULLIF(cm.chatter_login, '')) AS chatter_login,
+                cm.chatter_id,
+                MAX(cm.message_ts) AS max_message_ts
+            FROM twitch_chat_messages cm
+            WHERE cm.session_id IN (
+                SELECT CAST(value AS BIGINT)
+                FROM json_array_elements_text(%s) AS t(value)
+            )
+            GROUP BY cm.session_id, LOWER(NULLIF(cm.chatter_login, '')), cm.chatter_id
+            """,
+            (session_ids_json,),
+        ).fetchall()
+
+        updates_by_login = []
+        updates_by_id = []
+        for row in rows:
+            session_id = int(row[0]) if row and row[0] is not None else None
+            chatter_login = (row[1] or "").strip().lower()
+            chatter_id = row[2]
+            max_seen = row[3]
+            if session_id is None or max_seen is None:
+                continue
+            if chatter_login:
+                updates_by_login.append((max_seen, session_id, chatter_login, max_seen))
+            elif chatter_id:
+                updates_by_id.append((max_seen, session_id, chatter_id, max_seen))
+
+        if updates_by_login:
+            conn.executemany(
+                """
+                UPDATE twitch_session_chatters
+                   SET last_seen_at = ?
+                 WHERE session_id = ?
+                   AND LOWER(chatter_login) = ?
+                   AND (last_seen_at IS NULL OR last_seen_at < ?)
+                """,
+                updates_by_login,
+            )
+        if updates_by_id:
+            conn.executemany(
+                """
+                UPDATE twitch_session_chatters
+                   SET last_seen_at = ?
+                 WHERE session_id = ?
+                   AND chatter_id = ?
+                   AND (chatter_login IS NULL OR chatter_login = '')
+                   AND (last_seen_at IS NULL OR last_seen_at < ?)
+                """,
+                updates_by_id,
+            )
+        return len(updates_by_login) + len(updates_by_id)
+
     def _calc_watch_distribution(
         self, sessions, conn=None, session_ids: list = None
     ) -> dict[str, Any]:
         """Calculate watch time distribution.
 
-        Tries to use real per-viewer watch-time from chatters-API snapshots
-        (last_seen_at - first_message_at) when sufficient data is available.
-        Falls back to a retention-curve proxy otherwise.
+        Uses real per-viewer watch-time from chatters snapshots
+        (last_seen_at - first_message_at). No hidden heuristic fallback.
         """
+        base_payload = {
+            "under5min": 0,
+            "min5to15": 0,
+            "min15to30": 0,
+            "min30to60": 0,
+            "over60min": 0,
+            "avgWatchTime": 0,
+            "medianWatchTime": 0,
+        }
         if not sessions:
             return {
-                "under5min": 0,
-                "min5to15": 0,
-                "min15to30": 0,
-                "min30to60": 0,
-                "over60min": 0,
-                "avgWatchTime": 0,
-                "medianWatchTime": 0,
+                **base_payload,
                 "sessionCount": 0,
-                "dataQuality": {"method": "no_data", "coverage": 0.0},
+                "dataQuality": {
+                    "method": "no_data",
+                    "coverage": 0.0,
+                    "sample_count": 0,
+                    "viewer_base_count": 0,
+                    "required_min_samples": self.WATCH_TIME_MIN_SAMPLES,
+                    "required_min_coverage": self.WATCH_TIME_MIN_COVERAGE,
+                },
             }
 
         total_sessions = len(sessions)
-        total_viewers_in_sessions = sum(int(s[4] or 0) for s in sessions)  # avg_viewers col
 
-        # --- Attempt: real watch-time from chatters-API snapshots ---
         real_minutes: list[float] = []
+        viewer_base_count = 0
+        coverage_real = 0.0
+        sample_count = 0
         if conn is not None and session_ids:
             if session_ids:
                 session_ids_json = json.dumps([int(sid) for sid in session_ids])
+                base_row = conn.execute(
+                    """
+                    SELECT COUNT(
+                        DISTINCT COALESCE(NULLIF(chatter_login, ''), chatter_id)
+                    ) AS viewer_base_count
+                    FROM twitch_session_chatters
+                    WHERE session_id IN (
+                        SELECT CAST(value AS BIGINT)
+                        FROM json_array_elements_text(%s) AS t(value)
+                    )
+                      AND COALESCE(NULLIF(chatter_login, ''), chatter_id) IS NOT NULL
+                    """,
+                    (session_ids_json,),
+                ).fetchone()
+                viewer_base_count = int(base_row[0] or 0) if base_row else 0
+
                 rows = conn.execute(
                     """
                     SELECT
@@ -72,52 +321,51 @@ class _AnalyticsAudienceMixin:
                     (session_ids_json,),
                 ).fetchall()
                 real_minutes = [float(r[0]) for r in rows if r[0] is not None and r[0] >= 0]
+                sample_count = len(real_minutes)
+                coverage_real = (
+                    sample_count / max(1, viewer_base_count)
+                    if viewer_base_count > 0
+                    else sample_count / max(1, total_sessions)
+                )
 
-        if total_viewers_in_sessions > 0:
-            coverage_real = len(real_minutes) / max(1, total_viewers_in_sessions)
+        if sample_count <= 0:
+            method = "no_data"
+        elif (
+            sample_count < self.WATCH_TIME_MIN_SAMPLES
+            or coverage_real < self.WATCH_TIME_MIN_COVERAGE
+        ):
+            method = "low_coverage"
         else:
-            coverage_real = len(real_minutes) / max(1, total_sessions)
+            method = "real_samples"
 
-        # Decide whether real data is sufficient (>=10% coverage and >=5 Samples)
-        use_real = coverage_real >= 0.1 and len(real_minutes) >= 5
+        data_quality = {
+            "method": method,
+            "coverage": round(min(1.0, max(0.0, coverage_real)), 3),
+            "sample_count": sample_count,
+            "viewer_base_count": viewer_base_count,
+            "required_min_samples": self.WATCH_TIME_MIN_SAMPLES,
+            "required_min_coverage": self.WATCH_TIME_MIN_COVERAGE,
+        }
 
-        if use_real:
-            total_viewers = len(real_minutes)
-            under_5min = sum(1 for m in real_minutes if m < 5) / total_viewers * 100
-            min_5_to_15 = sum(1 for m in real_minutes if 5 <= m < 15) / total_viewers * 100
-            min_15_to_30 = sum(1 for m in real_minutes if 15 <= m < 30) / total_viewers * 100
-            min_30_to_60 = sum(1 for m in real_minutes if 30 <= m < 60) / total_viewers * 100
-            over_60min = sum(1 for m in real_minutes if m >= 60) / total_viewers * 100
-            avg_watch_time = sum(real_minutes) / total_viewers
-            # Median
-            sorted_m = sorted(real_minutes)
-            mid = len(sorted_m) // 2
-            median_watch_time = (
-                sorted_m[mid] if len(sorted_m) % 2 == 1 else (sorted_m[mid - 1] + sorted_m[mid]) / 2
-            )
-            # Approximate total-session coverage ratio
-            coverage = min(1.0, coverage_real)
-            data_quality = {
-                "method": "chatters_api_snapshots",
-                "coverage": round(coverage, 2),
-            }
-        else:
-            # Not enough real data: surface that explicitly instead of proxying.
-            data_quality = {
-                "method": "insufficient_real_data",
-                "coverage": round(min(1.0, coverage_real), 2),
-            }
+        if method != "real_samples":
             return {
-                "under5min": 0,
-                "min5to15": 0,
-                "min15to30": 0,
-                "min30to60": 0,
-                "over60min": 0,
-                "avgWatchTime": 0,
-                "medianWatchTime": 0,
+                **base_payload,
                 "sessionCount": total_sessions,
                 "dataQuality": data_quality,
             }
+
+        total_viewers = len(real_minutes)
+        under_5min = sum(1 for m in real_minutes if m < 5) / total_viewers * 100
+        min_5_to_15 = sum(1 for m in real_minutes if 5 <= m < 15) / total_viewers * 100
+        min_15_to_30 = sum(1 for m in real_minutes if 15 <= m < 30) / total_viewers * 100
+        min_30_to_60 = sum(1 for m in real_minutes if 30 <= m < 60) / total_viewers * 100
+        over_60min = sum(1 for m in real_minutes if m >= 60) / total_viewers * 100
+        avg_watch_time = sum(real_minutes) / total_viewers
+        sorted_m = sorted(real_minutes)
+        mid = len(sorted_m) // 2
+        median_watch_time = (
+            sorted_m[mid] if len(sorted_m) % 2 == 1 else (sorted_m[mid - 1] + sorted_m[mid]) / 2
+        )
 
         return {
             "under5min": round(max(0, under_5min), 1),
@@ -177,6 +425,7 @@ class _AnalyticsAudienceMixin:
 
                 current_ids = [r[0] for r in current_sessions]
                 prev_ids = [r[0] for r in prev_sessions]
+                self._backfill_last_seen_from_messages(conn, current_ids + prev_ids)
                 current = self._calc_watch_distribution(
                     current_sessions_remapped, conn=conn, session_ids=current_ids
                 )
@@ -202,14 +451,25 @@ class _AnalyticsAudienceMixin:
                         deltas[key] = None
 
                 session_count = int(current.get("sessionCount", 0) or 0)
-                if session_count >= 20:
-                    confidence = "medium"
-                elif session_count >= 8:
+                dq = current.get("dataQuality", {})
+                method = str(dq.get("method") or "no_data")
+                sample_count = int(dq.get("sample_count", 0) or 0)
+                coverage = float(dq.get("coverage", 0.0) or 0.0)
+
+                if method == "real_samples":
+                    if sample_count >= 200 and coverage >= 0.35:
+                        confidence = "high"
+                    elif sample_count >= 80 and coverage >= 0.20:
+                        confidence = "medium"
+                    else:
+                        confidence = "low"
+                elif method == "low_coverage":
                     confidence = "low"
+                    deltas = {key: None for key in deltas}
                 else:
                     confidence = "very_low"
+                    deltas = {key: None for key in deltas}
 
-                dq = current.get("dataQuality", {})
                 return web.json_response(
                     {
                         **current,
@@ -218,8 +478,18 @@ class _AnalyticsAudienceMixin:
                         "dataQuality": {
                             "confidence": confidence,
                             "sessions": session_count,
-                            "method": dq.get("method", "retention_curve_proxy"),
-                            "coverage": dq.get("coverage", 0.0),
+                            "method": method,
+                            "coverage": round(coverage, 3),
+                            "sample_count": sample_count,
+                            "viewer_base_count": int(dq.get("viewer_base_count", 0) or 0),
+                            "required_min_samples": int(
+                                dq.get("required_min_samples", self.WATCH_TIME_MIN_SAMPLES)
+                                or self.WATCH_TIME_MIN_SAMPLES
+                            ),
+                            "required_min_coverage": float(
+                                dq.get("required_min_coverage", self.WATCH_TIME_MIN_COVERAGE)
+                                or self.WATCH_TIME_MIN_COVERAGE
+                            ),
                         },
                     }
                 )
@@ -552,37 +822,75 @@ class _AnalyticsAudienceMixin:
                 since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
                 prev_since = (datetime.now(UTC) - timedelta(days=days * 2)).isoformat()
 
-                # Current period metrics
-                current = conn.execute(
+                # Retention trend from session aggregates
+                retention_row = conn.execute(
                     """
                     SELECT
-                        AVG(s.retention_10m) as retention,
-                        SUM(CASE WHEN s.follower_delta IS NOT NULL
-                             AND NOT (s.followers_end = 0 AND s.followers_start > 0)
-                             THEN s.follower_delta ELSE 0 END) as followers,
-                        SUM(s.returning_chatters) as returning,
-                        SUM(s.unique_chatters) as unique_chatters
+                        AVG(s.retention_10m) as curr_ret,
+                        (SELECT AVG(s2.retention_10m)
+                         FROM twitch_stream_sessions s2
+                         WHERE s2.started_at >= ? AND s2.started_at < ?
+                           AND LOWER(s2.streamer_login) = ? AND s2.ended_at IS NOT NULL
+                        ) as prev_ret
                     FROM twitch_stream_sessions s
                     WHERE s.started_at >= ? AND LOWER(s.streamer_login) = ? AND s.ended_at IS NOT NULL
-                """,
-                    [since_date, streamer.lower()],
+                    """,
+                    [prev_since, since_date, streamer.lower(), since_date, streamer.lower()],
                 ).fetchone()
 
-                # Previous period for comparison
-                prev = conn.execute(
+                curr_retention = float(retention_row[0]) * 100 if retention_row and retention_row[0] else 0
+                prev_retention = float(retention_row[1]) * 100 if retention_row and retention_row[1] else 0
+
+                # True return rate: distinct viewers this period who were known BEFORE the period.
+                # Uses twitch_chatter_rollup.first_seen_at as the "seen before" signal.
+                # Semantics: "% of this period's distinct chatters who had watched before"
+                def _true_return_rate(period_start: str, period_end: str | None) -> tuple[float, int]:
+                    """Return (return_rate_pct, total_distinct_viewers) for a date window.
+
+                    Counts DISTINCT viewers in the window, then checks twitch_chatter_rollup
+                    to see which were known before the window started.
                     """
-                    SELECT
-                        AVG(s.retention_10m) as retention,
-                        SUM(CASE WHEN s.follower_delta IS NOT NULL
-                             AND NOT (s.followers_end = 0 AND s.followers_start > 0)
-                             THEN s.follower_delta ELSE 0 END) as followers,
-                        SUM(s.returning_chatters) as returning,
-                        SUM(s.unique_chatters) as unique_chatters
-                    FROM twitch_stream_sessions s
-                    WHERE s.started_at >= ? AND s.started_at < ? AND LOWER(s.streamer_login) = ? AND s.ended_at IS NOT NULL
-                """,
-                    [prev_since, since_date, streamer.lower()],
-                ).fetchone()
+                    end_filter = "AND s.started_at < ?" if period_end else ""
+                    # Params order: period_start [period_end] streamer  streamer period_start
+                    q_params = (
+                        [period_start] + ([period_end] if period_end else []) + [streamer.lower()]
+                        + [streamer.lower(), period_start]
+                    )
+
+                    row = conn.execute(
+                        f"""
+                        WITH period_viewers AS (
+                            SELECT DISTINCT
+                                COALESCE(NULLIF(LOWER(sc.chatter_login), ''), sc.chatter_id) AS viewer_key,
+                                NULLIF(LOWER(sc.chatter_login), '') AS chatter_login
+                            FROM twitch_session_chatters sc
+                            JOIN twitch_stream_sessions s ON s.id = sc.session_id
+                            WHERE s.started_at >= ?
+                              {end_filter}
+                              AND LOWER(s.streamer_login) = ?
+                              AND s.ended_at IS NOT NULL
+                              AND COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id) IS NOT NULL
+                        )
+                        SELECT
+                            COUNT(DISTINCT pv.viewer_key) AS total_viewers,
+                            COUNT(DISTINCT CASE
+                                WHEN cr.chatter_login IS NOT NULL THEN pv.viewer_key
+                            END) AS returning_viewers
+                        FROM period_viewers pv
+                        LEFT JOIN twitch_chatter_rollup cr
+                            ON cr.chatter_login = pv.chatter_login
+                           AND LOWER(cr.streamer_login) = ?
+                           AND cr.first_seen_at < ?
+                        """,
+                        q_params,
+                    ).fetchone()
+                    total = int(row[0] or 0)
+                    returning = int(row[1] or 0)
+                    rate = round(returning / total * 100, 1) if total > 0 else 0.0
+                    return rate, total
+
+                curr_rate, curr_total = _true_return_rate(since_date, None)
+                prev_rate, _ = _true_return_rate(prev_since, since_date)
 
                 # Calculate trends
                 def calc_trend(curr, prev):
@@ -590,15 +898,8 @@ class _AnalyticsAudienceMixin:
                         return 0
                     return round(((curr - prev) / prev) * 100, 1)
 
-                curr_retention = float(current[0]) * 100 if current and current[0] else 0
-                prev_retention = float(prev[0]) * 100 if prev and prev[0] else 0
-                curr_unique = int(current[3]) if current and current[3] else 0
-                prev_unique = int(prev[3]) if prev and prev[3] else 0
-                curr_returning = int(current[2]) if current and current[2] else 0
-                prev_returning = int(prev[2]) if prev and prev[2] else 0
-
-                return_rate = (curr_returning / curr_unique * 100) if curr_unique > 0 else 0
-                prev_return_rate = (prev_returning / prev_unique * 100) if prev_unique > 0 else 0
+                return_rate = curr_rate
+                prev_return_rate = prev_rate
 
                 return web.json_response(
                     {
@@ -607,6 +908,8 @@ class _AnalyticsAudienceMixin:
                             "conversionChange": 0,  # Would need follower tracking improvement
                             "viewerReturnRate": round(return_rate, 1),
                             "viewerReturnChange": calc_trend(return_rate, prev_return_rate),
+                            "distinctViewers": curr_total,
+                            "returnRateMethod": "distinct_rollup",
                         }
                     }
                 )
@@ -620,6 +923,8 @@ class _AnalyticsAudienceMixin:
 
         streamer = request.query.get("streamer", "").strip() or None
         days = min(max(int(request.query.get("days", "30")), 7), 365)
+        tz_requested = request.query.get("timezone", "UTC")
+        target_tz, timezone_name = self._resolve_target_timezone(tz_requested)
 
         if not streamer:
             return web.json_response({"error": "Streamer required"}, status=400)
@@ -699,10 +1004,15 @@ class _AnalyticsAudienceMixin:
                     stream_count = float(row[2] or 0.0)
                     return max(1.0, avg_v) * max(1.0, stream_count)
 
-                peak_hours = (
-                    [r[0] for r in sorted(time_stats, key=_hour_weight, reverse=True)[:3]]
-                    if time_stats
-                    else [20, 21, 22]
+                peak_hours, peak_meta = self._compute_weighted_peak_hours(
+                    conn=conn,
+                    streamer_login=streamer.lower(),
+                    since_date=since_date,
+                    target_tz=target_tz,
+                )
+                peak_hours_method = (
+                    f"weighted_chat_activity_exp_decay_h{int(self.PEAK_HALF_LIFE_SESSIONS)}"
+                    f"_w{self.PEAK_SESSION_WINDOW}_winsor_p90"
                 )
 
                 # Region estimation combines language hint + schedule
@@ -758,33 +1068,54 @@ class _AnalyticsAudienceMixin:
                     for name, score in region_scores.items()
                 ]
 
-                # Chat activity analysis for engagement type (weight by samples/duration to avoid short-session bias)
+                # Interaction rate (final definition):
+                # active chatters / avg viewers, weighted by stream sample strength.
                 chat_stats = conn.execute(
                     """
-                    WITH weighted AS (
+                    WITH session_base AS (
                         SELECT
+                            s.id AS session_id,
                             COALESCE(NULLIF(s.samples, 0), NULLIF(s.duration_seconds, 0), 1) AS weight,
-                            s.unique_chatters,
-                            s.returning_chatters,
-                            s.avg_viewers
+                            COALESCE(s.avg_viewers, 0) AS avg_viewers
                         FROM twitch_stream_sessions s
                         WHERE s.started_at >= ? AND LOWER(s.streamer_login) = ? AND s.ended_at IS NOT NULL
+                    ),
+                    active_chatters AS (
+                        SELECT
+                            sc.session_id,
+                            COUNT(
+                                DISTINCT COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)
+                            ) AS active_chatters
+                        FROM twitch_session_chatters sc
+                        JOIN session_base sb ON sb.session_id = sc.session_id
+                        WHERE sc.messages > 0
+                          AND COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id) IS NOT NULL
+                        GROUP BY sc.session_id
                     )
                     SELECT
-                        SUM(CASE WHEN avg_viewers > 0 THEN (unique_chatters * weight * 1.0) / avg_viewers ELSE 0 END) AS weighted_chat_rate_sum,
-                        SUM(weight) AS total_weight,
-                        SUM(unique_chatters) AS total_chatters,
-                        SUM(returning_chatters) AS total_returning
-                    FROM weighted
+                        SUM(
+                            CASE
+                                WHEN sb.avg_viewers > 0
+                                THEN (COALESCE(ac.active_chatters, 0) * sb.weight * 1.0) / sb.avg_viewers
+                                ELSE 0
+                            END
+                        ) AS weighted_interaction_sum,
+                        SUM(sb.weight) AS total_weight,
+                        SUM(COALESCE(ac.active_chatters, 0)) AS total_active_chatters
+                    FROM session_base sb
+                    LEFT JOIN active_chatters ac ON ac.session_id = sb.session_id
                 """,
                     [since_date, streamer.lower()],
                 ).fetchone()
 
                 total_weight = float(chat_stats[1]) if chat_stats and chat_stats[1] else 0
-                weighted_chat_rate_sum = float(chat_stats[0]) if chat_stats and chat_stats[0] else 0
+                weighted_interaction_sum = float(chat_stats[0]) if chat_stats and chat_stats[0] else 0
+                total_active_chatters = int(chat_stats[2] or 0) if chat_stats else 0
 
-                chat_rate_raw = weighted_chat_rate_sum / total_weight if total_weight > 0 else 0
-                chat_rate = min(1.0, chat_rate_raw)
+                interaction_rate_raw = (
+                    weighted_interaction_sum / total_weight if total_weight > 0 else 0.0
+                )
+                interaction_rate_pct = max(0.0, min(100.0, interaction_rate_raw * 100.0))
 
                 # Distinct viewer cohorts with fallback when is_first_time_global is missing
                 viewer_rows = conn.execute(
@@ -805,7 +1136,10 @@ class _AnalyticsAudienceMixin:
                         GROUP BY user_id, chatter_login
                     ),
                     rollup AS (
-                        SELECT LOWER(streamer_login) AS streamer_login, LOWER(chatter_login) AS chatter_login
+                        SELECT
+                            LOWER(streamer_login) AS streamer_login,
+                            LOWER(chatter_login) AS chatter_login,
+                            first_seen_at
                         FROM twitch_chatter_rollup
                         WHERE LOWER(streamer_login) = ?
                     )
@@ -817,11 +1151,14 @@ class _AnalyticsAudienceMixin:
                         pu.lurker_flag,
                         pu.first_time_flag,
                         pu.has_first_flag,
-                        CASE WHEN r.chatter_login IS NOT NULL THEN 1 ELSE 0 END AS seen_before
+                        CASE
+                            WHEN r.chatter_login IS NOT NULL AND r.first_seen_at < ?
+                            THEN 1 ELSE 0
+                        END AS seen_before
                     FROM per_user pu
                     LEFT JOIN rollup r ON r.chatter_login = LOWER(pu.chatter_login)
                 """,
-                    [since_date, streamer.lower(), streamer.lower()],
+                    [since_date, streamer.lower(), streamer.lower(), since_date],
                 ).fetchall()
 
                 viewer_entries = []
@@ -850,8 +1187,10 @@ class _AnalyticsAudienceMixin:
                 new_viewers = 0
 
                 for v in viewer_entries:
-                    if has_first_flag_data:
+                    if has_first_flag_data and v["has_first_flag"]:
                         is_first = v["first_flag"]
+                        if (not is_first) and v["lurker"] and (not v["seen_before"]):
+                            is_first = True
                     else:
                         # Fallback: treat as returning if we have historical rollup for this login
                         is_first = not v["seen_before"] if v["chatter_login"] else True
@@ -906,34 +1245,110 @@ class _AnalyticsAudienceMixin:
                     activity_pattern = "balanced"
 
                 schedule_session_total = int(sum(weekday_counts.values()))
-                session_samples = max(language_session_total, schedule_session_total)
-                if session_samples >= 25:
-                    confidence = "high"
-                elif session_samples >= 12:
-                    confidence = "medium"
-                elif session_samples >= 6:
+                peak_session_count = int(peak_meta.get("sessionCount", 0) or 0)
+                peak_sessions_with_activity = int(
+                    peak_meta.get("sessionsWithActivity", 0) or 0
+                )
+                peak_sample_count = int(peak_meta.get("sampleCount", 0) or 0)
+                peak_coverage = float(peak_meta.get("coverage", 0.0) or 0.0)
+
+                session_samples = max(
+                    language_session_total,
+                    schedule_session_total,
+                    peak_session_count,
+                )
+                if peak_sample_count <= 0:
+                    peak_quality_method = "no_data"
+                elif peak_coverage < 0.20 or peak_sessions_with_activity < 3:
+                    peak_quality_method = "low_coverage"
+                else:
+                    peak_quality_method = "real_samples"
+
+                if peak_quality_method == "real_samples":
+                    if peak_sample_count >= 500 and peak_coverage >= 0.60:
+                        confidence = "high"
+                    elif peak_sample_count >= 150 and peak_coverage >= 0.35:
+                        confidence = "medium"
+                    else:
+                        confidence = "low"
+                elif peak_quality_method == "low_coverage":
                     confidence = "low"
                 else:
                     confidence = "very_low"
 
+                peak_hours_response = peak_hours if peak_quality_method == "real_samples" else []
+
                 return web.json_response(
                     {
-                        "estimatedRegions": regions,
                         "viewerTypes": viewer_type,
                         "activityPattern": activity_pattern,
                         "primaryLanguage": primary_language_label,
                         "languageConfidence": language_confidence,
-                        "peakActivityHours": peak_hours,
-                        "interactiveRate": round(chat_rate * 100, 1),
+                        "peakActivityHours": peak_hours_response,
+                        "peakHoursMethod": peak_hours_method,
+                        "interactiveRate": round(interaction_rate_pct, 1),
+                        "interactionRateActivePerViewer": round(interaction_rate_pct, 1),
                         "loyaltyScore": loyalty_score,
+                        "timezone": timezone_name,
                         "dataQuality": {
                             "confidence": confidence,
                             "sessions": session_samples,
-                            "method": "heuristic_from_language_and_schedule",
+                            "method": peak_quality_method,
+                            "coverage": round(peak_coverage, 3),
+                            "sampleCount": peak_sample_count,
+                            "peakSessionCount": peak_session_count,
+                            "peakSessionsWithActivity": peak_sessions_with_activity,
+                            "interactiveSampleCount": total_active_chatters,
                         },
                     }
                 )
         except Exception as exc:
             log.exception("Error in audience demographics API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_v2_loyalty_curve(self, request: web.Request) -> web.Response:
+        """Loyalty/churn distribution: how many chatters came 1x, 2x, 3x, 10x+."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip().lower()
+        if not streamer:
+            return web.json_response({"error": "Streamer required"}, status=400)
+
+        try:
+            with storage.get_conn() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT total_sessions, COUNT(DISTINCT chatter_login) AS chatter_count
+                    FROM twitch_chatter_rollup
+                    WHERE LOWER(streamer_login) = ?
+                    GROUP BY total_sessions
+                    ORDER BY total_sessions
+                    """,
+                    [streamer],
+                ).fetchall()
+
+                if not rows:
+                    return web.json_response({"curve": [], "one_time_rate": None, "total_chatters": 0})
+
+                total = sum(int(r[1] or 0) for r in rows)
+                one_time = int(rows[0][1] or 0) if rows and int(rows[0][0] or 0) == 1 else 0
+
+                curve = [
+                    {
+                        "sessions": int(r[0] or 0),
+                        "chatters": int(r[1] or 0),
+                        "percentage": round(int(r[1] or 0) / total * 100, 1) if total > 0 else 0,
+                    }
+                    for r in rows
+                ]
+
+                return web.json_response({
+                    "curve": curve,
+                    "total_chatters": total,
+                    "one_time_rate": round(one_time / total * 100, 1) if total > 0 else None,
+                    "window": "all_time",
+                })
+        except Exception as exc:
+            log.exception("Error in loyalty curve API")
             return web.json_response({"error": str(exc)}, status=500)
 

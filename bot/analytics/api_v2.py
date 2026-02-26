@@ -15,6 +15,7 @@ from .api_audience import _AnalyticsAudienceMixin
 from .api_insights import _AnalyticsInsightsMixin
 from .api_overview import _AnalyticsOverviewMixin
 from .api_performance import _AnalyticsPerformanceMixin
+from .api_raids import _AnalyticsRaidsMixin
 
 log = logging.getLogger("TwitchStreams.AnalyticsV2")
 DASHBOARD_V2_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
@@ -73,6 +74,7 @@ class AnalyticsV2Mixin(
     _AnalyticsAudienceMixin,
     _AnalyticsPerformanceMixin,
     _AnalyticsInsightsMixin,
+    _AnalyticsRaidsMixin,
 ):
     """Mixin providing v2 analytics API endpoints for the dashboard."""
 

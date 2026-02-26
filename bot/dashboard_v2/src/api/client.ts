@@ -58,6 +58,14 @@ function buildUrl(endpoint: string, params: Record<string, string | number | boo
   return url.toString();
 }
 
+function getBrowserTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}
+
 // Generic fetch wrapper
 async function fetchApi<T>(endpoint: string, params: Record<string, string | number | boolean> = {}): Promise<T> {
   const url = buildUrl(endpoint, params);
@@ -145,6 +153,7 @@ export async function fetchChatAnalytics(
   return fetchApi<ChatAnalytics>('/chat-analytics', {
     streamer: streamer || '',
     days,
+    timezone: getBrowserTimezone(),
   });
 }
 
@@ -287,18 +296,25 @@ export async function fetchAudienceInsights(
 
 // Audience Demographics
 export interface AudienceDemographicsResponse {
-  estimatedRegions: { region: string; percentage: number }[];
   viewerTypes: { label: string; percentage: number }[];
   activityPattern: 'weekend-heavy' | 'weekday-focused' | 'balanced';
   primaryLanguage: string;
   languageConfidence: number;
   peakActivityHours: number[];
+  peakHoursMethod?: string;
   interactiveRate: number;
+  interactionRateActivePerViewer?: number;
   loyaltyScore: number;
+  timezone?: string;
   dataQuality?: {
     confidence: 'very_low' | 'low' | 'medium' | 'high';
     sessions?: number;
-    method?: string;
+    method?: 'no_data' | 'low_coverage' | 'real_samples' | string;
+    coverage?: number;
+    sampleCount?: number;
+    peakSessionCount?: number;
+    peakSessionsWithActivity?: number;
+    interactiveSampleCount?: number;
   };
 }
 
@@ -309,6 +325,7 @@ export async function fetchAudienceDemographics(
   return fetchApi<AudienceDemographicsResponse>('/audience-demographics', {
     streamer: streamer || '',
     days,
+    timezone: getBrowserTimezone(),
   });
 }
 

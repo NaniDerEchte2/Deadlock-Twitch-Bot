@@ -88,6 +88,7 @@ export function Audience({ streamer, days }: AudienceProps) {
   const tagData = tags ?? null;
   const titleData = titles ?? null;
   const demographicsData = demographics ?? null;
+  const hasReliableWatchTime = watchTimeData?.dataQuality?.method === 'real_samples';
   const noData =
     !watchTimeData && !funnelData && !tagData && !titleData && !demographicsData && failedQueries.length === 0;
 
@@ -127,7 +128,7 @@ export function Audience({ streamer, days }: AudienceProps) {
           {/* Header Stats */}
           {(() => {
             const cards = [];
-            if (watchTimeData) {
+            if (watchTimeData && hasReliableWatchTime) {
               cards.push(
                 <QuickStatCard
                   key="watch"
@@ -225,7 +226,7 @@ export function Audience({ streamer, days }: AudienceProps) {
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {/* Watch Time Insight */}
-                {watchTimeData && (
+                {watchTimeData && hasReliableWatchTime && (
                   <InsightCard
                     title="Viewer Engagement"
                     description={
