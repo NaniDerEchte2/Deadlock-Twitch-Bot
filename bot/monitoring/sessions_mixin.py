@@ -381,7 +381,7 @@ class _SessionsMixin:
                 chatter_row = c.execute(
                     """
                     SELECT COUNT(*) AS uniq,
-                           SUM(is_first_time_global) AS firsts
+                           SUM(is_first_time_streamer) AS firsts
                       FROM twitch_session_chatters
                      WHERE session_id = ?
                     """,

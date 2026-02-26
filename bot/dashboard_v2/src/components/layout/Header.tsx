@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Activity, ChevronDown } from 'lucide-react';
+import { Activity, ChevronDown, SlidersHorizontal, Sparkles } from 'lucide-react';
 import type { TimeRange } from '@/types/analytics';
 
 interface HeaderProps {
@@ -38,125 +38,127 @@ export function Header({
   const visibleOthers = canViewAllStreamers ? others : [];
 
   return (
-    <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
-      {/* Logo & Title */}
-      <div className="flex items-center gap-4">
-        <div className="p-2 rounded-xl bg-accent/20">
-          <Activity className="w-6 h-6 text-accent" />
-        </div>
-        <div>
-          <h1 className="text-2xl font-bold text-white flex items-center gap-2">
-            Channel Analytics
-            {isLoading && (
-              <span className="w-2 h-2 rounded-full bg-accent animate-pulse" />
-            )}
-          </h1>
-          <p className="text-text-secondary text-sm">
-            {streamer || allLabel} • Letzte {days} Tage
-          </p>
-        </div>
-      </div>
-
-      {/* Controls */}
-      <div className="flex items-center gap-3">
-        {/* Streamer Dropdown */}
-        <div className="relative">
-          <button
-            onClick={() => setDropdownOpen(!dropdownOpen)}
-            className="flex items-center gap-2 px-4 py-2 bg-card rounded-lg border border-border hover:border-border-hover transition-colors"
-          >
-            <span className="text-white">
-              {streamer || allLabel}
-            </span>
-            <ChevronDown className="w-4 h-4 text-text-secondary" />
-          </button>
-
-          {dropdownOpen && (
-            <>
-              <div
-                className="fixed inset-0 z-40"
-                onClick={() => setDropdownOpen(false)}
-              />
-              <div className="absolute top-full right-0 mt-2 w-64 max-h-96 overflow-y-auto bg-card border border-border rounded-lg shadow-xl z-50">
-                {/* All Partners Option */}
-                <button
-                  onClick={() => {
-                    onStreamerChange(null);
-                    setDropdownOpen(false);
-                  }}
-                  className={`w-full px-4 py-2 text-left hover:bg-white/5 transition-colors ${
-                    !streamer ? 'bg-accent/20 text-accent' : 'text-white'
-                  }`}
-                >
-                  {allLabel}
-                </button>
-
-                {/* Partners */}
-                {visiblePartners.length > 0 && (
-                  <>
-                    <div className="px-4 py-1 text-xs text-text-secondary uppercase tracking-wider bg-black/20">
-                      Partner
-                    </div>
-                    {visiblePartners.map(s => (
-                      <button
-                        key={s.login}
-                        onClick={() => {
-                          onStreamerChange(s.login);
-                          setDropdownOpen(false);
-                        }}
-                        className={`w-full px-4 py-2 text-left hover:bg-white/5 transition-colors ${
-                          streamer === s.login ? 'bg-accent/20 text-accent' : 'text-white'
-                        }`}
-                      >
-                        {s.login}
-                      </button>
-                    ))}
-                  </>
-                )}
-
-                {/* Others (Admin only) */}
-                {visibleOthers.length > 0 && (
-                  <>
-                    <div className="px-4 py-1 text-xs text-text-secondary uppercase tracking-wider bg-black/20">
-                      Weitere Streamer
-                    </div>
-                    {visibleOthers.map(s => (
-                      <button
-                        key={s.login}
-                        onClick={() => {
-                          onStreamerChange(s.login);
-                          setDropdownOpen(false);
-                        }}
-                        className={`w-full px-4 py-2 text-left hover:bg-white/5 transition-colors ${
-                          streamer === s.login ? 'bg-accent/20 text-accent' : 'text-white'
-                        }`}
-                      >
-                        {s.login}
-                        <span className="ml-2 text-text-secondary text-xs">(extern)</span>
-                      </button>
-                    ))}
-                  </>
-                )}
-              </div>
-            </>
-          )}
+    <header className="panel-card rounded-2xl p-4 md:p-6 mb-8">
+      <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-5">
+        {/* Logo & Title */}
+        <div className="flex items-start gap-4">
+          <div className="p-3 rounded-2xl bg-gradient-to-br from-primary/30 to-accent/25 border border-primary/25 shadow-lg shadow-primary/10">
+            <Activity className="w-6 h-6 text-primary" />
+          </div>
+          <div>
+            <div className="inline-flex items-center gap-2 rounded-full border border-border bg-black/20 px-3 py-1 text-[11px] uppercase tracking-[0.16em] text-text-secondary mb-2">
+              <Sparkles className="w-3 h-3 text-accent" />
+              Twitch Analytics
+            </div>
+            <h1 className="display-font text-2xl md:text-3xl font-bold text-white flex items-center gap-2">
+              Channel Intelligence
+              {isLoading && <span className="w-2 h-2 rounded-full bg-primary animate-pulse" />}
+            </h1>
+            <p className="text-text-secondary text-sm md:text-base mt-1">
+              Fokus: {streamer || allLabel} <span className="mx-1 text-border">•</span> Zeitraum: letzte {days} Tage
+            </p>
+          </div>
         </div>
 
-        {/* Time Range Selector */}
-        <div className="flex items-center bg-card rounded-lg border border-border p-1">
-          {timeRanges.map(range => (
+        {/* Controls */}
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+          {/* Streamer Dropdown */}
+          <div className="relative">
             <button
-              key={range.value}
-              onClick={() => onDaysChange(range.value)}
-              className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${
-                days === range.value
-                  ? 'bg-accent text-white shadow-lg'
-                  : 'text-text-secondary hover:text-white'
-              }`}
+              onClick={() => setDropdownOpen(!dropdownOpen)}
+              className="w-full sm:w-auto min-w-[220px] flex items-center justify-between gap-2 px-4 py-2.5 rounded-xl border border-border bg-background/70 hover:border-border-hover soft-elevate"
             >
-              {range.label}
+              <span className="text-white font-medium truncate">{streamer || allLabel}</span>
+              <ChevronDown className="w-4 h-4 text-text-secondary" />
             </button>
-          ))}
+
+            {dropdownOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setDropdownOpen(false)} />
+                <div className="absolute top-full right-0 mt-2 w-full sm:w-72 max-h-96 overflow-y-auto panel-card rounded-xl z-50">
+                  {/* All Partners Option */}
+                  <button
+                    onClick={() => {
+                      onStreamerChange(null);
+                      setDropdownOpen(false);
+                    }}
+                    className={`w-full px-4 py-2.5 text-left hover:bg-white/5 transition-colors ${
+                      !streamer ? 'bg-accent/15 text-accent' : 'text-white'
+                    }`}
+                  >
+                    {allLabel}
+                  </button>
+
+                  {/* Partners */}
+                  {visiblePartners.length > 0 && (
+                    <>
+                      <div className="px-4 py-1.5 text-[11px] text-text-secondary uppercase tracking-[0.14em] bg-black/25">
+                        Partner
+                      </div>
+                      {visiblePartners.map(s => (
+                        <button
+                          key={s.login}
+                          onClick={() => {
+                            onStreamerChange(s.login);
+                            setDropdownOpen(false);
+                          }}
+                          className={`w-full px-4 py-2.5 text-left hover:bg-white/5 transition-colors ${
+                            streamer === s.login ? 'bg-accent/15 text-accent' : 'text-white'
+                          }`}
+                        >
+                          {s.login}
+                        </button>
+                      ))}
+                    </>
+                  )}
+
+                  {/* Others (Admin only) */}
+                  {visibleOthers.length > 0 && (
+                    <>
+                      <div className="px-4 py-1.5 text-[11px] text-text-secondary uppercase tracking-[0.14em] bg-black/25">
+                        Weitere Streamer
+                      </div>
+                      {visibleOthers.map(s => (
+                        <button
+                          key={s.login}
+                          onClick={() => {
+                            onStreamerChange(s.login);
+                            setDropdownOpen(false);
+                          }}
+                          className={`w-full px-4 py-2.5 text-left hover:bg-white/5 transition-colors ${
+                            streamer === s.login ? 'bg-accent/15 text-accent' : 'text-white'
+                          }`}
+                        >
+                          {s.login}
+                          <span className="ml-2 text-text-secondary text-xs">(extern)</span>
+                        </button>
+                      ))}
+                    </>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Time Range Selector */}
+          <div className="flex items-center bg-background/70 rounded-xl border border-border p-1.5">
+            <div className="px-2 text-text-secondary">
+              <SlidersHorizontal className="w-4 h-4" />
+            </div>
+            {timeRanges.map(range => (
+              <button
+                key={range.value}
+                onClick={() => onDaysChange(range.value)}
+                className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-all ${
+                  days === range.value
+                    ? 'bg-gradient-to-r from-primary to-accent text-white shadow-lg shadow-primary/20'
+                    : 'text-text-secondary hover:text-white'
+                }`}
+              >
+                {range.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
     </header>

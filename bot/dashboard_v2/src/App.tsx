@@ -43,7 +43,7 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
     if (this.state.hasError) {
       return (
         <div className="min-h-screen bg-bg flex items-center justify-center p-8">
-          <div className="bg-card border border-border rounded-xl p-8 max-w-lg text-center">
+          <div className="panel-card rounded-2xl p-8 max-w-lg text-center">
             <AlertTriangle className="w-12 h-12 text-warning mx-auto mb-4" />
             <h2 className="text-xl font-bold text-white mb-2">Dashboard-Fehler</h2>
             <p className="text-text-secondary mb-4">
@@ -51,7 +51,7 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
             </p>
             <button
               onClick={() => this.setState({ hasError: false, error: null })}
-              className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary/80 transition-colors"
+              className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary-hover transition-colors"
             >
               Erneut versuchen
             </button>
@@ -116,11 +116,14 @@ function Dashboard() {
 
   // Auth badge component
   const AuthBadge = () => {
+    const badgeBase =
+      'flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-semibold tracking-wide backdrop-blur-md';
+
     if (loadingAuth) return null;
 
     if (authError || !authStatus?.authenticated) {
       return (
-        <div className="flex items-center gap-2 px-3 py-1.5 bg-error/10 border border-error/20 rounded-lg text-error text-sm">
+        <div className={`${badgeBase} bg-error/10 border-error/30 text-error`}>
           <ShieldAlert className="w-4 h-4" />
           <span>Nicht authentifiziert</span>
         </div>
@@ -129,7 +132,7 @@ function Dashboard() {
 
     if (authStatus.isLocalhost) {
       return (
-        <div className="flex items-center gap-2 px-3 py-1.5 bg-success/10 border border-success/20 rounded-lg text-success text-sm">
+        <div className={`${badgeBase} bg-success/10 border-success/30 text-success`}>
           <Wifi className="w-4 h-4" />
           <span>Localhost (Admin)</span>
         </div>
@@ -138,7 +141,7 @@ function Dashboard() {
 
     if (authStatus.isAdmin) {
       return (
-        <div className="flex items-center gap-2 px-3 py-1.5 bg-primary/10 border border-primary/20 rounded-lg text-primary text-sm">
+        <div className={`${badgeBase} bg-primary/10 border-primary/30 text-primary`}>
           <ShieldCheck className="w-4 h-4" />
           <span>Admin</span>
         </div>
@@ -146,7 +149,7 @@ function Dashboard() {
     }
 
     return (
-      <div className="flex items-center gap-2 px-3 py-1.5 bg-accent/10 border border-accent/20 rounded-lg text-accent text-sm">
+      <div className={`${badgeBase} bg-accent/10 border-accent/30 text-accent`}>
         <Shield className="w-4 h-4" />
         <span>Partner</span>
       </div>
@@ -154,10 +157,14 @@ function Dashboard() {
   };
 
   return (
-    <div className="min-h-screen bg-bg p-4 md:p-8">
-      <div className="max-w-[1600px] mx-auto">
+    <div className="min-h-screen relative px-3 py-4 md:px-7 md:py-8">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        <div className="absolute -top-28 right-[-7rem] h-[25rem] w-[25rem] rounded-full bg-primary/12 blur-3xl" />
+        <div className="absolute top-[28%] -left-24 h-[20rem] w-[20rem] rounded-full bg-accent/14 blur-3xl" />
+      </div>
+      <div className="relative max-w-[1700px] mx-auto">
         {/* Auth Status Badge */}
-        <div className="flex justify-end mb-2">
+        <div className="flex justify-end mb-4">
           <AuthBadge />
         </div>
 

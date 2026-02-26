@@ -1219,7 +1219,7 @@ class ModerationMixin:
             # Rollup pro Session
             existing = conn.execute(
                 """
-                SELECT messages, is_first_time_global, seen_via_chatters_api
+                SELECT messages, is_first_time_streamer, seen_via_chatters_api
                   FROM twitch_session_chatters
                  WHERE session_id = ? AND chatter_login = ?
                 """,
@@ -1280,7 +1280,7 @@ class ModerationMixin:
                        SET messages = messages + 1,
                            last_seen_at = ?,
                            seen_via_chatters_api = 0,
-                           is_first_time_global = ?,
+                           is_first_time_streamer = ?,
                            chatter_id = COALESCE(chatter_id, ?)
                      WHERE session_id = ? AND chatter_login = ?
                     """,
@@ -1297,7 +1297,7 @@ class ModerationMixin:
                     """
                     INSERT INTO twitch_session_chatters (
                         session_id, streamer_login, chatter_login, chatter_id, first_message_at,
-                        messages, is_first_time_global, seen_via_chatters_api, last_seen_at
+                        messages, is_first_time_streamer, seen_via_chatters_api, last_seen_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
                     """,
                     (

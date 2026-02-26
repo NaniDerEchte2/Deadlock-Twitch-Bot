@@ -18,6 +18,7 @@ from aiohttp import web
 
 from ..storage import pg as storage
 from .coaching_engine import CoachingEngine
+from .engagement_metrics import EngagementInputs, calculate_engagement
 
 log = logging.getLogger("TwitchStreams.AnalyticsV2")
 
@@ -286,7 +287,13 @@ class _AnalyticsInsightsMixin:
                     SELECT
                         COUNT(*) as session_count,
                         COALESCE(SUM(s.duration_seconds), 0) as total_duration_seconds,
-                        AVG(s.avg_viewers) as avg_viewers
+                        AVG(s.avg_viewers) as avg_viewers,
+                        COALESCE(
+                            SUM(
+                                COALESCE(s.avg_viewers, 0) * GREATEST(COALESCE(s.duration_seconds, 0), 0) / 60.0
+                            ),
+                            0
+                        ) as viewer_minutes_fallback
                     FROM twitch_stream_sessions s
                     WHERE s.started_at >= ?
                       AND LOWER(s.streamer_login) = ?
@@ -299,6 +306,33 @@ class _AnalyticsInsightsMixin:
                     float(session_stats[1]) if session_stats and session_stats[1] else 0.0
                 )
                 avg_viewers = float(session_stats[2]) if session_stats and session_stats[2] else 0.0
+                viewer_minutes_fallback = (
+                    float(session_stats[3]) if session_stats and session_stats[3] else 0.0
+                )
+
+                viewer_sample_row = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) as sample_count,
+                        COALESCE(SUM(GREATEST(sv.viewer_count, 0)), 0) as viewer_minutes
+                    FROM twitch_session_viewers sv
+                    JOIN twitch_stream_sessions s ON s.id = sv.session_id
+                    WHERE s.started_at >= ?
+                      AND LOWER(s.streamer_login) = ?
+                      AND s.ended_at IS NOT NULL
+                    """,
+                    [since_date, streamer_login],
+                ).fetchone()
+                viewer_sample_count = (
+                    int(viewer_sample_row[0]) if viewer_sample_row and viewer_sample_row[0] else 0
+                )
+                viewer_minutes_samples = (
+                    float(viewer_sample_row[1]) if viewer_sample_row and viewer_sample_row[1] else 0.0
+                )
+                viewer_minutes = (
+                    viewer_minutes_samples if viewer_sample_count > 0 else viewer_minutes_fallback
+                )
+                viewer_minutes_has_real_samples = viewer_sample_count > 0
 
                 # True message counts from raw chat events in the selected time range.
                 all_messages = conn.execute(
@@ -355,8 +389,8 @@ class _AnalyticsInsightsMixin:
                                 SUM(sc.messages) AS total_messages,
                                 MAX(CASE WHEN sc.messages > 0 THEN 1 ELSE 0 END) AS active_flag,
                                 MAX(CASE WHEN sc.messages = 0 AND sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) AS lurker_flag,
-                                MAX(CASE WHEN sc.is_first_time_global IS TRUE THEN 1 ELSE 0 END) AS first_time_flag,
-                                MAX(CASE WHEN sc.is_first_time_global IS NOT NULL THEN 1 ELSE 0 END) AS has_first_flag,
+                                MAX(CASE WHEN sc.is_first_time_streamer IS TRUE THEN 1 ELSE 0 END) AS first_time_flag,
+                                MAX(CASE WHEN sc.is_first_time_streamer IS NOT NULL THEN 1 ELSE 0 END) AS has_first_flag,
                                 MAX(CASE WHEN sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) AS seen_flag
                             FROM twitch_session_chatters sc
                             JOIN twitch_stream_sessions s ON s.id = sc.session_id
@@ -460,39 +494,42 @@ class _AnalyticsInsightsMixin:
                     first_time_chatters = distinct_chatters_from_messages
                     lurker_count = 0
                     chatters_api_seen = 0
+                    tracked_unique_viewers = distinct_chatters_from_messages
                     avg_messages_per_chatter = 0.0
 
                 unique_chatters = active_chatters_count
                 first_time_chatters = min(first_time_chatters, unique_chatters)
                 returning_chatters = max(0, unique_chatters - first_time_chatters)
-                total_unique_viewers = tracked_unique_viewers if tracked_unique_viewers > 0 else unique_chatters
+                total_unique_viewers = (
+                    tracked_unique_viewers if tracked_unique_viewers > 0 else unique_chatters
+                )
                 lurker_ratio = (
                     round(lurker_count / total_unique_viewers, 3) if total_unique_viewers > 0 else 0.0
-                )
-                active_ratio = (
-                    round(active_chatters_count / total_unique_viewers, 3) if total_unique_viewers > 0 else 0.0
-                )
-                chatters_api_coverage = (
-                    round(chatters_api_seen / total_unique_viewers, 3) if total_unique_viewers > 0 else 0.0
                 )
                 total_minutes = total_duration_seconds / 60.0 if total_duration_seconds > 0 else 0.0
                 messages_per_minute = (total_messages / total_minutes) if total_minutes > 0 else 0.0
                 chatter_return_rate = (
                     (returning_chatters / unique_chatters) * 100.0 if unique_chatters > 0 else 0.0
                 )
-                # Prefer tracked-viewer based interaction to avoid >100% artifacts for small channels.
-                interaction_rate_active_per_viewer = active_ratio * 100.0
-                interaction_rate_active_per_avg_viewer = (
-                    (active_chatters_count / avg_viewers) * 100.0 if avg_viewers > 0 else 0.0
+
+                engagement = calculate_engagement(
+                    EngagementInputs(
+                        total_messages=total_messages,
+                        active_chatters=active_chatters_count,
+                        tracked_chat_accounts=total_unique_viewers,
+                        chatters_api_seen=chatters_api_seen,
+                        viewer_minutes=viewer_minutes,
+                        viewer_minutes_has_real_samples=viewer_minutes_has_real_samples,
+                        avg_viewers=avg_viewers,
+                        session_count=session_count,
+                        sessions_with_chat=sessions_with_chat,
+                    )
                 )
-                passive_viewers = max(0, total_unique_viewers - active_chatters_count)
-                interaction_rate_reliable = passive_viewers > 0
-                chat_session_coverage_ratio = (
-                    (sessions_with_chat / session_count) if session_count > 0 else 0.0
-                )
+                active_ratio = engagement.active_ratio
+                chat_session_coverage_ratio = engagement.chat_session_coverage
                 chat_session_coverage_pct = round(chat_session_coverage_ratio * 100.0, 1)
 
-                if total_messages == 0:
+                if engagement.method == "no_data":
                     confidence = "very_low"
                 elif (
                     chat_session_coverage_ratio >= 0.7
@@ -508,7 +545,7 @@ class _AnalyticsInsightsMixin:
                     confidence = "medium"
                 else:
                     confidence = "low"
-                data_method = "real_chat_messages" if total_messages > 0 else "no_data"
+                data_method = engagement.method
 
                 # Top chatters in selected period (not all-time rollup).
                 top = conn.execute(
@@ -540,13 +577,15 @@ class _AnalyticsInsightsMixin:
                         "returningChatters": returning_chatters,
                         "messagesPerMinute": round(messages_per_minute, 2),
                         "chatterReturnRate": round(chatter_return_rate, 1),
-                        "interactionRateActivePerViewer": round(
-                            interaction_rate_active_per_viewer, 1
-                        ),
-                        "interactionRateActivePerAvgViewer": round(
-                            interaction_rate_active_per_avg_viewer, 1
-                        ),
-                        "interactionRateReliable": interaction_rate_reliable,
+                        "chatPenetrationPct": engagement.chat_penetration_pct,
+                        "chatPenetrationReliable": engagement.chat_penetration_reliable,
+                        "messagesPer100ViewerMinutes": engagement.messages_per_100_viewer_minutes,
+                        "viewerMinutes": engagement.viewer_minutes,
+                        # Legacy compatibility (deprecated)
+                        "legacyInteractionActivePerAvgViewer": engagement.legacy_interaction_active_per_avg_viewer,
+                        "interactionRateActivePerViewer": engagement.chat_penetration_pct,
+                        "interactionRateActivePerAvgViewer": engagement.legacy_interaction_active_per_avg_viewer,
+                        "interactionRateReliable": engagement.chat_penetration_reliable,
                         "commandMessages": command_messages,
                         "nonCommandMessages": max(0, total_messages - command_messages),
                         "lurkerRatio": lurker_ratio,
@@ -598,8 +637,13 @@ class _AnalyticsInsightsMixin:
                             "sessions": session_count,
                             "sessionsWithChat": sessions_with_chat,
                             "chatSessionCoverage": chat_session_coverage_pct,
-                            "chattersApiCoverage": chatters_api_coverage,
-                            "passiveViewerSamples": passive_viewers,
+                            "chattersCoverage": engagement.chatters_coverage,
+                            "chattersApiCoverage": engagement.chatters_coverage,
+                            "passiveViewerSamples": engagement.passive_viewer_samples,
+                            "viewerSampleCount": viewer_sample_count,
+                            "viewerMinutesSource": (
+                                "real_samples" if viewer_minutes_has_real_samples else "low_coverage"
+                            ),
                         },
                     }
                 )

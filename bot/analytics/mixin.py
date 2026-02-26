@@ -372,20 +372,73 @@ class TwitchAnalyticsMixin:
         try:
             with storage.get_conn() as conn:
                 for session_id, login, chatters in payloads:
-                    # Nur last_seen_at für bereits bekannte Chatter aktualisieren.
-                    # Neue Einträge kommen ausschließlich über _track_chat_health (IRC Bot).
-                    to_update = []
+                    # Build normalized chatter list from API response
+                    chatter_entries: list[tuple[str, str | None]] = []
                     for chatter in chatters:
                         c_login = (chatter.get("user_login") or "").lower().strip()
+                        c_id = (chatter.get("user_id") or "").strip() or None
                         if c_login:
-                            to_update.append((now_iso, session_id, c_login))
+                            chatter_entries.append((c_login, c_id))
 
-                    if to_update:
-                        with conn.cursor() as cur:
-                            cur.executemany(
-                                "UPDATE twitch_session_chatters SET last_seen_at = %s WHERE session_id = %s AND chatter_login = %s",
-                                to_update,
-                            )
+                    if not chatter_entries:
+                        continue
+
+                    logins = [e[0] for e in chatter_entries]
+
+                    with conn.cursor() as cur:
+                        # Check rollup to determine is_first_time_streamer per chatter
+                        cur.execute(
+                            "SELECT chatter_login FROM twitch_chatter_rollup"
+                            " WHERE streamer_login = %s AND chatter_login = ANY(%s)",
+                            (login, logins),
+                        )
+                        known_globally: set[str] = {row[0] for row in cur.fetchall()}
+
+                        # Upsert all chatters into session table.
+                        # ON CONFLICT: only refresh last_seen_at — don't overwrite messages
+                        # or seen_via_chatters_api if the IRC path already set them.
+                        cur.executemany(
+                            """
+                            INSERT INTO twitch_session_chatters (
+                                session_id, streamer_login, chatter_login, chatter_id,
+                                first_message_at, messages, is_first_time_streamer,
+                                seen_via_chatters_api, last_seen_at
+                            ) VALUES (%s, %s, %s, %s, %s, 0, %s, TRUE, %s)
+                            ON CONFLICT (session_id, chatter_login) DO UPDATE
+                                SET last_seen_at = EXCLUDED.last_seen_at
+                            """,
+                            [
+                                (session_id, login, c_login, c_id, now_iso,
+                                 c_login not in known_globally, now_iso)
+                                for c_login, c_id in chatter_entries
+                            ],
+                        )
+
+                        # Upsert rollup so lurkers become part of the global chatter history.
+                        # ON CONFLICT: only refresh last_seen_at, preserve chatter_id if known.
+                        cur.executemany(
+                            """
+                            INSERT INTO twitch_chatter_rollup (
+                                streamer_login, chatter_login, chatter_id,
+                                first_seen_at, last_seen_at, total_messages, total_sessions
+                            ) VALUES (%s, %s, %s, %s, %s, 0, 1)
+                            ON CONFLICT (streamer_login, chatter_login) DO UPDATE
+                                SET last_seen_at = EXCLUDED.last_seen_at,
+                                    chatter_id = COALESCE(
+                                        twitch_chatter_rollup.chatter_id, EXCLUDED.chatter_id
+                                    )
+                            """,
+                            [
+                                (login, c_login, c_id, now_iso, now_iso)
+                                for c_login, c_id in chatter_entries
+                            ],
+                        )
+
+                    log.debug(
+                        "Chatters-Poller: %d Chatter für %s (session %s) gespeichert (%d erstmalig)",
+                        len(chatter_entries), login, session_id,
+                        sum(1 for c_login, _ in chatter_entries if c_login not in known_globally),
+                    )
         except Exception:
             log.exception("Chatters-Poller: Batch-DB-Fehler")
 

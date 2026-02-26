@@ -50,8 +50,8 @@ interface TabNavigationProps {
 
 export function TabNavigation({ activeTab, onTabChange }: TabNavigationProps) {
   return (
-    <nav className="mb-8 -mx-4 px-4 overflow-x-auto">
-      <div className="flex items-center gap-1 bg-card/50 p-1 rounded-xl border border-border min-w-max">
+    <nav className="mb-8 overflow-x-auto">
+      <div className="panel-card rounded-2xl p-2.5 min-w-max flex items-center gap-1.5">
         {tabs.map(tab => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
@@ -60,14 +60,14 @@ export function TabNavigation({ activeTab, onTabChange }: TabNavigationProps) {
             <button
               key={tab.id}
               onClick={() => onTabChange(tab.id)}
-              className={`relative flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+              className={`relative flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors whitespace-nowrap ${
                 isActive ? 'text-white' : 'text-text-secondary hover:text-white'
               }`}
             >
               {isActive && (
                 <motion.div
                   layoutId="activeTab"
-                  className="absolute inset-0 bg-accent rounded-lg"
+                  className="absolute inset-0 rounded-xl border border-primary/30 bg-gradient-to-r from-primary/80 via-primary/75 to-accent/80 shadow-lg shadow-primary/15"
                   initial={false}
                   transition={{ type: 'spring', stiffness: 500, damping: 35 }}
                 />

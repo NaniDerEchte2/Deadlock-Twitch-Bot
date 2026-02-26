@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from aiohttp import web
 
 from ..storage import pg as storage
+from .engagement_metrics import EngagementInputs, calculate_engagement
 
 log = logging.getLogger("TwitchStreams.AnalyticsV2")
 
@@ -578,7 +579,7 @@ class _AnalyticsAudienceMixin:
                         COUNT(DISTINCT COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)) as unique_chatters,
                         COUNT(
                             DISTINCT CASE
-                                WHEN COALESCE(sc.is_first_time_global, FALSE) IS FALSE
+                                WHEN COALESCE(sc.is_first_time_streamer, FALSE) IS FALSE
                                 THEN COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)
                             END
                         ) as returning_chatters,
@@ -1068,58 +1069,54 @@ class _AnalyticsAudienceMixin:
                     for name, score in region_scores.items()
                 ]
 
-                # Interaction rate (final definition):
-                # active chatters / avg viewers, weighted by stream sample strength.
-                chat_stats = conn.execute(
+                session_stats = conn.execute(
                     """
-                    WITH session_base AS (
-                        SELECT
-                            s.id AS session_id,
-                            COALESCE(NULLIF(s.samples, 0), NULLIF(s.duration_seconds, 0), 1) AS weight,
-                            COALESCE(s.avg_viewers, 0) AS avg_viewers
-                        FROM twitch_stream_sessions s
-                        WHERE s.started_at >= ? AND LOWER(s.streamer_login) = ? AND s.ended_at IS NOT NULL
-                    ),
-                    active_chatters AS (
-                        SELECT
-                            sc.session_id,
-                            COUNT(
-                                DISTINCT COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)
-                            ) AS active_chatters
-                        FROM twitch_session_chatters sc
-                        JOIN session_base sb ON sb.session_id = sc.session_id
-                        WHERE sc.messages > 0
-                          AND COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id) IS NOT NULL
-                        GROUP BY sc.session_id
-                    )
                     SELECT
-                        SUM(
-                            CASE
-                                WHEN sb.avg_viewers > 0
-                                THEN (COALESCE(ac.active_chatters, 0) * sb.weight * 1.0) / sb.avg_viewers
-                                ELSE 0
-                            END
-                        ) AS weighted_interaction_sum,
-                        SUM(sb.weight) AS total_weight,
-                        SUM(COALESCE(ac.active_chatters, 0)) AS total_active_chatters
-                    FROM session_base sb
-                    LEFT JOIN active_chatters ac ON ac.session_id = sb.session_id
-                """,
+                        COUNT(*) as session_count,
+                        COALESCE(SUM(s.duration_seconds), 0) as total_duration_seconds,
+                        AVG(s.avg_viewers) as avg_viewers,
+                        COALESCE(
+                            SUM(
+                                COALESCE(s.avg_viewers, 0) * GREATEST(COALESCE(s.duration_seconds, 0), 0) / 60.0
+                            ),
+                            0
+                        ) as viewer_minutes_fallback
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ? AND LOWER(s.streamer_login) = ? AND s.ended_at IS NOT NULL
+                    """,
                     [since_date, streamer.lower()],
                 ).fetchone()
-
-                total_weight = float(chat_stats[1]) if chat_stats and chat_stats[1] else 0
-                weighted_interaction_sum = float(chat_stats[0]) if chat_stats and chat_stats[0] else 0
-                total_active_chatters = int(chat_stats[2] or 0) if chat_stats else 0
-
-                interaction_rate_per_avg_viewer_raw = (
-                    weighted_interaction_sum / total_weight if total_weight > 0 else 0.0
-                )
-                interaction_rate_per_avg_viewer_pct = max(
-                    0.0, min(100.0, interaction_rate_per_avg_viewer_raw * 100.0)
+                session_count = int(session_stats[0]) if session_stats and session_stats[0] else 0
+                avg_viewers = float(session_stats[2]) if session_stats and session_stats[2] else 0.0
+                viewer_minutes_fallback = (
+                    float(session_stats[3]) if session_stats and session_stats[3] else 0.0
                 )
 
-                # Distinct viewer cohorts with fallback when is_first_time_global is missing
+                viewer_sample_row = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) as sample_count,
+                        COALESCE(SUM(GREATEST(sv.viewer_count, 0)), 0) as viewer_minutes
+                    FROM twitch_session_viewers sv
+                    JOIN twitch_stream_sessions s ON s.id = sv.session_id
+                    WHERE s.started_at >= ?
+                      AND LOWER(s.streamer_login) = ?
+                      AND s.ended_at IS NOT NULL
+                    """,
+                    [since_date, streamer.lower()],
+                ).fetchone()
+                viewer_sample_count = (
+                    int(viewer_sample_row[0]) if viewer_sample_row and viewer_sample_row[0] else 0
+                )
+                viewer_minutes_samples = (
+                    float(viewer_sample_row[1]) if viewer_sample_row and viewer_sample_row[1] else 0.0
+                )
+                viewer_minutes = (
+                    viewer_minutes_samples if viewer_sample_count > 0 else viewer_minutes_fallback
+                )
+                viewer_minutes_has_real_samples = viewer_sample_count > 0
+
+                # Distinct viewer cohorts with fallback when is_first_time_streamer is missing
                 viewer_rows = conn.execute(
                     """
                     WITH per_user AS (
@@ -1129,8 +1126,8 @@ class _AnalyticsAudienceMixin:
                             COUNT(DISTINCT sc.session_id) AS session_count,
                             MAX(CASE WHEN sc.messages > 0 THEN 1 ELSE 0 END) AS active_flag,
                             MAX(CASE WHEN sc.messages = 0 AND sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) AS lurker_flag,
-                            MAX(CASE WHEN sc.is_first_time_global IS TRUE THEN 1 ELSE 0 END) AS first_time_flag,
-                            MAX(CASE WHEN sc.is_first_time_global IS NOT NULL THEN 1 ELSE 0 END) AS has_first_flag,
+                            MAX(CASE WHEN sc.is_first_time_streamer IS TRUE THEN 1 ELSE 0 END) AS first_time_flag,
+                            MAX(CASE WHEN sc.is_first_time_streamer IS NOT NULL THEN 1 ELSE 0 END) AS has_first_flag,
                             MAX(CASE WHEN sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) AS seen_flag
                         FROM twitch_session_chatters sc
                         JOIN twitch_stream_sessions s ON s.id = sc.session_id
@@ -1217,13 +1214,55 @@ class _AnalyticsAudienceMixin:
                     return round((part / whole) * 100, 1) if whole > 0 else 0.0
 
                 active_viewers = sum(1 for v in viewer_entries if v["active"])
-                passive_viewers = max(0, total_viewers - active_viewers)
                 seen_via_chatters_viewers = sum(1 for v in viewer_entries if v["seen_flag"])
-                interaction_coverage = (
-                    round(seen_via_chatters_viewers / total_viewers, 3) if total_viewers > 0 else 0.0
+                total_messages_row = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM twitch_chat_messages cm
+                    WHERE cm.message_ts >= ? AND LOWER(cm.streamer_login) = ?
+                    """,
+                    [since_date, streamer.lower()],
+                ).fetchone()
+                total_messages = (
+                    int(total_messages_row[0]) if total_messages_row and total_messages_row[0] else 0
                 )
-                interaction_rate_pct = _pct(active_viewers, total_viewers)
-                interaction_rate_reliable = passive_viewers > 0
+                sessions_with_chat_row = conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT sc.session_id)
+                    FROM twitch_session_chatters sc
+                    JOIN twitch_stream_sessions s ON s.id = sc.session_id
+                    WHERE s.started_at >= ?
+                      AND LOWER(s.streamer_login) = ?
+                      AND s.ended_at IS NOT NULL
+                    """,
+                    [since_date, streamer.lower()],
+                ).fetchone()
+                sessions_with_chat = (
+                    int(sessions_with_chat_row[0])
+                    if sessions_with_chat_row and sessions_with_chat_row[0]
+                    else 0
+                )
+
+                engagement = calculate_engagement(
+                    EngagementInputs(
+                        total_messages=total_messages,
+                        active_chatters=active_viewers,
+                        tracked_chat_accounts=total_viewers,
+                        chatters_api_seen=seen_via_chatters_viewers,
+                        viewer_minutes=viewer_minutes,
+                        viewer_minutes_has_real_samples=viewer_minutes_has_real_samples,
+                        avg_viewers=avg_viewers,
+                        session_count=session_count,
+                        sessions_with_chat=sessions_with_chat,
+                    )
+                )
+                interaction_coverage = engagement.chatters_coverage
+                interaction_rate_pct = (
+                    engagement.chat_penetration_pct
+                    if engagement.chat_penetration_pct is not None
+                    else 0.0
+                )
+                interaction_rate_reliable = engagement.chat_penetration_reliable
 
                 viewer_type = [
                     {"label": "Dedicated Fans", "percentage": _pct(dedicated, total_viewers)},
@@ -1300,25 +1339,37 @@ class _AnalyticsAudienceMixin:
                         "languageConfidence": language_confidence,
                         "peakActivityHours": peak_hours_response,
                         "peakHoursMethod": peak_hours_method,
+                        "chatPenetrationPct": engagement.chat_penetration_pct,
+                        "chatPenetrationReliable": engagement.chat_penetration_reliable,
+                        "messagesPer100ViewerMinutes": engagement.messages_per_100_viewer_minutes,
+                        "viewerMinutes": engagement.viewer_minutes,
+                        "legacyInteractionActivePerAvgViewer": engagement.legacy_interaction_active_per_avg_viewer,
                         "interactiveRate": round(interaction_rate_pct, 1),
                         "interactionRateActivePerViewer": round(interaction_rate_pct, 1),
-                        "interactionRateActivePerAvgViewer": round(
-                            interaction_rate_per_avg_viewer_pct, 1
-                        ),
+                        "interactionRateActivePerAvgViewer": engagement.legacy_interaction_active_per_avg_viewer,
                         "interactionRateReliable": interaction_rate_reliable,
                         "loyaltyScore": loyalty_score,
                         "timezone": timezone_name,
                         "dataQuality": {
                             "confidence": confidence,
                             "sessions": session_samples,
-                            "method": peak_quality_method,
+                            "method": engagement.method,
+                            "peakMethod": peak_quality_method,
                             "coverage": round(peak_coverage, 3),
                             "sampleCount": peak_sample_count,
                             "peakSessionCount": peak_session_count,
                             "peakSessionsWithActivity": peak_sessions_with_activity,
-                            "interactiveSampleCount": total_active_chatters,
+                            "interactiveSampleCount": active_viewers,
                             "interactionCoverage": interaction_coverage,
-                            "passiveViewerSamples": passive_viewers,
+                            "chattersCoverage": interaction_coverage,
+                            "chattersApiCoverage": interaction_coverage,
+                            "passiveViewerSamples": engagement.passive_viewer_samples,
+                            "viewerSampleCount": viewer_sample_count,
+                            "viewerMinutesSource": (
+                                "real_samples" if viewer_minutes_has_real_samples else "low_coverage"
+                            ),
+                            "sessionsWithChat": sessions_with_chat,
+                            "chatSessionCoverage": round(engagement.chat_session_coverage * 100.0, 1),
                         },
                     }
                 )

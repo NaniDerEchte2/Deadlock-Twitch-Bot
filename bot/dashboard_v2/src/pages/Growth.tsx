@@ -70,7 +70,7 @@ export function Growth({ streamer, days }: GrowthProps) {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: i * 0.1 }}
-            className={`bg-card rounded-xl border border-border p-5 ${i === 0 ? 'ring-2 ring-primary/30' : ''}`}
+            className={`panel-card rounded-2xl p-5 ${i === 0 ? 'ring-2 ring-primary/30' : ''}`}
           >
             <div className="flex items-center justify-between mb-3">
               <span className="text-sm text-text-secondary">{month.monthLabel} {month.year}</span>
@@ -105,7 +105,7 @@ export function Growth({ streamer, days }: GrowthProps) {
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.2 }}
-        className="bg-card rounded-xl border border-border p-6"
+        className="panel-card rounded-2xl p-6"
       >
         <div className="flex items-center gap-3 mb-6">
           <TrendingUp className="w-6 h-6 text-primary" />
@@ -115,13 +115,13 @@ export function Growth({ streamer, days }: GrowthProps) {
         <div className="h-[300px]">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(194, 221, 240, 0.2)" />
               <XAxis dataKey="name" stroke="#9ca3af" fontSize={12} />
               <YAxis stroke="#9ca3af" fontSize={12} />
               <Tooltip
                 contentStyle={{
                   backgroundColor: '#1f2937',
-                  border: '1px solid #374151',
+                  border: '1px solid rgba(194, 221, 240, 0.25)',
                   borderRadius: '8px',
                 }}
                 labelStyle={{ color: '#fff' }}
@@ -131,9 +131,9 @@ export function Growth({ streamer, days }: GrowthProps) {
                 type="monotone"
                 dataKey="hoursWatched"
                 name="Hours Watched"
-                stroke="#7c3aed"
+                stroke="var(--color-primary)"
                 strokeWidth={2}
-                dot={{ fill: '#7c3aed' }}
+                dot={{ fill: 'var(--color-primary)' }}
               />
               <Line
                 type="monotone"
@@ -153,7 +153,7 @@ export function Growth({ streamer, days }: GrowthProps) {
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.3 }}
-        className="bg-card rounded-xl border border-border p-6"
+        className="panel-card rounded-2xl p-6"
       >
         <div className="flex items-center gap-3 mb-6">
           <Calendar className="w-6 h-6 text-accent" />

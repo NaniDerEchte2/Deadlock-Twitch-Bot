@@ -7,7 +7,7 @@ interface ViewerProfilesProps {
   data: ViewerProfilesData | undefined;
 }
 
-const PROFILE_COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#8b5cf6', '#6b7280'];
+const PROFILE_COLORS = ['var(--color-primary)', 'var(--color-accent)', '#f5b642', '#2ecc71', 'var(--color-secondary)'];
 const PROFILE_LABELS: Record<string, string> = {
   exclusive: 'Exklusiv',
   loyalMulti: 'Treue Multi',
@@ -34,7 +34,7 @@ export function ViewerProfiles({ data }: ViewerProfilesProps) {
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="bg-card rounded-xl border border-border p-6"
+        className="panel-card rounded-2xl p-6"
       >
         <h4 className="text-sm font-medium text-text-secondary mb-4">Zuschauer-Segmente</h4>
         <div className="flex flex-col lg:flex-row items-center gap-6">
@@ -59,7 +59,7 @@ export function ViewerProfiles({ data }: ViewerProfilesProps) {
                 <Tooltip
                   contentStyle={{
                     backgroundColor: '#1f2937',
-                    border: '1px solid #374151',
+                    border: '1px solid rgba(194, 221, 240, 0.25)',
                     borderRadius: '8px',
                   }}
                   formatter={(value: number | string | undefined) => {
@@ -106,7 +106,7 @@ export function ViewerProfiles({ data }: ViewerProfilesProps) {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.1 }}
-          className="bg-card rounded-xl border border-border p-6"
+          className="panel-card rounded-2xl p-6"
         >
           <h4 className="text-sm font-medium text-text-secondary mb-4">
             Exklusivitats-Verteilung (Anzahl verfolgter Streamer)
@@ -124,7 +124,7 @@ export function ViewerProfiles({ data }: ViewerProfilesProps) {
                 <Tooltip
                   contentStyle={{
                     backgroundColor: '#1f2937',
-                    border: '1px solid #374151',
+                    border: '1px solid rgba(194, 221, 240, 0.25)',
                     borderRadius: '8px',
                   }}
                   formatter={(value: number | string | undefined) => {
@@ -137,7 +137,7 @@ export function ViewerProfiles({ data }: ViewerProfilesProps) {
                       : ''
                   }
                 />
-                <Bar dataKey="viewerCount" fill="#7c3aed" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="viewerCount" fill="var(--color-primary)" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>

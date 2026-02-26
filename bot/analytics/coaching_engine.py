@@ -102,24 +102,81 @@ def _efficiency(conn, streamer: str, since: str) -> dict[str, Any]:
             your_vh = r[1]
             your_sh = r[2]
 
+    empty_result: dict[str, Any] = {
+        "viewerHoursPerStreamHour": 0,
+        "categoryAvg": 0,
+        "topPerformers": [],
+        "percentile": 0,
+        "totalStreamHours": 0,
+        "totalViewerHours": 0,
+        "growthPer10Hours": 0,
+        "growthCategoryAvg": 0,
+        "growthTopPerformers": [],
+        "growthPercentile": 0,
+    }
+
     if not ratios:
-        return {
-            "viewerHoursPerStreamHour": 0,
-            "categoryAvg": 0,
-            "topPerformers": [],
-            "percentile": 0,
-            "totalStreamHours": 0,
-            "totalViewerHours": 0,
-        }
+        return empty_result
 
     all_ratios = [r[1] for r in ratios]
-    cat_avg = sum(all_ratios) / len(all_ratios) if all_ratios else 0
 
-    # Percentile
+    # Filter top 15% large streamers from category avg for fair organic comparison
+    sorted_ratios = sorted(all_ratios)
+    p85_idx = max(0, int(len(sorted_ratios) * 0.85) - 1)
+    p85_threshold = sorted_ratios[p85_idx]
+    filtered_ratios = [(login, v) for login, v in ratios if v <= p85_threshold]
+    filtered_vals = [v for _, v in filtered_ratios]
+    cat_avg = sum(filtered_vals) / len(filtered_vals) if filtered_vals else sum(all_ratios) / len(all_ratios)
+
+    # Percentile (against all streamers, not filtered)
     below = sum(1 for r in all_ratios if r < your_ratio)
     percentile = int(below / len(all_ratios) * 100) if all_ratios else 0
 
-    top_performers = [{"streamer": r[0], "ratio": round(r[1], 1)} for r in ratios[:5]]
+    top_performers = [{"streamer": login, "ratio": round(v, 1)} for login, v in filtered_ratios[:5]]
+
+    # Growth efficiency: followers gained per 10 stream hours
+    growth_rows = conn.execute(
+        """
+        SELECT
+            s.streamer_login,
+            SUM(CASE WHEN s.follower_delta > 0 THEN s.follower_delta ELSE 0 END) as followers_gained,
+            SUM(s.duration_seconds / 3600.0) as stream_hours,
+            SUM(CASE WHEN s.follower_delta > 0 THEN s.follower_delta ELSE 0 END)
+              / NULLIF(SUM(s.duration_seconds / 3600.0), 0) * 10.0 as growth_per_10h
+        FROM twitch_stream_sessions s
+        WHERE s.started_at >= ? AND s.duration_seconds > 300
+        GROUP BY s.streamer_login
+        HAVING SUM(s.duration_seconds) / 3600.0 > 1
+        ORDER BY growth_per_10h DESC
+        """,
+        (since,),
+    ).fetchall()
+
+    your_growth = 0.0
+    growth_ratios: list[tuple[str, float]] = []
+    for r in growth_rows:
+        g = float(r[3]) if r[3] is not None else 0.0
+        growth_ratios.append((r[0], g))
+        if r[0] == streamer:
+            your_growth = g
+
+    all_growth = [g for _, g in growth_ratios]
+    if all_growth:
+        sorted_growth = sorted(all_growth)
+        p85g_idx = max(0, int(len(sorted_growth) * 0.85) - 1)
+        p85g_threshold = sorted_growth[p85g_idx]
+        filtered_growth = [(login, g) for login, g in growth_ratios if g <= p85g_threshold]
+        filtered_growth_vals = [g for _, g in filtered_growth]
+        growth_cat_avg = (
+            sum(filtered_growth_vals) / len(filtered_growth_vals) if filtered_growth_vals else 0.0
+        )
+        growth_top = [{"streamer": login, "value": round(g, 1)} for login, g in filtered_growth[:5]]
+        below_growth = sum(1 for g in all_growth if g < your_growth)
+        growth_percentile = int(below_growth / len(all_growth) * 100)
+    else:
+        growth_cat_avg = 0.0
+        growth_top = []
+        growth_percentile = 0
 
     return {
         "viewerHoursPerStreamHour": round(your_ratio, 1),
@@ -128,6 +185,10 @@ def _efficiency(conn, streamer: str, since: str) -> dict[str, Any]:
         "percentile": percentile,
         "totalStreamHours": round(your_sh, 1),
         "totalViewerHours": round(your_vh, 1),
+        "growthPer10Hours": round(your_growth, 1),
+        "growthCategoryAvg": round(growth_cat_avg, 1),
+        "growthTopPerformers": growth_top,
+        "growthPercentile": growth_percentile,
     }
 
 

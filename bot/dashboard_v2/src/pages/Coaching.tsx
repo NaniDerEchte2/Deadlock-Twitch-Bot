@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import {
   GraduationCap, AlertTriangle, TrendingDown, Clock, Calendar, Tag, Users,
   Search, Type, UserMinus, Zap, AlertCircle, Loader2, ChevronRight,
-  BarChart3, Target, Timer, MessageCircle, ArrowLeftRight, Trophy, Activity,
+  BarChart3, Target, Timer, ArrowLeftRight, Trophy, Activity,
 } from 'lucide-react';
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -114,8 +114,7 @@ export function Coaching({ streamer, days }: CoachingProps) {
         <DoubleStreamSection data={data} />
       )}
 
-      {/* 10. Chat-Konzentration */}
-      <ChatConcentrationSection data={data} />
+
 
       {/* 11. Raid-Netzwerk */}
       <RaidNetworkSection data={data} />
@@ -232,7 +231,7 @@ function EfficiencySection({ data }: { data: CoachingData }) {
         </div>
         <div className="text-center">
           <div className="text-2xl font-bold text-accent">{eff.categoryAvg}</div>
-          <div className="text-xs text-text-secondary">Kategorie-Schnitt</div>
+          <div className="text-xs text-text-secondary">Kat.-Schnitt (exkl. Top 15%)</div>
         </div>
         <div className="text-center">
           <div className={`text-2xl font-bold ${eff.percentile >= 50 ? 'text-success' : 'text-warning'}`}>
@@ -284,6 +283,60 @@ function EfficiencySection({ data }: { data: CoachingData }) {
         <span>{eff.totalStreamHours}h gestreamt</span>
         <span>{eff.totalViewerHours.toLocaleString()}h Viewer-Hours</span>
       </div>
+
+      {/* Growth Efficiency sub-section */}
+      {(eff.growthPer10Hours !== undefined) && (
+        <div className="mt-6 pt-6 border-t border-border">
+          <div className="flex items-center gap-2 mb-4">
+            <Activity className="w-5 h-5 text-success" />
+            <h3 className="text-base font-semibold text-white">Wachstums-Effizienz</h3>
+            <span className="text-xs text-text-secondary ml-auto">Follower / 10h Stream · Kategorie exkl. Top 15%</span>
+          </div>
+          <div className="grid grid-cols-3 gap-4 mb-4">
+            <div className="text-center">
+              <div className="text-xl font-bold text-white">{eff.growthPer10Hours}</div>
+              <div className="text-xs text-text-secondary">Dein Wert</div>
+            </div>
+            <div className="text-center">
+              <div className="text-xl font-bold text-success">{eff.growthCategoryAvg ?? 0}</div>
+              <div className="text-xs text-text-secondary">Kat.-Schnitt (organ.)</div>
+            </div>
+            <div className="text-center">
+              <div className={`text-xl font-bold ${(eff.growthPercentile ?? 0) >= 50 ? 'text-success' : 'text-warning'}`}>
+                {eff.growthPercentile ?? 0}%
+              </div>
+              <div className="text-xs text-text-secondary">Perzentil</div>
+            </div>
+          </div>
+          {(eff.growthTopPerformers ?? []).length > 0 && (
+            <div className="space-y-2">
+              {(eff.growthTopPerformers ?? []).map((item) => {
+                const maxVal = Math.max(...(eff.growthTopPerformers ?? []).map(g => g.value), 1);
+                const width = (item.value / maxVal) * 100;
+                const isYou = item.streamer === data.streamer.toLowerCase();
+                return (
+                  <div key={item.streamer} className="flex items-center gap-3">
+                    <span className={`text-sm w-28 truncate ${isYou ? 'text-accent font-semibold' : 'text-text-secondary'}`}>
+                      {item.streamer}
+                    </span>
+                    <div className="flex-1 bg-background rounded-full h-5 overflow-hidden">
+                      <motion.div
+                        initial={{ width: 0 }}
+                        animate={{ width: `${width}%` }}
+                        transition={{ duration: 0.8, delay: 0.2 }}
+                        className={`h-full rounded-full ${isYou ? 'bg-accent' : 'bg-success/50'}`}
+                      />
+                    </div>
+                    <span className={`text-sm w-12 text-right ${isYou ? 'text-accent font-semibold' : 'text-text-secondary'}`}>
+                      {item.value}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </motion.div>
   );
 }
@@ -742,7 +795,7 @@ function RetentionSection({ data }: { data: CoachingData }) {
               }) as any}
             />
             <Legend formatter={(v) => v === 'you' ? 'Du' : 'Top-Performer'} />
-            <Line type="monotone" dataKey="you" stroke="#7c3aed" strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="you" stroke="var(--color-primary)" strokeWidth={2} dot={false} />
             <Line type="monotone" dataKey="top" stroke="#10b981" strokeWidth={2} dot={false} strokeDasharray="5 5" />
           </LineChart>
         </ResponsiveContainer>
@@ -867,135 +920,6 @@ function DoubleStreamSection({ data }: { data: CoachingData }) {
           </div>
         </div>
       )}
-    </motion.div>
-  );
-}
-
-
-// ---------------------------------------------------------------------------
-// 10. Chat-Konzentration & Loyalty
-// ---------------------------------------------------------------------------
-
-const LOYALTY_LABELS: Record<string, { label: string; color: string }> = {
-  oneTimer: { label: 'Einmalig', color: 'bg-error/60' },
-  casual: { label: 'Gelegentlich', color: 'bg-warning/60' },
-  regular: { label: 'Regulaer', color: 'bg-primary/60' },
-  loyal: { label: 'Loyal', color: 'bg-success/60' },
-};
-
-function ChatConcentrationSection({ data }: { data: CoachingData }) {
-  const chat = data.chatConcentration;
-  if (!chat || chat.totalChatters === 0) return null;
-
-  const bucketOrder = ['oneTimer', 'casual', 'regular', 'loyal'];
-  const buckets = bucketOrder
-    .filter(k => chat.loyaltyBuckets[k])
-    .map(k => ({ key: k, ...chat.loyaltyBuckets[k], ...LOYALTY_LABELS[k] }));
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: 0.5 }}
-      className="bg-card rounded-xl border border-border p-6"
-    >
-      <div className="flex items-center gap-3 mb-6">
-        <MessageCircle className="w-6 h-6 text-primary" />
-        <h2 className="text-xl font-bold text-white">Chat-Konzentration</h2>
-      </div>
-
-      {/* KPIs */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        <div className="text-center p-3 rounded-lg bg-background/50">
-          <div className={`text-2xl font-bold ${chat.top1Pct > 50 ? 'text-error' : chat.top1Pct > 30 ? 'text-warning' : 'text-success'}`}>
-            {chat.top1Pct}%
-          </div>
-          <div className="text-xs text-text-secondary">Top-1 Chatter Anteil</div>
-        </div>
-        <div className="text-center p-3 rounded-lg bg-background/50">
-          <div className={`text-2xl font-bold ${chat.top3Pct > 70 ? 'text-warning' : 'text-white'}`}>
-            {chat.top3Pct}%
-          </div>
-          <div className="text-xs text-text-secondary">Top-3 kumulativ</div>
-        </div>
-        <div className="text-center p-3 rounded-lg bg-background/50">
-          <div className="text-2xl font-bold text-white">{chat.msgsPerChatter}</div>
-          <div className="text-xs text-text-secondary">Msgs / Chatter</div>
-        </div>
-        <div className="text-center p-3 rounded-lg bg-background/50">
-          <div className={`text-2xl font-bold ${chat.concentrationIndex > 2500 ? 'text-error' : 'text-white'}`}>
-            {chat.concentrationIndex.toLocaleString()}
-          </div>
-          <div className="text-xs text-text-secondary">HHI-Index</div>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Loyalty Buckets Stacked Bar */}
-        <div>
-          <h3 className="text-sm font-medium text-text-secondary mb-3">Chatter-Loyalitaet</h3>
-          <div className="flex rounded-lg overflow-hidden h-8 mb-3">
-            {buckets.map(b => (
-              <div
-                key={b.key}
-                className={`${b.color} flex items-center justify-center text-xs text-white font-medium`}
-                style={{ width: `${b.pct}%`, minWidth: b.pct > 5 ? undefined : '2px' }}
-                title={`${b.label}: ${b.count} (${b.pct}%)`}
-              >
-                {b.pct >= 10 && `${b.pct}%`}
-              </div>
-            ))}
-          </div>
-          <div className="flex flex-wrap gap-3 text-xs">
-            {buckets.map(b => (
-              <div key={b.key} className="flex items-center gap-1.5">
-                <div className={`w-3 h-3 rounded-sm ${b.color}`} />
-                <span className="text-text-secondary">{b.label}: {b.count} ({b.pct}%)</span>
-              </div>
-            ))}
-          </div>
-
-          {/* One-Timer Comparison */}
-          <div className="mt-4 p-3 rounded-lg bg-background/50">
-            <div className="flex justify-between text-sm mb-1">
-              <span className="text-text-secondary">Einmal-Chatter</span>
-              <span className={chat.ownOneTimerPct > chat.avgPeerOneTimerPct + 10 ? 'text-warning font-medium' : 'text-white'}>
-                {chat.ownOneTimerPct}%
-              </span>
-            </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-text-secondary">Peer-Durchschnitt</span>
-              <span className="text-accent">{chat.avgPeerOneTimerPct}%</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Top Chatters */}
-        <div>
-          <h3 className="text-sm font-medium text-text-secondary mb-3">Top-Chatter (nach Nachrichten)</h3>
-          <div className="space-y-1.5 max-h-64 overflow-y-auto">
-            {chat.topChatters.slice(0, 10).map((c, i) => (
-              <div key={i} className="flex items-center gap-2">
-                <span className={`text-xs w-5 text-center ${i === 0 ? 'text-accent font-bold' : 'text-text-secondary'}`}>
-                  {i + 1}
-                </span>
-                <span className="text-sm text-white flex-1 truncate">{c.login}</span>
-                <div className="flex-1 bg-background rounded-full h-3 overflow-hidden max-w-[120px]">
-                  <motion.div
-                    initial={{ width: 0 }}
-                    animate={{ width: `${c.sharePct}%` }}
-                    transition={{ duration: 0.6, delay: i * 0.03 }}
-                    className={`h-full rounded-full ${i === 0 ? 'bg-accent' : 'bg-primary/60'}`}
-                  />
-                </div>
-                <span className="text-xs text-text-secondary w-16 text-right">
-                  {c.messages} ({c.sharePct}%)
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
     </motion.div>
   );
 }

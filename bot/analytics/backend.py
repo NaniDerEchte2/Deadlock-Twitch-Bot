@@ -760,7 +760,7 @@ class AnalyticsBackend:
                     SELECT 
                         sc.chatter_login,
                         sc.messages,
-                        sc.is_first_time_global
+                        sc.is_first_time_streamer
                     FROM twitch_session_chatters sc
                     WHERE sc.session_id = ?
                     ORDER BY sc.messages DESC

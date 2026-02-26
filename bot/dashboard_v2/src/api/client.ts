@@ -302,9 +302,15 @@ export interface AudienceDemographicsResponse {
   languageConfidence: number;
   peakActivityHours: number[];
   peakHoursMethod?: string;
+  chatPenetrationPct?: number | null;
+  chatPenetrationReliable?: boolean;
+  messagesPer100ViewerMinutes?: number | null;
+  viewerMinutes?: number;
+  legacyInteractionActivePerAvgViewer?: number | null;
   interactiveRate: number;
+  // Legacy fields (temporary compatibility)
   interactionRateActivePerViewer?: number;
-  interactionRateActivePerAvgViewer?: number;
+  interactionRateActivePerAvgViewer?: number | null;
   interactionRateReliable?: boolean;
   loyaltyScore: number;
   timezone?: string;
@@ -312,13 +318,20 @@ export interface AudienceDemographicsResponse {
     confidence: 'very_low' | 'low' | 'medium' | 'high';
     sessions?: number;
     method?: 'no_data' | 'low_coverage' | 'real_samples' | string;
+    peakMethod?: 'no_data' | 'low_coverage' | 'real_samples' | string;
     coverage?: number;
     sampleCount?: number;
     peakSessionCount?: number;
     peakSessionsWithActivity?: number;
     interactiveSampleCount?: number;
     interactionCoverage?: number;
+    chattersCoverage?: number;
+    chattersApiCoverage?: number;
     passiveViewerSamples?: number;
+    sessionsWithChat?: number;
+    chatSessionCoverage?: number;
+    viewerSampleCount?: number;
+    viewerMinutesSource?: 'real_samples' | 'low_coverage' | string;
   };
 }
 

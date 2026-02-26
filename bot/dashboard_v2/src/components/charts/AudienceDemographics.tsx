@@ -1,6 +1,13 @@
 import { motion } from 'framer-motion';
 import { Globe, Users, Clock, Heart, Activity, TrendingUp } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
+import {
+  CHAT_AUDIENCE_TOOLTIP,
+  getChattersCoverage,
+  resolveChatPenetration,
+  resolveMessagesPer100ViewerMinutes,
+  resolveQualityMethod,
+} from '@/utils/engagementKpi';
 
 export interface AudienceDemographicsData {
   viewerTypes: { label: string; percentage: number }[];
@@ -9,15 +16,21 @@ export interface AudienceDemographicsData {
   languageConfidence: number;
   peakActivityHours: number[];
   peakHoursMethod?: string;
+  chatPenetrationPct?: number | null;
+  chatPenetrationReliable?: boolean;
+  messagesPer100ViewerMinutes?: number | null;
+  viewerMinutes?: number;
+  legacyInteractionActivePerAvgViewer?: number | null;
   interactiveRate: number;
   interactionRateActivePerViewer?: number;
-  interactionRateActivePerAvgViewer?: number;
+  interactionRateActivePerAvgViewer?: number | null;
   interactionRateReliable?: boolean;
   loyaltyScore: number;
   timezone?: string;
   dataQuality?: {
     confidence: 'very_low' | 'low' | 'medium' | 'high';
     method?: 'no_data' | 'low_coverage' | 'real_samples' | string;
+    peakMethod?: 'no_data' | 'low_coverage' | 'real_samples' | string;
     sessions?: number;
     coverage?: number;
     sampleCount?: number;
@@ -25,6 +38,7 @@ export interface AudienceDemographicsData {
     peakSessionsWithActivity?: number;
     interactiveSampleCount?: number;
     interactionCoverage?: number;
+    chattersCoverage?: number;
     passiveViewerSamples?: number;
   };
 }
@@ -52,13 +66,20 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
           : data.dataQuality?.confidence === 'high'
             ? 'hoch'
             : null;
-  const method = (data.dataQuality?.method || 'real_samples').toLowerCase();
+  const chatMethod = resolveQualityMethod(
+    data.dataQuality?.method,
+    Boolean(data.chatPenetrationPct ?? data.interactiveRate ?? data.messagesPer100ViewerMinutes)
+  );
+  const peakMethod = resolveQualityMethod(
+    data.dataQuality?.peakMethod ?? data.dataQuality?.method,
+    (data.peakActivityHours ?? []).length > 0
+  );
   const methodLabel =
-    method === 'no_data'
-      ? 'Keine Aktivitätsdaten'
-      : method === 'low_coverage'
-        ? 'Zu geringe Datenbasis'
-        : 'Echt-Daten';
+    chatMethod === 'no_data'
+      ? 'Keine Chat-Samples'
+      : chatMethod === 'low_coverage'
+        ? 'Low Coverage'
+        : 'Echt-Samples';
   const normalizedPeakHours = Array.from(
     new Set(
       (data.peakActivityHours ?? [])
@@ -67,10 +88,15 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
         .map((h) => Math.max(0, Math.min(23, Math.trunc(h))))
     )
   );
-  const hasPeakData = method === 'real_samples' && normalizedPeakHours.length > 0;
-  const interactionReliable =
-    data.interactionRateReliable ?? ((data.dataQuality?.passiveViewerSamples ?? 0) > 0);
-  const interactionCoveragePct = (data.dataQuality?.interactionCoverage ?? 0) * 100;
+  const hasPeakData = peakMethod === 'real_samples' && normalizedPeakHours.length > 0;
+  const penetration = resolveChatPenetration(data);
+  const interactionReliable = penetration.reliable;
+  const interactionCoveragePct = penetration.coverage * 100;
+  const interactionRate =
+    penetration.value ??
+    (typeof data.interactiveRate === 'number' ? data.interactiveRate : null);
+  const messagesPer100ViewerMinutes = resolveMessagesPer100ViewerMinutes(data);
+  const chattersCoverage = getChattersCoverage(data.dataQuality);
 
   return (
     <motion.div
@@ -85,15 +111,16 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
           </div>
           <div>
             <h3 className="text-lg font-bold text-white">Audience Demographics</h3>
-            <p className="text-sm text-text-secondary">Geschätzte Zusammensetzung deiner Zuschauer</p>
+            <p className="text-sm text-text-secondary">Reach- und Chat-Engagement-Mix</p>
           </div>
         </div>
         {data.dataQuality && confidenceLabel && (
           <span className="text-xs px-3 py-1 rounded-full border border-border text-text-secondary">
-            {methodLabel} · Vertrauen: {confidenceLabel}
+            Chat-KPI: {methodLabel} · Vertrauen: {confidenceLabel}
           </span>
         )}
       </div>
+      <div className="mb-4 text-xs text-text-secondary">{CHAT_AUDIENCE_TOOLTIP}</div>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Left Column - Charts */}
         <div className="space-y-6">
@@ -190,19 +217,31 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
           </div>
 
           {/* Engagement Scores */}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <div className="bg-background rounded-lg p-4 text-center">
               <div className="flex items-center justify-center gap-1 text-text-secondary text-sm mb-2">
                 <TrendingUp className="w-4 h-4" />
-                Interaktionsrate
+                Chat Penetration
               </div>
               <div className="text-2xl font-bold text-primary">
-                {interactionReliable ? `${data.interactiveRate.toFixed(1)}%` : '-'}
+                {interactionReliable && interactionRate !== null ? `${interactionRate.toFixed(1)}%` : 'Nicht belastbar'}
               </div>
               <div className="text-xs text-text-secondary mt-1">
                 {interactionReliable
-                  ? 'Aktive Chatter / getrackte Viewer'
+                  ? 'Aktive Chatters / getrackte Chat-Accounts'
                   : `Nicht belastbar (Coverage ${interactionCoveragePct.toFixed(1)}%)`}
+              </div>
+            </div>
+            <div className="bg-background rounded-lg p-4 text-center">
+              <div className="flex items-center justify-center gap-1 text-text-secondary text-sm mb-2">
+                <TrendingUp className="w-4 h-4" />
+                Msg / 100 Viewer-Minuten
+              </div>
+              <div className="text-2xl font-bold text-accent">
+                {messagesPer100ViewerMinutes !== null ? messagesPer100ViewerMinutes.toFixed(1) : '-'}
+              </div>
+              <div className="text-xs text-text-secondary mt-1">
+                Coverage {(chattersCoverage * 100).toFixed(1)}%
               </div>
             </div>
             <div className="bg-background rounded-lg p-4 text-center">
@@ -267,16 +306,16 @@ export function AudienceDemographics({ data }: AudienceDemographicsProps) {
               text={`Starke Community! ${data.loyaltyScore.toFixed(0)}% deiner Viewer kommen regelmäßig zurück.`}
             />
           )}
-          {method === 'real_samples' && interactionReliable && data.interactiveRate > 15 && (
+          {chatMethod === 'real_samples' && interactionReliable && (interactionRate ?? 0) > 15 && (
             <InsightBadge
               type="success"
-              text={`Hohe Interaktion: ${data.interactiveRate.toFixed(0)}% deiner Viewer chatten aktiv mit.`}
+              text={`Hohe Chat-Penetration: ${(interactionRate ?? 0).toFixed(0)}% deiner Chat-Audience interagiert aktiv.`}
             />
           )}
-          {method !== 'real_samples' && (
+          {chatMethod !== 'real_samples' && (
             <InsightBadge
               type="info"
-              text="Interaktions- und Peak-Muster werden mit mehr Chat-Aktivitätsdaten präziser."
+              text="Chat-Penetration und Conversion werden mit höherer Chatters-Coverage belastbarer."
             />
           )}
         </div>

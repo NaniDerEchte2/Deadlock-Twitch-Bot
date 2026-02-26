@@ -58,15 +58,15 @@ export function ViewerTrendChart({ sessions, title = 'Viewer Trend' }: ViewerTre
           <AreaChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
             <defs>
               <linearGradient id="colorAvg" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#7c3aed" stopOpacity={0.3} />
-                <stop offset="95%" stopColor="#7c3aed" stopOpacity={0} />
+                <stop offset="5%" stopColor="var(--color-primary)" stopOpacity={0.3} />
+                <stop offset="95%" stopColor="var(--color-primary)" stopOpacity={0} />
               </linearGradient>
               <linearGradient id="colorPeak" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#38bdf8" stopOpacity={0.2} />
-                <stop offset="95%" stopColor="#38bdf8" stopOpacity={0} />
+                <stop offset="5%" stopColor="var(--color-accent)" stopOpacity={0.2} />
+                <stop offset="95%" stopColor="var(--color-accent)" stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(194, 221, 240, 0.2)" />
             <XAxis
               dataKey="date"
               stroke="#9ca3af"
@@ -94,7 +94,7 @@ export function ViewerTrendChart({ sessions, title = 'Viewer Trend' }: ViewerTre
             <Area
               type="monotone"
               dataKey="avgViewers"
-              stroke="#7c3aed"
+              stroke="var(--color-primary)"
               strokeWidth={2}
               fillOpacity={1}
               fill="url(#colorAvg)"
@@ -102,7 +102,7 @@ export function ViewerTrendChart({ sessions, title = 'Viewer Trend' }: ViewerTre
             <Area
               type="monotone"
               dataKey="peakViewers"
-              stroke="#38bdf8"
+              stroke="var(--color-accent)"
               strokeWidth={2}
               strokeDasharray="5 5"
               fillOpacity={1}

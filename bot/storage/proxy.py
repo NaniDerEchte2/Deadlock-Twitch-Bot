@@ -317,7 +317,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             chatter_id          TEXT,
             first_message_at    TEXT    NOT NULL,
             messages            INTEGER DEFAULT 0,
-            is_first_time_global INTEGER DEFAULT 0,
+            is_first_time_streamer INTEGER DEFAULT 0,
             PRIMARY KEY (session_id, chatter_login)
         )
         """

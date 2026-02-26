@@ -17,28 +17,28 @@ export function HealthScoreCard({ scores }: HealthScoreCardProps) {
     <motion.div
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
-      className="md:col-span-2 lg:col-span-1 bg-gradient-to-br from-card to-accent/10 p-6 rounded-2xl border border-accent/20 flex flex-col items-center justify-center text-center relative overflow-hidden"
+      className="md:col-span-2 lg:col-span-1 panel-card metric-highlight p-6 rounded-2xl flex flex-col items-center justify-center text-center relative overflow-hidden"
     >
       {/* Background Icon */}
-      <div className="absolute top-0 right-0 p-4 opacity-10">
+      <div className="absolute top-0 right-0 p-4 opacity-15">
         <Zap className="w-16 h-16" />
       </div>
 
-      <h2 className="text-text-secondary font-semibold uppercase tracking-wider text-xs mb-4">
+      <h2 className="text-text-secondary font-semibold uppercase tracking-[0.14em] text-xs mb-4">
         Channel Health
       </h2>
 
       {/* Main Score */}
       <div className="flex items-baseline justify-center gap-1 mb-2">
         <motion.span
-          className="text-6xl font-bold text-white"
+          className="display-font text-6xl font-bold text-white"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.2 }}
         >
           {scores.total}
         </motion.span>
-        <span className="text-xl text-accent">/100</span>
+        <span className="text-xl text-primary">/100</span>
       </div>
 
       {/* Sub Scores */}
@@ -49,7 +49,7 @@ export function HealthScoreCard({ scores }: HealthScoreCardProps) {
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.3 + i * 0.1 }}
-            className="bg-black/20 rounded p-2"
+            className="bg-black/25 rounded-lg p-2 border border-border/40"
           >
             <span className="block">{sub.label}</span>
             <strong className="text-white text-sm">{sub.value}</strong>

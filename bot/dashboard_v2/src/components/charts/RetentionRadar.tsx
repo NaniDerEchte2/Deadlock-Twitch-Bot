@@ -80,13 +80,13 @@ export function RetentionRadar({
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className="bg-card p-6 rounded-xl border border-border"
+      className="panel-card p-6 rounded-2xl"
     >
       <h3 className="text-lg font-bold text-white mb-4">{title}</h3>
       <div className="h-64 relative">
         <ResponsiveContainer width="100%" height="100%">
           <RadarChart data={data} margin={{ top: 20, right: 30, bottom: 20, left: 30 }}>
-            <PolarGrid stroke="#374151" />
+            <PolarGrid stroke="rgba(194, 221, 240, 0.2)" />
             <PolarAngleAxis
               dataKey="metric"
               tick={{ fill: '#d1d5db', fontSize: 12 }}
@@ -94,7 +94,7 @@ export function RetentionRadar({
             <PolarRadiusAxis
               angle={30}
               domain={[0, 100]}
-              tick={{ fill: '#6b7280', fontSize: 10 }}
+              tick={{ fill: 'var(--color-secondary)', fontSize: 10 }}
               axisLine={false}
             />
             <Tooltip content={<CustomTooltip />} />
@@ -110,8 +110,8 @@ export function RetentionRadar({
             <Radar
               name="you"
               dataKey="you"
-              stroke="#7c3aed"
-              fill="#7c3aed"
+              stroke="var(--color-primary)"
+              fill="var(--color-primary)"
               fillOpacity={0.3}
               strokeWidth={2}
             />
@@ -119,8 +119,8 @@ export function RetentionRadar({
               <Radar
                 name="category"
                 dataKey="category"
-                stroke="#6b7280"
-                fill="#6b7280"
+                stroke="var(--color-secondary)"
+                fill="var(--color-secondary)"
                 fillOpacity={0.1}
                 strokeWidth={1}
                 strokeDasharray="5 5"

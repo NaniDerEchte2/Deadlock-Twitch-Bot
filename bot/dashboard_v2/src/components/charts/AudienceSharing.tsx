@@ -11,7 +11,7 @@ interface AudienceSharingProps {
   data: AudienceSharingData | undefined;
 }
 
-const LINE_COLORS = ['#7c3aed', '#10b981', '#f59e0b'];
+const LINE_COLORS = ['var(--color-primary)', 'var(--color-accent)', 'var(--color-warning)'];
 
 export function AudienceSharing({ data }: AudienceSharingProps) {
   if (!data || !data.dataAvailable) {
@@ -56,7 +56,7 @@ export function AudienceSharing({ data }: AudienceSharingProps) {
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="bg-card rounded-xl border border-border p-4"
+        className="panel-card rounded-2xl p-4"
       >
         <div className="flex items-center justify-between">
           <span className="text-sm text-text-secondary">Einzigartige Zuschauer gesamt</span>
@@ -72,7 +72,7 @@ export function AudienceSharing({ data }: AudienceSharingProps) {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.1 }}
-          className="bg-card rounded-xl border border-border p-6"
+          className="panel-card rounded-2xl p-6"
         >
           <h4 className="text-sm font-medium text-text-secondary mb-4">
             Top Partner nach geteilten Zuschauern
@@ -91,7 +91,7 @@ export function AudienceSharing({ data }: AudienceSharingProps) {
                 <Tooltip
                   contentStyle={{
                     backgroundColor: '#1f2937',
-                    border: '1px solid #374151',
+                    border: '1px solid rgba(194, 221, 240, 0.25)',
                     borderRadius: '8px',
                   }}
                   formatter={(value: number | string | undefined, name?: string) => {
@@ -123,7 +123,7 @@ export function AudienceSharing({ data }: AudienceSharingProps) {
                     );
                   }}
                 />
-                <Bar dataKey="sharedViewers" fill="#7c3aed" radius={[0, 4, 4, 0]} />
+                <Bar dataKey="sharedViewers" fill="var(--color-primary)" radius={[0, 4, 4, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -149,7 +149,7 @@ export function AudienceSharing({ data }: AudienceSharingProps) {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.2 }}
-          className="bg-card rounded-xl border border-border p-6"
+          className="panel-card rounded-2xl p-6"
         >
           <h4 className="text-sm font-medium text-text-secondary mb-4">
             Zuschauer-Sharing Timeline (Top 3)
@@ -162,7 +162,7 @@ export function AudienceSharing({ data }: AudienceSharingProps) {
                 <Tooltip
                   contentStyle={{
                     backgroundColor: '#1f2937',
-                    border: '1px solid #374151',
+                    border: '1px solid rgba(194, 221, 240, 0.25)',
                     borderRadius: '8px',
                   }}
                   labelStyle={{ color: '#fff' }}

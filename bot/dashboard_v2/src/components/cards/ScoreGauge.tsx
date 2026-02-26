@@ -31,7 +31,7 @@ export function ScoreGauge({
   };
 
   return (
-    <div className="flex flex-col items-center justify-center p-4 bg-card rounded-xl border border-border hover:border-border-hover transition-all">
+    <div className="panel-card soft-elevate flex flex-col items-center justify-center p-4 rounded-2xl">
       <div className={`relative ${sizeClasses[size]} flex items-center justify-center`}>
         <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
           {/* Background circle */}
@@ -39,7 +39,7 @@ export function ScoreGauge({
             cx="50"
             cy="50"
             r="40"
-            stroke="#1f2937"
+            stroke="rgba(194, 221, 240, 0.18)"
             strokeWidth="8"
             fill="none"
           />

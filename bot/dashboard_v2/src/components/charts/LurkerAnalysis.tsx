@@ -31,7 +31,7 @@ export function LurkerAnalysis({ data }: LurkerAnalysisProps) {
         />
         <StatCard
           icon={<UserCheck className="w-5 h-5" />}
-          label="Conversion-Rate"
+          label="LurkerChatter Conversion"
           value={`${(conversionStats.rate * 100).toFixed(1)}%`}
           sublabel={`${conversionStats.converted} von ${conversionStats.eligible} konvertiert`}
           color="success"

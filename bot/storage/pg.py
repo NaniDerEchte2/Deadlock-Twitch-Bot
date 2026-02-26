@@ -842,7 +842,7 @@ def ensure_schema(conn) -> None:
             chatter_id               TEXT,
             first_message_at         TEXT    NOT NULL,
             messages                 INTEGER DEFAULT 0,
-            is_first_time_global     INTEGER DEFAULT 0,
+            is_first_time_streamer     INTEGER DEFAULT 0,
             seen_via_chatters_api    INTEGER DEFAULT 0,
             last_seen_at             TEXT,
             PRIMARY KEY (session_id, chatter_login)
@@ -852,6 +852,22 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_twitch_session_chatters_login ON twitch_session_chatters(streamer_login, session_id)"
     )
+    # Migration: rename is_first_time_global → is_first_time_streamer (clarifies scope)
+    try:
+        old_col = conn.execute(
+            "SELECT 1 FROM information_schema.columns"
+            " WHERE table_schema = current_schema()"
+            " AND table_name = 'twitch_session_chatters'"
+            " AND column_name = 'is_first_time_global'"
+        ).fetchone()
+        if old_col:
+            conn.execute(
+                "ALTER TABLE twitch_session_chatters"
+                " RENAME COLUMN is_first_time_global TO is_first_time_streamer"
+            )
+            log.info("DB migration: renamed twitch_session_chatters.is_first_time_global → is_first_time_streamer")
+    except Exception as exc:
+        log.warning("DB migration: could not rename is_first_time_global: %s", exc)
 
     conn.execute(
         """

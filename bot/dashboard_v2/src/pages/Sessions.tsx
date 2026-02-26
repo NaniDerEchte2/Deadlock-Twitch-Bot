@@ -106,9 +106,9 @@ function StatCard({ icon, label, value, color }: StatCardProps) {
     <motion.div
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
-      className="bg-card rounded-xl border border-border p-4"
+      className="panel-card soft-elevate rounded-2xl p-4"
     >
-      <div className={`w-10 h-10 rounded-lg ${colorClasses[color]} flex items-center justify-center mb-2`}>
+      <div className={`w-10 h-10 rounded-xl ${colorClasses[color]} flex items-center justify-center mb-2`}>
         {icon}
       </div>
       <div className="text-xs text-text-secondary">{label}</div>
@@ -133,7 +133,7 @@ function SessionCard({ session, index, isExpanded, onToggle }: SessionCardProps)
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: index * 0.03 }}
-      className="bg-card rounded-xl border border-border overflow-hidden"
+      className="panel-card rounded-2xl overflow-hidden"
     >
       {/* Session Header */}
       <div
@@ -245,7 +245,7 @@ function SessionDetails({ sessionId, session }: SessionDetailsProps) {
           <div className="h-48">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={detail.timeline}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(194, 221, 240, 0.2)" />
                 <XAxis
                   dataKey="minute"
                   stroke="#9ca3af"
@@ -256,7 +256,7 @@ function SessionDetails({ sessionId, session }: SessionDetailsProps) {
                 <Tooltip
                   contentStyle={{
                     backgroundColor: '#1f2937',
-                    border: '1px solid #374151',
+                    border: '1px solid rgba(194, 221, 240, 0.25)',
                     borderRadius: '8px',
                   }}
                   labelFormatter={(val) => `Minute ${val}`}
@@ -265,7 +265,7 @@ function SessionDetails({ sessionId, session }: SessionDetailsProps) {
                   type="monotone"
                   dataKey="viewers"
                   name="Viewer"
-                  stroke="#7c3aed"
+                  stroke="var(--color-primary)"
                   strokeWidth={2}
                   dot={false}
                 />

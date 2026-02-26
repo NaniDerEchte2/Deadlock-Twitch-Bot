@@ -80,7 +80,7 @@ export function InsightsPanel({ findings, actions }: InsightsPanelProps) {
 
       {/* Actions */}
       {actions && actions.length > 0 && (
-        <div className="bg-card p-6 rounded-xl border border-accent/20">
+        <div className="panel-card p-6 rounded-2xl border-accent/20">
           <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
             <span className="bg-accent/20 p-1.5 rounded text-accent">
               <TrendingUp className="w-5 h-5" />
@@ -94,7 +94,7 @@ export function InsightsPanel({ findings, actions }: InsightsPanelProps) {
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 0.2 + i * 0.1 }}
-                className="bg-black/20 p-4 rounded-lg border-l-4 border-accent"
+                className="bg-black/25 p-4 rounded-lg border-l-4 border-accent"
               >
                 <span className="text-xs font-bold text-accent uppercase tracking-wider mb-1 block">
                   {action.tag}

@@ -1,61 +1,150 @@
 @import "tailwindcss";
 
-/* Custom Theme */
+/* Brand Theme */
 @theme {
-  --color-bg: #0b0e14;
-  --color-card: #151a25;
-  --color-card-hover: #1a202d;
-  --color-accent: #7c3aed;
-  --color-accent-hover: #6d28d9;
-  --color-success: #4ade80;
-  --color-warning: #fbbf24;
-  --color-danger: #f87171;
-  --color-text-primary: #e2e8f0;
-  --color-text-secondary: #94a3b8;
-  --color-border: rgba(255, 255, 255, 0.05);
-  --color-border-hover: rgba(255, 255, 255, 0.1);
+  --color-bg: #07151d;
+  --color-background: #0b1d28;
+  --color-card: #102635;
+  --color-card-hover: #173448;
+  --color-primary: #ff7a18;
+  --color-primary-hover: #ff8d39;
+  --color-accent: #10b7ad;
+  --color-accent-hover: #1dd4ca;
+  --color-success: #2ecc71;
+  --color-warning: #f5b642;
+  --color-danger: #ff6b5e;
+  --color-error: #ff6b5e;
+  --color-secondary: #8ea8bb;
+  --color-text-primary: #e9f1f7;
+  --color-text-secondary: #9bb3c5;
+  --color-border: rgba(194, 221, 240, 0.14);
+  --color-border-hover: rgba(194, 221, 240, 0.3);
+  --color-popover: #0e2a3a;
+  --font-sans: "Manrope", "Segoe UI", sans-serif;
+  --font-display: "Sora", "Manrope", sans-serif;
 }
 
 /* Base Styles */
 html {
-  background-color: var(--color-bg);
+  background: var(--color-bg);
   color: var(--color-text-primary);
+  scroll-behavior: smooth;
 }
 
 body {
   margin: 0;
-  font-family: 'Outfit', system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   min-height: 100vh;
+  background:
+    radial-gradient(1200px 520px at 90% -10%, rgba(255, 122, 24, 0.18), transparent 65%),
+    radial-gradient(900px 460px at 12% -20%, rgba(16, 183, 173, 0.24), transparent 60%),
+    linear-gradient(160deg, #07151d 0%, #081a24 55%, #0a202c 100%);
+  color: var(--color-text-primary);
+  position: relative;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 36px 36px;
+  mask-image: radial-gradient(ellipse at top, black 40%, transparent 75%);
+  opacity: 0.35;
+  z-index: 0;
+}
+
+#root {
+  min-height: 100vh;
+  width: 100%;
+  position: relative;
+  z-index: 1;
+}
+
+h1,
+h2,
+h3,
+h4,
+.display-font {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-primary) 45%, transparent);
+  color: #ffffff;
 }
 
 /* Scrollbar Styling */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--color-bg);
+  background: #071923;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #374151;
-  border-radius: 4px;
+  background: linear-gradient(180deg, #1a3f57 0%, #204e6b 100%);
+  border-radius: 999px;
+  border: 2px solid #071923;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #4b5563;
+  background: linear-gradient(180deg, #20506f 0%, #2c698e 100%);
 }
 
-/* Custom Utilities */
+/* Shared Effects */
 .glass {
-  background: rgba(21, 26, 37, 0.8);
-  backdrop-filter: blur(12px);
+  background: rgba(12, 35, 49, 0.72);
+  backdrop-filter: blur(16px);
   border: 1px solid var(--color-border);
+  box-shadow:
+    0 16px 40px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .gradient-accent {
-  background: linear-gradient(135deg, var(--color-accent) 0%, #a855f7 100%);
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-accent) 100%);
+}
+
+.panel-card {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(160deg, rgba(16, 38, 53, 0.92) 0%, rgba(10, 30, 42, 0.92) 100%);
+  border: 1px solid var(--color-border);
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.25),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.panel-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(120deg, rgba(255, 255, 255, 0.06), transparent 35%);
+  opacity: 0.4;
+}
+
+.metric-highlight {
+  box-shadow:
+    0 0 0 1px rgba(255, 122, 24, 0.24),
+    0 12px 32px rgba(255, 122, 24, 0.16);
+}
+
+.soft-elevate {
+  transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.soft-elevate:hover {
+  transform: translateY(-2px);
+  border-color: var(--color-border-hover);
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.24);
 }

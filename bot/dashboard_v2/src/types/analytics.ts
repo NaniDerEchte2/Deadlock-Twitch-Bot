@@ -90,9 +90,15 @@ export interface ChatAnalytics {
   firstTimeChatters: number;
   returningChatters: number;
   messagesPerMinute: number;
+  messagesPer100ViewerMinutes?: number | null;
+  viewerMinutes?: number;
   chatterReturnRate: number;
+  chatPenetrationPct?: number | null;
+  chatPenetrationReliable?: boolean;
+  legacyInteractionActivePerAvgViewer?: number | null;
+  // Legacy fields (kept one release for compatibility)
   interactionRateActivePerViewer?: number;
-  interactionRateActivePerAvgViewer?: number;
+  interactionRateActivePerAvgViewer?: number | null;
   interactionRateReliable?: boolean;
   activeRatio?: number;
   activeChatters?: number;
@@ -101,15 +107,18 @@ export interface ChatAnalytics {
   avgMessagesPerChatter?: number;
   timezone?: string;
   dataQuality?: {
-    method?: 'no_data' | 'real_chat_messages' | string;
+    method?: 'no_data' | 'low_coverage' | 'real_samples' | string;
     coverage?: number;
     sampleCount?: number;
     confidence?: 'very_low' | 'low' | 'medium' | 'high';
-    sessions: number;
-    sessionsWithChat: number;
-    chatSessionCoverage: number;
-    chattersApiCoverage: number;
+    sessions?: number;
+    sessionsWithChat?: number;
+    chatSessionCoverage?: number;
+    chattersCoverage?: number;
+    chattersApiCoverage?: number;
     passiveViewerSamples?: number;
+    viewerSampleCount?: number;
+    viewerMinutesSource?: 'real_samples' | 'low_coverage' | string;
   };
   topChatters: ChatterStats[];
   messageTypes: MessageTypeStat[];
@@ -406,6 +415,10 @@ export interface CoachingEfficiency {
   percentile: number;
   totalStreamHours: number;
   totalViewerHours: number;
+  growthPer10Hours?: number;
+  growthCategoryAvg?: number;
+  growthTopPerformers?: { streamer: string; value: number }[];
+  growthPercentile?: number;
 }
 
 export interface CoachingTitleEntry {

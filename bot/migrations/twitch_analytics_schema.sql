@@ -181,7 +181,7 @@ CREATE TABLE IF NOT EXISTS twitch_session_chatters (
     chatter_id            TEXT,
     first_message_at      TIMESTAMPTZ NOT NULL,
     messages              INTEGER DEFAULT 0,
-    is_first_time_global  BOOLEAN DEFAULT FALSE,
+    is_first_time_streamer  BOOLEAN DEFAULT FALSE,
     seen_via_chatters_api BOOLEAN DEFAULT FALSE,
     last_seen_at          TIMESTAMPTZ,
     PRIMARY KEY (session_id, chatter_login)

@@ -65,19 +65,19 @@ export function ViewerTimelineChart({ data, title = 'Viewer Timeline' }: ViewerT
           <AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
             <defs>
               <linearGradient id="tlAvg" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#7c3aed" stopOpacity={0.3} />
-                <stop offset="95%" stopColor="#7c3aed" stopOpacity={0} />
+                <stop offset="5%" stopColor="var(--color-primary)" stopOpacity={0.3} />
+                <stop offset="95%" stopColor="var(--color-primary)" stopOpacity={0} />
               </linearGradient>
               <linearGradient id="tlPeak" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#38bdf8" stopOpacity={0.15} />
-                <stop offset="95%" stopColor="#38bdf8" stopOpacity={0} />
+                <stop offset="5%" stopColor="var(--color-accent)" stopOpacity={0.15} />
+                <stop offset="95%" stopColor="var(--color-accent)" stopOpacity={0} />
               </linearGradient>
               <linearGradient id="tlMin" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#6b7280" stopOpacity={0.1} />
-                <stop offset="95%" stopColor="#6b7280" stopOpacity={0} />
+                <stop offset="5%" stopColor="var(--color-secondary)" stopOpacity={0.15} />
+                <stop offset="95%" stopColor="var(--color-secondary)" stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(194, 221, 240, 0.2)" />
             <XAxis
               dataKey="label"
               stroke="#9ca3af"
@@ -106,7 +106,7 @@ export function ViewerTimelineChart({ data, title = 'Viewer Timeline' }: ViewerT
             <Area
               type="monotone"
               dataKey="avgViewers"
-              stroke="#7c3aed"
+              stroke="var(--color-primary)"
               strokeWidth={2}
               fillOpacity={1}
               fill="url(#tlAvg)"
@@ -114,7 +114,7 @@ export function ViewerTimelineChart({ data, title = 'Viewer Timeline' }: ViewerT
             <Area
               type="monotone"
               dataKey="peakViewers"
-              stroke="#38bdf8"
+              stroke="var(--color-accent)"
               strokeWidth={1}
               strokeDasharray="5 5"
               fillOpacity={1}
@@ -123,7 +123,7 @@ export function ViewerTimelineChart({ data, title = 'Viewer Timeline' }: ViewerT
             <Area
               type="monotone"
               dataKey="minViewers"
-              stroke="#6b7280"
+              stroke="var(--color-secondary)"
               strokeWidth={1}
               strokeDasharray="3 3"
               fillOpacity={1}
@@ -133,7 +133,7 @@ export function ViewerTimelineChart({ data, title = 'Viewer Timeline' }: ViewerT
               <Brush
                 dataKey="label"
                 height={30}
-                stroke="#7c3aed"
+                stroke="var(--color-primary)"
                 fill="#1f2937"
                 travellerWidth={10}
               />

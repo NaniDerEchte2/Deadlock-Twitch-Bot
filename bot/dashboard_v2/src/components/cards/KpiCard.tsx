@@ -13,11 +13,11 @@ interface KpiCardProps {
 }
 
 const colorClasses = {
-  blue: 'bg-blue-500/10 text-blue-400',
-  green: 'bg-green-500/10 text-green-400',
-  purple: 'bg-accent/10 text-accent',
-  yellow: 'bg-yellow-500/10 text-yellow-400',
-  red: 'bg-red-500/10 text-red-400',
+  blue: 'bg-primary/15 text-primary border border-primary/25',
+  green: 'bg-success/15 text-success border border-success/25',
+  purple: 'bg-accent/15 text-accent border border-accent/25',
+  yellow: 'bg-warning/15 text-warning border border-warning/25',
+  red: 'bg-danger/15 text-danger border border-danger/25',
 };
 
 export function KpiCard({
@@ -37,27 +37,36 @@ export function KpiCard({
       ? 'text-danger'
       : 'text-text-secondary';
 
+  const topGlow = {
+    blue: 'from-primary/45',
+    green: 'from-success/45',
+    purple: 'from-accent/45',
+    yellow: 'from-warning/45',
+    red: 'from-danger/45',
+  };
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className={`bg-card p-5 rounded-xl border border-border hover:border-border-hover transition-all ${
+      className={`panel-card soft-elevate p-5 rounded-2xl ${
         size === 'large' ? 'md:col-span-2' : ''
       }`}
     >
+      <div className={`absolute inset-x-6 top-0 h-px bg-gradient-to-r ${topGlow[color]} via-white/20 to-transparent`} />
       <div className="flex justify-between items-start mb-2">
-        <span className="text-text-secondary text-sm font-semibold uppercase tracking-wider">
+        <span className="text-text-secondary text-[11px] font-semibold uppercase tracking-[0.14em]">
           {title}
         </span>
         {Icon && (
-          <div className={`p-2 rounded-lg ${colorClasses[color]}`}>
+          <div className={`p-2.5 rounded-xl ${colorClasses[color]}`}>
             <Icon className="w-4 h-4" />
           </div>
         )}
       </div>
 
       <div className="flex items-end gap-3 mt-1">
-        <span className={`font-bold text-white ${size === 'large' ? 'text-4xl' : 'text-3xl'}`}>
+        <span className={`display-font font-bold text-white ${size === 'large' ? 'text-4xl' : 'text-3xl'}`}>
           {value}
         </span>
         {trend != null && (
