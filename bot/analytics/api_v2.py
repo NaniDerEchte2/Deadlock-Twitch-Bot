@@ -377,27 +377,31 @@ class AnalyticsV2Mixin(
                     has_partner_table = False
 
                 # Partners (verified) - only if table exists
-                partners = []
+                partner_logins: set[str] = set()
                 if has_partner_table:
-                    partners = conn.execute("""
+                    rows = conn.execute("""
                         SELECT twitch_login
                         FROM twitch_streamers_partner_state
                         WHERE is_partner_active = 1
                         ORDER BY twitch_login
                     """).fetchall()
+                    partner_logins = {r[0].lower() for r in rows}
 
-                # Only show our verified/partner streamers when the partner view exists.
-                if has_partner_table:
-                    data = [{"login": r[0], "isPartner": True} for r in partners]
-                else:
-                    # Fallback (should not normally happen): recent streamers
-                    others = conn.execute("""
-                        SELECT DISTINCT s.streamer_login
-                        FROM twitch_stream_sessions s
-                        WHERE s.started_at >= (NOW() - INTERVAL '30 days')
-                        ORDER BY s.streamer_login
-                    """).fetchall()
-                    data = [{"login": r[0], "isPartner": False} for r in others]
+                # Always include streamers who were live in the last 90 days so
+                # recently-added or re-verified streamers are never invisible.
+                recent_rows = conn.execute("""
+                    SELECT DISTINCT LOWER(streamer_login) AS login
+                    FROM twitch_stream_sessions
+                    WHERE started_at >= NOW() - INTERVAL '90 days'
+                    ORDER BY login
+                """).fetchall()
+                recent_logins: set[str] = {r[0] for r in recent_rows}
+
+                all_logins = partner_logins | recent_logins
+                data = [
+                    {"login": login, "isPartner": login in partner_logins}
+                    for login in sorted(all_logins)
+                ]
 
                 return web.json_response(data)
         except Exception as exc:

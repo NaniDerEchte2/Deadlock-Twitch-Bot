@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Activity, ChevronDown, SlidersHorizontal, Sparkles } from 'lucide-react';
+import { Activity, ChevronDown, Search, SlidersHorizontal, Sparkles } from 'lucide-react';
 import type { TimeRange } from '@/types/analytics';
 
 interface HeaderProps {
@@ -22,6 +22,7 @@ export function Header({
   canViewAllStreamers = false,
 }: HeaderProps) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [search, setSearch] = useState('');
 
   const timeRanges: { value: TimeRange; label: string }[] = [
     { value: 7, label: '7d' },
@@ -29,8 +30,9 @@ export function Header({
     { value: 90, label: '90d' },
   ];
 
-  const partners = streamers.filter(s => s.isPartner);
-  const others = streamers.filter(s => !s.isPartner);
+  const q = search.trim().toLowerCase();
+  const partners = streamers.filter(s => s.isPartner && (!q || s.login.includes(q)));
+  const others = streamers.filter(s => !s.isPartner && (!q || s.login.includes(q)));
   const allLabel = canViewAllStreamers ? 'Alle Streamer' : 'Alle Partner';
 
   // In Beta: Partner koennen vorerst alle Streamer sehen.
@@ -74,13 +76,29 @@ export function Header({
 
             {dropdownOpen && (
               <>
-                <div className="fixed inset-0 z-40" onClick={() => setDropdownOpen(false)} />
-                <div className="absolute top-full right-0 mt-2 w-full sm:w-72 max-h-96 overflow-y-auto panel-card rounded-xl z-50">
+                <div className="fixed inset-0 z-40" onClick={() => { setDropdownOpen(false); setSearch(''); }} />
+                <div className="absolute top-full right-0 mt-2 w-full sm:w-72 panel-card rounded-xl z-50 flex flex-col">
+                  {/* Search */}
+                  <div className="p-2 border-b border-border">
+                    <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-background/60 border border-border">
+                      <Search className="w-3.5 h-3.5 text-text-secondary shrink-0" />
+                      <input
+                        autoFocus
+                        type="text"
+                        placeholder="Suchen…"
+                        value={search}
+                        onChange={e => setSearch(e.target.value)}
+                        className="flex-1 bg-transparent text-sm text-white placeholder:text-text-secondary outline-none"
+                      />
+                    </div>
+                  </div>
+                  <div className="max-h-80 overflow-y-auto">
                   {/* All Partners Option */}
                   <button
                     onClick={() => {
                       onStreamerChange(null);
                       setDropdownOpen(false);
+                      setSearch('');
                     }}
                     className={`w-full px-4 py-2.5 text-left hover:bg-white/5 transition-colors ${
                       !streamer ? 'bg-accent/15 text-accent' : 'text-white'
@@ -101,6 +119,7 @@ export function Header({
                           onClick={() => {
                             onStreamerChange(s.login);
                             setDropdownOpen(false);
+                            setSearch('');
                           }}
                           className={`w-full px-4 py-2.5 text-left hover:bg-white/5 transition-colors ${
                             streamer === s.login ? 'bg-accent/15 text-accent' : 'text-white'
@@ -124,6 +143,7 @@ export function Header({
                           onClick={() => {
                             onStreamerChange(s.login);
                             setDropdownOpen(false);
+                            setSearch('');
                           }}
                           className={`w-full px-4 py-2.5 text-left hover:bg-white/5 transition-colors ${
                             streamer === s.login ? 'bg-accent/15 text-accent' : 'text-white'
@@ -135,6 +155,7 @@ export function Header({
                       ))}
                     </>
                   )}
+                  </div>{/* end scrollable */}
                 </div>
               </>
             )}
