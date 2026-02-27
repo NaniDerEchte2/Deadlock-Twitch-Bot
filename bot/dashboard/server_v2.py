@@ -16,6 +16,8 @@ from aiohttp import web
 from ..analytics.api_v2 import AnalyticsV2Mixin
 from ..core.constants import log
 from .auth_mixin import _DashboardAuthMixin
+from .billing_mixin import _DashboardBillingMixin
+from .legal_mixin import _DashboardLegalMixin
 from .live import DashboardLiveMixin
 from .raid_mixin import _DashboardRaidMixin
 from .routes_mixin import _DashboardRoutesMixin
@@ -48,6 +50,8 @@ TWITCH_ADMIN_DISCORD_REDIRECT_URI = (
 class DashboardV2Server(
     _DashboardAuthMixin,
     _DashboardRaidMixin,
+    _DashboardLegalMixin,
+    _DashboardBillingMixin,
     _DashboardRoutesMixin,
     DashboardLiveMixin,
     DashboardStatsMixin,
@@ -86,6 +90,34 @@ class DashboardV2Server(
         self._oauth_client_id = oauth_client_id
         self._oauth_client_secret = oauth_client_secret
         self._oauth_redirect_uri = oauth_redirect_uri
+        self._billing_stripe_publishable_key = self._load_secret_value(
+            "STRIPE_PUBLISHABLE_KEY",
+            "TWITCH_BILLING_STRIPE_PUBLISHABLE_KEY",
+        )
+        self._billing_stripe_secret_key = self._load_secret_value(
+            "STRIPE_SECRET_KEY",
+            "TWITCH_BILLING_STRIPE_SECRET_KEY",
+        )
+        self._billing_stripe_webhook_secret = self._load_secret_value(
+            "STRIPE_WEBHOOK_SECRET",
+            "TWITCH_BILLING_STRIPE_WEBHOOK_SECRET",
+        )
+        self._billing_checkout_success_url = self._load_secret_value(
+            "STRIPE_CHECKOUT_SUCCESS_URL",
+            "TWITCH_BILLING_CHECKOUT_SUCCESS_URL",
+        )
+        self._billing_checkout_cancel_url = self._load_secret_value(
+            "STRIPE_CHECKOUT_CANCEL_URL",
+            "TWITCH_BILLING_CHECKOUT_CANCEL_URL",
+        )
+        self._billing_stripe_price_map_raw = self._load_secret_value(
+            "STRIPE_PRICE_ID_MAP",
+            "TWITCH_BILLING_STRIPE_PRICE_ID_MAP",
+        )
+        self._billing_stripe_product_map_raw = self._load_secret_value(
+            "STRIPE_PRODUCT_ID_MAP",
+            "TWITCH_BILLING_STRIPE_PRODUCT_ID_MAP",
+        )
         self._session_ttl_seconds = max(6 * 3600, int(session_ttl_seconds or 6 * 3600))
         self._legacy_stats_url = (legacy_stats_url or "").strip() or None
         self._reload_cb = reload_cb
@@ -169,6 +201,24 @@ class DashboardV2Server(
     async def _empty_raid_history(self, **_: Any) -> list[dict]:
         return []
 
+    @classmethod
+    def _load_secret_value(cls, *keys: str) -> str:
+        for raw_key in keys:
+            key = str(raw_key or "").strip()
+            if not key:
+                continue
+            value = cls._read_keyring_secret(key)
+            if value:
+                return value
+        for raw_key in keys:
+            key = str(raw_key or "").strip()
+            if not key:
+                continue
+            value = str(os.getenv(key) or "").strip()
+            if value:
+                return value
+        return ""
+
     @staticmethod
     def _read_keyring_secret(key: str) -> str:
         secret_key = (key or "").strip()
@@ -185,6 +235,21 @@ class DashboardV2Server(
         except Exception:
             return ""
         return str(value or "").strip()
+
+    @staticmethod
+    def _write_keyring_secret(key: str, value: str | None) -> bool:
+        secret_key = (key or "").strip()
+        if not secret_key:
+            return False
+        try:
+            import keyring
+        except Exception:
+            return False
+        try:
+            keyring.set_password(KEYRING_SERVICE_NAME, secret_key, str(value or ""))
+        except Exception:
+            return False
+        return True
 
     def _check_admin_token(self, token: str | None) -> bool:
         if self._noauth:
@@ -318,6 +383,22 @@ class DashboardV2Server(
     def _canonical_discord_admin_post_login_path(raw: str | None) -> str:
         normalized = DashboardV2Server._normalize_discord_admin_next_path(raw)
         normalized_path = (urlsplit(normalized).path or "").rstrip("/") or "/"
+        if normalized_path == "/twitch/abo":
+            return "/twitch/abbo"
+        if normalized_path == "/twitch/abbo":
+            return "/twitch/abbo"
+        if normalized_path == "/twitch/abos":
+            return "/twitch/abbo"
+        if normalized_path == "/twitch/abbo/stripe-settings":
+            return "/twitch/abbo/stripe-settings"
+        if normalized_path == "/twitch/abbo/rechnungen":
+            return "/twitch/abbo/rechnungen"
+        if normalized_path == "/twitch/abbo/rechnung":
+            return "/twitch/abbo/rechnung"
+        if normalized_path == "/twitch/abbo/kündigen":
+            return "/twitch/abbo/kündigen"
+        if normalized_path == "/twitch/dashboads":
+            return "/twitch/dashboards"
         if normalized_path == "/twitch/dashboards":
             return "/twitch/dashboards"
         return "/twitch/admin"

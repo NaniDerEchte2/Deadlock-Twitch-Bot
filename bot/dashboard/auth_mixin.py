@@ -149,6 +149,22 @@ class _DashboardAuthMixin:
             return fallback
 
         normalized_path = (parts.path or "").rstrip("/") or "/"
+        if normalized_path == "/twitch/abo":
+            return "/twitch/abbo"
+        if normalized_path == "/twitch/abbo":
+            return "/twitch/abbo"
+        if normalized_path == "/twitch/abos":
+            return "/twitch/abbo"
+        if normalized_path == "/twitch/abbo/stripe-settings":
+            return "/twitch/abbo/stripe-settings"
+        if normalized_path == "/twitch/abbo/rechnungen":
+            return "/twitch/abbo/rechnungen"
+        if normalized_path == "/twitch/abbo/rechnung":
+            return "/twitch/abbo/rechnung"
+        if normalized_path == "/twitch/abbo/kündigen":
+            return "/twitch/abbo/kündigen"
+        if normalized_path == "/twitch/dashboads":
+            return "/twitch/dashboards"
         if normalized_path == "/twitch/stats":
             return "/twitch/stats"
         if normalized_path == "/twitch/dashboards":

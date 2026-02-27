@@ -4,21 +4,180 @@ from __future__ import annotations
 
 import html
 import json
+from datetime import UTC, datetime
 from typing import Any
+from urllib import error as _urlerror
+from urllib import parse as _urlparse
+from urllib import request as _urlrequest
+from uuid import uuid4
+import hashlib
+import secrets
 
 from aiohttp import web
 
 from .. import storage
 from ..core.constants import log
+from .abbo_html import render_abbo_page
+from .billing_plans import (
+    BILLING_CYCLE_DISCOUNTS as _BILLING_CYCLE_DISCOUNTS,
+    BILLING_STRIPE_QUICKSTART_URL as _BILLING_STRIPE_QUICKSTART_URL,
+    build_billing_catalog as _build_billing_catalog,
+    billing_cycle_label as _billing_cycle_label,
+    billing_is_paid_plan as _billing_is_paid_plan,
+    format_eur_cents as _format_eur_cents,
+    normalize_billing_cycle as _normalize_billing_cycle,
+)
 from .live import DashboardLiveMixin, _REQUIRED_SCOPES, _CRITICAL_SCOPES, _SCOPE_COLUMN_LABELS
 
 TWITCH_DASHBOARDS_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboards"
 TWITCH_DASHBOARD_V2_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
 TWITCH_DASHBOARDS_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboards"
+TWITCH_ABBO_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fabbo"
+TWITCH_ABBO_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fabbo"
 
 
 class _DashboardRoutesMixin:
     """Core dashboard routes and route table registration."""
+
+    @staticmethod
+    def _billing_form_pairs(payload: Any, *, prefix: str = "") -> list[tuple[str, str]]:
+        pairs: list[tuple[str, str]] = []
+        if payload is None:
+            return pairs
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                key_str = str(key or "").strip()
+                if not key_str:
+                    continue
+                child_prefix = f"{prefix}[{key_str}]" if prefix else key_str
+                pairs.extend(_DashboardRoutesMixin._billing_form_pairs(value, prefix=child_prefix))
+            return pairs
+        if isinstance(payload, (list, tuple)):
+            for index, value in enumerate(payload):
+                child_prefix = f"{prefix}[{index}]"
+                pairs.extend(_DashboardRoutesMixin._billing_form_pairs(value, prefix=child_prefix))
+            return pairs
+        if not prefix:
+            return pairs
+        if isinstance(payload, bool):
+            pairs.append((prefix, "true" if payload else "false"))
+        else:
+            pairs.append((prefix, str(payload)))
+        return pairs
+
+    @classmethod
+    def _billing_create_checkout_session_rest(
+        cls,
+        *,
+        stripe_secret_key: str,
+        session_payload: dict[str, Any],
+        idempotency_key: str = "",
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        secret_key = str(stripe_secret_key or "").strip()
+        if not secret_key:
+            return None, "stripe_secret_key_missing"
+
+        body = _urlparse.urlencode(cls._billing_form_pairs(session_payload)).encode("utf-8")
+        request_obj = _urlrequest.Request(
+            url="https://api.stripe.com/v1/checkout/sessions",
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {secret_key}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+        if idempotency_key:
+            request_obj.add_header("Idempotency-Key", str(idempotency_key))
+
+        try:
+            with _urlrequest.urlopen(request_obj, timeout=25) as response:
+                raw_text = response.read().decode("utf-8", errors="replace")
+        except _urlerror.HTTPError as exc:
+            raw_text = exc.read().decode("utf-8", errors="replace")
+            message = raw_text or f"stripe_http_error_{int(exc.code or 0)}"
+            try:
+                parsed = json.loads(raw_text)
+            except Exception:
+                parsed = {}
+            if isinstance(parsed, dict):
+                error_obj = parsed.get("error")
+                if isinstance(error_obj, dict):
+                    message = str(error_obj.get("message") or message)
+            return None, message
+        except Exception as exc:
+            return None, str(exc)
+
+        try:
+            payload = json.loads(raw_text)
+        except Exception:
+            return None, "stripe_invalid_json_response"
+        if not isinstance(payload, dict):
+            return None, "stripe_invalid_response_type"
+        if str(payload.get("id") or "").strip():
+            return payload, None
+        error_obj = payload.get("error")
+        if isinstance(error_obj, dict):
+            return None, str(error_obj.get("message") or "stripe_checkout_create_failed")
+        return None, "stripe_checkout_create_failed"
+
+    def _billing_create_checkout_session_best_effort(
+        self,
+        *,
+        session_payload: dict[str, Any],
+        idempotency_key: str = "",
+    ) -> tuple[Any | None, str | None]:
+        """Create Stripe Checkout Session via SDK, fallback to direct REST."""
+        stripe_secret_key = str(getattr(self, "_billing_stripe_secret_key", "") or "").strip()
+        if not stripe_secret_key:
+            return None, "stripe_secret_key_missing"
+
+        stripe, _import_error = self._billing_import_stripe()
+        if stripe is not None:
+            try:
+                stripe.api_key = stripe_secret_key
+                if idempotency_key:
+                    session = stripe.checkout.Session.create(
+                        **session_payload,
+                        idempotency_key=idempotency_key,
+                    )
+                else:
+                    session = stripe.checkout.Session.create(**session_payload)
+                return session, None
+            except Exception as exc:
+                log.warning("stripe sdk checkout create failed; fallback to REST: %s", str(exc))
+
+        return self._billing_create_checkout_session_rest(
+            stripe_secret_key=stripe_secret_key,
+            session_payload=session_payload,
+            idempotency_key=idempotency_key,
+        )
+
+    # ------------------------------------------------------------------ #
+    # CSRF Token Protection                                                #
+    # ------------------------------------------------------------------ #
+
+    def _csrf_generate_token(self, request: web.Request) -> str:
+        """Generate and store CSRF token in session."""
+        token = secrets.token_urlsafe(32)
+        session = self._get_dashboard_auth_session(request) or {}
+        session["csrf_token"] = token
+        return token
+
+    def _csrf_get_token(self, request: web.Request) -> str | None:
+        """Get stored CSRF token from session."""
+        session = self._get_dashboard_auth_session(request) or {}
+        return session.get("csrf_token", "")
+
+    def _csrf_verify_token(self, request: web.Request, provided_token: str) -> bool:
+        """Verify provided CSRF token against stored token."""
+        stored_token = self._csrf_get_token(request)
+        if not stored_token or not provided_token:
+            return False
+        try:
+            return secrets.compare_digest(stored_token, provided_token)
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------ #
     # Core routes                                                          #
@@ -42,75 +201,10 @@ class _DashboardRoutesMixin:
         raise web.HTTPFound(safe_destination)
 
     async def public_home(self, request: web.Request) -> web.StreamResponse:
-        """Public homepage for OAuth verification and app information."""
-        dashboard_url = (
-            "/twitch/dashboards"
-            if self._check_v2_auth(request)
-            else TWITCH_DASHBOARDS_DISCORD_LOGIN_URL
-            if self._should_use_discord_admin_login(request)
-            else TWITCH_DASHBOARDS_LOGIN_URL
-        )
-        dashboard_label = (
-            "Dashboard oeffnen"
-            if self._check_v2_auth(request)
-            else "Mit Discord anmelden"
-            if self._should_use_discord_admin_login(request)
-            else "Mit Twitch anmelden"
-        )
-        safe_dashboard_url = html.escape(
-            self._safe_internal_redirect(dashboard_url, fallback="/twitch/dashboards"),
-            quote=True,
-        )
-        safe_dashboard_label = html.escape(dashboard_label, quote=True)
-
-        page = (
-            "<!doctype html><html lang='de'><head><meta charset='utf-8'>"
-            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-            "<title>Deutsche Deadlock Community</title>"
-            "<style>"
-            ":root{color-scheme:light;}"
-            "body{margin:0;background:#f8fafc;color:#0f172a;font-family:Segoe UI,Arial,sans-serif;line-height:1.55;}"
-            ".wrap{max-width:980px;margin:0 auto;padding:30px 18px 44px;}"
-            ".top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;}"
-            "h1{margin:0;font-size:1.85rem;}"
-            ".tag{display:inline-block;margin-top:10px;padding:5px 10px;border-radius:999px;background:#dbeafe;color:#1e3a8a;font-weight:600;font-size:.85rem;}"
-            ".panel{margin-top:18px;background:#ffffff;border:1px solid #dbe2ea;border-radius:14px;padding:18px;}"
-            ".muted{color:#334155;}"
-            ".actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;}"
-            ".btn{display:inline-block;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:600;}"
-            ".btn-primary{background:#2563eb;color:#fff;}"
-            ".btn-secondary{border:1px solid #cbd5e1;color:#0f172a;background:#fff;}"
-            "footer{margin-top:22px;padding-top:12px;border-top:1px solid #e2e8f0;color:#475569;font-size:.92rem;}"
-            "a{color:#1d4ed8;}"
-            "</style></head><body><main class='wrap'>"
-            "<div class='top'>"
-            "<h1>Deutsche Deadlock Community</h1>"
-            "<a href='/privacy'>Datenschutzerklaerung</a>"
-            "</div>"
-            "<div class='tag'>Offizielle App-Startseite</div>"
-            "<section class='panel'>"
-            "<h2 style='margin-top:0;'>Wozu dient diese App?</h2>"
-            "<p class='muted'>"
-            "Diese App wird von der <strong>Deutsche Deadlock Community</strong> betrieben und unterstuetzt "
-            "verifizierte Community-Streamer bei Twitch-Funktionen: Analytics-Dashboard, Raid-Autorisierung "
-            "und Clip-Management inklusive Social-Media-Veroeffentlichung."
-            "</p>"
-            "<p class='muted'>"
-            "Die App ist ein Community-Tool fuer Streamer-Partner. Allgemeine Informationen (inklusive "
-            "Datenschutz und Nutzungsbedingungen) sind ohne Anmeldung aufrufbar."
-            "</p>"
-            "<div class='actions'>"
-            f"<a class='btn btn-primary' href='{safe_dashboard_url}'>{safe_dashboard_label}</a>"
-            "<a class='btn btn-secondary' href='/terms'>Nutzungsbedingungen</a>"
-            "<a class='btn btn-secondary' href='/privacy'>Datenschutzerklaerung</a>"
-            "</div>"
-            "</section>"
-            "<footer>"
-            "App-Name im OAuth-Zustimmungsbildschirm: <strong>Deutsche Deadlock Community</strong>"
-            "</footer>"
-            "</main></body></html>"
-        )
-        return web.Response(text=page, content_type="text/html", charset="utf-8")
+        """Root entrypoint redirects to the historical dashboards typo path."""
+        destination = "/dashboads"
+        safe_destination = self._safe_internal_redirect(destination, fallback="/dashboads")
+        raise web.HTTPFound(safe_destination)
 
     async def admin(self, request: web.Request) -> web.StreamResponse:
         """Legacy partner admin surface (streamer management)."""
@@ -198,35 +292,1747 @@ class _DashboardRoutesMixin:
         page_html = (
             "<!doctype html><html lang='de'><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-            "<title>Twitch Stats Dashboard</title>"
+            "<title>Twitch Analytics</title>"
             "<style>"
-            "body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;}"
-            ".wrap{max-width:980px;margin:0 auto;padding:32px 18px;}"
-            ".cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;}"
-            ".card{background:#111827;border:1px solid #1f2937;border-radius:12px;padding:18px;}"
-            ".btn{display:inline-block;margin-top:10px;padding:10px 14px;border-radius:8px;text-decoration:none;"
-            "background:#2563eb;color:#fff;font-weight:600;}"
-            ".muted{color:#94a3b8;font-size:14px;}"
-            ".top{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;gap:10px;}"
-            "a.logout{color:#93c5fd;text-decoration:none;font-size:14px;}"
+            "* { box-sizing: border-box; }"
+            "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; "
+            "background: #0f172a; color: #e2e8f0; margin: 0; line-height: 1.5; }"
+            ".wrap { max-width: 1200px; margin: 0 auto; padding: 24px 18px; }"
+            ".header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 32px; "
+            "padding-bottom: 20px; border-bottom: 1px solid #1f2937; }"
+            ".header-left { display: flex; align-items: center; gap: 12px; }"
+            ".logo { width: 32px; height: 32px; background: #9333ea; border-radius: 50%; display: flex; "
+            "align-items: center; justify-content: center; font-weight: bold; color: #fff; }"
+            ".header-title { font-size: 22px; font-weight: 600; color: #e2e8f0; margin: 0; }"
+            ".header-right { display: flex; align-items: center; gap: 16px; }"
+            ".user-chip { background: #1f2937; border: 1px solid #374151; padding: 8px 14px; border-radius: 20px; "
+            "font-size: 14px; color: #e2e8f0; }"
+            ".logout-btn { color: #60a5fa; text-decoration: none; font-size: 14px; cursor: pointer; "
+            "padding: 8px 12px; border: none; background: none; transition: color 0.2s; }"
+            ".logout-btn:hover { color: #93c5fd; }"
+            ".welcome { font-size: 20px; font-weight: 600; margin: 0 0 24px; color: #e2e8f0; }"
+            ".kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); "
+            "gap: 16px; margin-bottom: 32px; }"
+            ".kpi-tile { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 20px; }"
+            ".kpi-label { font-size: 13px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; "
+            "margin-bottom: 12px; font-weight: 500; }"
+            ".kpi-value { font-size: 32px; font-weight: 700; color: #e2e8f0; margin: 0; }"
+            ".kpi-trend { font-size: 12px; color: #4ade80; margin-top: 8px; }"
+            ".skeleton { background: linear-gradient(90deg, #1f2937 25%, #2d3748 50%, #1f2937 75%); "
+            "background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 6px; height: 40px; "
+            "margin-top: 8px; }"
+            "@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }"
+            ".nav-cards { display: grid; grid-template-columns: repeat(2, 1fr); "
+            "gap: 20px; margin-bottom: 32px; }"
+            "@media (max-width: 768px) { .nav-cards { grid-template-columns: 1fr; } }"
+            ".card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 28px; "
+            "transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s; min-height: 220px; "
+            "display: flex; flex-direction: column; }"
+            ".card:hover { transform: translateY(-2px); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4); "
+            "border-color: #374151; }"
+            ".card .btn { margin-top: auto; }"
+            ".card-accent-purple { border-left: 4px solid #9333ea; }"
+            ".card-accent-blue { border-left: 4px solid #2563eb; }"
+            ".card-accent-teal { border-left: 4px solid #14b8a6; }"
+            ".card-title { font-size: 18px; font-weight: 600; margin: 0 0 8px; color: #e2e8f0; }"
+            ".card-badge { display: inline-block; background: #1f2937; color: #fbbf24; font-size: 11px; "
+            "padding: 4px 8px; border-radius: 4px; margin-bottom: 12px; font-weight: 600; }"
+            ".card-desc { color: #94a3b8; font-size: 14px; margin: 12px 0; }"
+            ".card-bullets { list-style: none; padding: 0; margin: 12px 0; }"
+            ".card-bullets li { color: #cbd5e1; font-size: 13px; margin-bottom: 8px; padding-left: 20px; "
+            "position: relative; }"
+            ".card-bullets li:before { content: '•'; position: absolute; left: 8px; color: #64748b; }"
+            ".btn { display: inline-block; margin-top: 16px; padding: 12px 18px; border-radius: 8px; "
+            "text-decoration: none; background: #2563eb; color: #fff; font-weight: 600; font-size: 14px; "
+            "cursor: pointer; border: none; transition: all 0.2s; }"
+            ".btn:hover { background: #1d4ed8; transform: translateX(2px); }"
+            ".btn:active { transform: translateX(0); }"
+            ".insights-panel { background: linear-gradient(135deg, #1f2937 0%, #111827 100%); "
+            "border: 1px solid #1f2937; border-radius: 12px; padding: 24px; border-left: 4px solid #8b5cf6; "
+            "margin-top: 32px; }"
+            ".insights-title { font-size: 16px; font-weight: 600; color: #e2e8f0; margin: 0 0 16px; display: flex; "
+            "align-items: center; gap: 8px; }"
+            ".insights-list { list-style: none; padding: 0; margin: 0; }"
+            ".insights-list li { color: #cbd5e1; font-size: 14px; margin-bottom: 8px; display: flex; "
+            "align-items: flex-start; gap: 10px; }"
+            ".insights-list li:before { content: '💡'; font-size: 16px; flex-shrink: 0; }"
+            ".hidden { display: none; }"
             "</style></head><body><div class='wrap'>"
-            "<div class='top'><h1 style='margin:0;'>Twitch Dashboard Zugang</h1>"
-            f"<a class='logout' href='{logout_url}'>Logout</a></div>"
-            "<p class='muted'>Beta ist jetzt für verifizierte Streamer-Partner freigeschaltet.</p>"
+            "<div class='header'>"
+            "<div class='header-left'><div class='logo'>◉</div>"
+            "<h1 class='header-title'>Twitch Analytics</h1></div>"
+            "<div class='header-right'>"
+            f"<span class='user-chip'>{html.escape(twitch_login)}</span>"
+            f"<a class='logout-btn' href='{logout_url}'>Logout</a>"
+            "</div></div>"
+            f"<h2 class='welcome'>Willkommen, {html.escape(twitch_login)}!</h2>"
             f"{scope_panel}"
-            "<div class='cards'>"
-            "<div class='card'><h2 style='margin-top:0;'>Stats Dashboard (Alt)</h2>"
-            "<p class='muted'>Bestehendes Dashboard für die bisherigen Stats-Ansichten.</p>"
-            f"<a class='btn' href='{legacy_url}'>Altes Dashboard öffnen</a></div>"
-            "<div class='card'><h2 style='margin-top:0;'>Analyse Dashboard (Beta)</h2>"
-            "<p class='muted'>Neues v2 Analytics Dashboard mit erweiterten Insights.</p>"
-            f"<a class='btn' href='{beta_url}'>Beta Dashboard öffnen</a></div>"
-            "<div class='card'><h2 style='margin-top:0;'>📱 Social Media Publisher</h2>"
-            "<p class='muted'>Verwalte Twitch-Clips und veröffentliche auf TikTok, YouTube & Instagram</p>"
-            "<a class='btn' href='/social-media'>Social Media Dashboard öffnen</a></div>"
-            "</div></div></body></html>"
+            "<div class='kpi-grid'>"
+            "<div class='kpi-tile'><div class='kpi-label'>Ø Viewer</div>"
+            "<p class='kpi-value' id='kpi-viewers'>—</p><div class='skeleton' id='skeleton-viewers'></div>"
+            "<div id='trend-viewers' class='kpi-trend'></div></div>"
+            "<div class='kpi-tile'><div class='kpi-label'>Streams (30 Tage)</div>"
+            "<p class='kpi-value' id='kpi-streams'>—</p><div class='skeleton' id='skeleton-streams'></div>"
+            "<div id='trend-streams' class='kpi-trend'></div></div>"
+            "<div class='kpi-tile'><div class='kpi-label'>Neue Follower</div>"
+            "<p class='kpi-value' id='kpi-followers'>—</p><div class='skeleton' id='skeleton-followers'></div>"
+            "<div id='trend-followers' class='kpi-trend'></div></div>"
+            "<div class='kpi-tile'><div class='kpi-label'>Retention</div>"
+            "<p class='kpi-value' id='kpi-retention'>—</p><div class='skeleton' id='skeleton-retention'></div>"
+            "<div id='trend-retention' class='kpi-trend'></div></div>"
+            "</div>"
+            "<div class='nav-cards'>"
+            "<div class='card card-accent-purple'>"
+            "<span class='card-badge'>BETA</span>"
+            "<h3 class='card-title'>📊 Analyse Dashboard</h3>"
+            "<p class='card-desc'>Umfangreiche Analyse deiner Stream-Performance mit erweiterten Insights.</p>"
+            "<ul class='card-bullets'>"
+            "<li>Retention & Raid-Tracking</li>"
+            "<li>Zuschauer-Rankings</li>"
+            "<li>Trendanalysen</li>"
+            "</ul>"
+            f"<a class='btn' href='{beta_url}'>Öffnen →</a>"
+            "</div>"
+            "<div class='card card-accent-blue'>"
+            "<h3 class='card-title'>📈 Stats (Alt)</h3>"
+            "<p class='card-desc'>Klassisches Dashboard mit detaillierten Statistiken und Logs.</p>"
+            "<ul class='card-bullets'>"
+            "<li>Viewer-Verlauf</li>"
+            "<li>Stream-Logs</li>"
+            "</ul>"
+            f"<a class='btn' href='{legacy_url}'>Öffnen →</a>"
+            "</div>"
+            + (f"<div class='card card-accent-teal' style='grid-column: span 2; opacity: 0.7; border-color: #334155;'>"
+               "<span class='card-badge' style='background: #1e293b; color: #64748b;'>GEPLANT</span>"
+               "<h3 class='card-title' style='color: #94a3b8;'>📱 Social Media Publisher</h3>"
+               "<p class='card-desc'>Verwalte deine Twitch-Clips und veröffentliche auf TikTok, YouTube & Instagram.</p>"
+               "<p style='color: #64748b; font-size: 13px; margin-top: 12px;'>✨ Kommendes Feature — wird in Kürze verfügbar sein</p>"
+               "</div>"
+               if twitch_login.lower() == "earlysalty"
+               else ""
+            )
+            + "</div>"
+            "<div class='insights-panel hidden' id='insights-panel'>"
+            "<h3 class='insights-title'>💡 Insights</h3>"
+            "<ul class='insights-list' id='insights-list'></ul>"
+            "</div>"
+            "</div>"
+            "<script>"
+            "async function loadStats() {"
+            f"  const login = {json.dumps(twitch_login)};"
+            "  try {"
+            "    const res = await fetch(`/twitch/api/v2/overview?streamer=${{login}}&days=30`);"
+            "    if (!res.ok) throw new Error(`HTTP ${{res.status}}`);"
+            "    const data = await res.json();"
+            "    if (data.error || !data.overview) return;"
+            "    const o = data.overview;"
+            "    const hideSkeletons = () => {"
+            "      ['viewers', 'streams', 'followers', 'retention'].forEach(k => {"
+            "        const skel = document.getElementById(`skeleton-${{k}}`);"
+            "        if (skel) skel.style.display = 'none';"
+            "      });"
+            "    };"
+            "    if (o.avg_viewers != null) {"
+            "      const rounded = Math.round(o.avg_viewers);"
+            "      document.getElementById('kpi-viewers').textContent = rounded.toLocaleString('de-DE');"
+            "      if (o.avg_viewers_trend != null && o.avg_viewers_trend !== 0) {"
+            "        const trend = o.avg_viewers_trend > 0 ? '▲' : '▼';"
+            "        const color = o.avg_viewers_trend > 0 ? '#4ade80' : '#f87171';"
+            "        const sign = o.avg_viewers_trend > 0 ? '+' : '';"
+            "        const elem = document.getElementById('trend-viewers');"
+            "        elem.textContent = `${{trend}} ${{sign}}${o.avg_viewers_trend.toFixed(1)}%`;"
+            "        elem.style.color = color;"
+            "      }"
+            "    }"
+            "    if (o.streams_count != null) {"
+            "      document.getElementById('kpi-streams').textContent = o.streams_count.toString();"
+            "    }"
+            "    if (o.new_followers != null) {"
+            "      document.getElementById('kpi-followers').textContent = o.new_followers.toLocaleString('de-DE');"
+            "    }"
+            "    if (o.retention != null) {"
+            "      const pct = Math.round(o.retention * 100);"
+            "      document.getElementById('kpi-retention').textContent = pct + '%';"
+            "    }"
+            "    hideSkeletons();"
+            "    if (data.findings && Array.isArray(data.findings) && data.findings.length > 0) {"
+            "      const list = document.getElementById('insights-list');"
+            "      data.findings.slice(0, 2).forEach(f => {"
+            "        if (f) {"
+            "          const li = document.createElement('li');"
+            "          li.textContent = f;"
+            "          list.appendChild(li);"
+            "        }"
+            "      });"
+            "      document.getElementById('insights-panel').classList.remove('hidden');"
+            "    }"
+            "  } catch (err) {"
+            "    console.error('Failed to load stats:', err);"
+            "  }"
+            "}"
+            "document.addEventListener('DOMContentLoaded', loadStats);"
+            "</script>"
+            "</body></html>"
         )
         return web.Response(text=page_html, content_type="text/html")
+
+    async def abbo_entry(self, request: web.Request) -> web.StreamResponse:
+        """Separated subscription overview dashboard (not linked from main dashboards page)."""
+        if not self._check_v2_auth(request):
+            login_url = (
+                TWITCH_ABBO_DISCORD_LOGIN_URL
+                if self._should_use_discord_admin_login(request)
+                else TWITCH_ABBO_LOGIN_URL
+            )
+            raise web.HTTPFound(login_url)
+
+        # Generate CSRF token for form submissions
+        csrf_token = self._csrf_generate_token(request)
+
+        cycle_raw = (request.query.get("cycle") or "1").strip()
+        catalog = _build_billing_catalog(cycle_raw)
+        logout_url = (
+            "/twitch/auth/discord/logout"
+            if self._is_discord_admin_request(request)
+            else "/twitch/auth/logout"
+        )
+        selected_cycle = int(catalog.get("cycle_months") or 1)
+
+        customer_record = self._billing_customer_record_for_request(request)
+        billing_profile = self._billing_profile_for_request(request)
+        stripe_imported_fields: list[str] = []
+        stripe_customer_id = str(customer_record.get("stripe_customer_id") or "").strip()
+        needs_stripe_prefill = any(
+            not str(billing_profile.get(key) or "").strip()
+            for key in ("recipient_name", "recipient_email", "street_line1", "postal_code", "city")
+        )
+        if stripe_customer_id and needs_stripe_prefill:
+            stripe_profile = self._billing_profile_from_stripe_customer(stripe_customer_id)
+            billing_profile, stripe_imported_fields = self._billing_prefill_profile_from_stripe(
+                billing_profile,
+                stripe_profile,
+            )
+
+        notices: list[str] = []
+        checkout_state = str(request.query.get("checkout") or "").strip().lower()
+        if checkout_state == "success":
+            notices.append(
+                "<div class='notice notice-ok'>Checkout erfolgreich. Dein Abo wird in Stripe aktiviert.</div>"
+            )
+        elif checkout_state == "cancelled":
+            notices.append(
+                "<div class='notice notice-warn'>Checkout abgebrochen. Du kannst jederzeit neu starten.</div>"
+            )
+        elif checkout_state == "unavailable":
+            checkout_reason = str(request.query.get("reason") or "").strip().lower()
+            if checkout_reason == "stripe_sdk_missing":
+                notices.append(
+                    "<div class='notice notice-error'>Checkout nicht verfügbar: Stripe SDK fehlt auf dem Server.</div>"
+                )
+            elif checkout_reason == "stripe_secret_key_missing":
+                notices.append(
+                    "<div class='notice notice-error'>Checkout nicht verfügbar: Stripe Secret Key fehlt.</div>"
+                )
+            else:
+                notices.append(
+                    "<div class='notice notice-error'>Checkout derzeit nicht verfügbar. Bitte später erneut versuchen.</div>"
+                )
+
+        cancel_state = str(request.query.get("cancel") or "").strip().lower()
+        if cancel_state == "scheduled":
+            notices.append(
+                "<div class='notice notice-ok'>Kündigung zum Laufzeitende wurde in Stripe vorgemerkt.</div>"
+            )
+        elif cancel_state == "missing":
+            notices.append(
+                "<div class='notice notice-warn'>Keine aktive Stripe-Subscription gefunden.</div>"
+            )
+        elif cancel_state == "error":
+            notices.append(
+                "<div class='notice notice-error'>Kündigung konnte nicht ausgeführt werden. Bitte später erneut versuchen.</div>"
+            )
+
+        invoice_state = str(request.query.get("invoice") or "").strip().lower()
+        if invoice_state == "missing_customer":
+            notices.append(
+                "<div class='notice notice-warn'>Keine Stripe-Kundennummer gefunden. Bitte zuerst ein Abo abschließen.</div>"
+            )
+        elif invoice_state == "error":
+            notices.append(
+                "<div class='notice notice-error'>Stripe-Rechnungen konnten gerade nicht geladen werden.</div>"
+            )
+
+        profile_state = str(request.query.get("profile") or "").strip().lower()
+        if profile_state == "saved":
+            notices.append(
+                "<div class='notice notice-ok'>Rechnungsdaten wurden gespeichert.</div>"
+            )
+        elif profile_state == "invalid":
+            notices.append(
+                "<div class='notice notice-warn'>Bitte alle Pflichtfelder für Rechnungen ausfüllen.</div>"
+            )
+        elif profile_state == "error":
+            notices.append(
+                "<div class='notice notice-error'>Rechnungsdaten konnten nicht gespeichert werden.</div>"
+            )
+        if stripe_imported_fields:
+            notices.append(
+                "<div class='notice notice-warn'>Rechnungsdaten wurden aus Stripe vorbefüllt. Bitte prüfen und speichern.</div>"
+            )
+        status_notice_html = (
+            f"<section class='status-notices'>{''.join(notices)}</section>" if notices else ""
+        )
+
+        cycle_switch = []
+        for months in (1, 6, 12):
+            label = _billing_cycle_label(months)
+            css_class = "cycle-btn active" if months == selected_cycle else "cycle-btn"
+            cycle_switch.append(
+                f"<a class='{css_class}' href='/twitch/abbo?cycle={months}'>{html.escape(label)}</a>"
+            )
+        cycle_switch_html = "".join(cycle_switch)
+
+        paid_plans = [
+            plan for plan in list(catalog.get("plans") or []) if _billing_is_paid_plan(plan)
+        ]
+        current_plan = self._billing_current_plan_for_request(request)
+        current_plan_id = str(current_plan.get("plan_id") or "raid_free").strip() or "raid_free"
+        selected_paid_plan = next(
+            (
+                plan
+                for plan in paid_plans
+                if str(plan.get("id") or "").strip() == current_plan_id
+            ),
+            None,
+        )
+        if selected_paid_plan is None:
+            selected_paid_plan = next(
+                (plan for plan in paid_plans if bool(plan.get("recommended"))),
+                paid_plans[0] if paid_plans else None,
+            )
+
+        account_actions: list[str] = []
+        if selected_paid_plan is not None:
+            pay_plan_id = str(selected_paid_plan.get("id") or "").strip()
+            pay_href = (
+                f"/twitch/abbo/bezahlen?plan_id={html.escape(pay_plan_id, quote=True)}"
+                f"&cycle={selected_cycle}&quantity=1"
+            )
+            account_actions.append(
+                f"<a class='action-btn action-primary' href='{pay_href}'>Zu Stripe Checkout</a>"
+            )
+        account_actions.append(
+            "<a class='action-btn action-neutral' href='/twitch/abbo/rechnungen'>Rechnungen herunterladen</a>"
+        )
+        account_actions.append(
+            "<a class='action-btn action-danger' href='/twitch/abbo/kündigen'>Abo kündigen</a>"
+        )
+        if self._is_local_request(request) or self._is_discord_admin_request(request):
+            account_actions.append(
+                "<a class='action-btn action-neutral' href='/twitch/abbo/stripe-settings'>Stripe Settings</a>"
+            )
+        account_actions_html = "".join(account_actions)
+
+        form_customer_reference = html.escape(
+            str(billing_profile.get("customer_reference") or ""),
+            quote=True,
+        )
+        billing_profile_form_html = (
+            "<form method='post' action='/twitch/abbo/rechnungsdaten'>"
+            f"<input type='hidden' name='cycle' value='{selected_cycle}'>"
+            f"<input type='hidden' name='customer_reference' value='{form_customer_reference}'>"
+            f"<input type='hidden' name='csrf_token' value='{html.escape(csrf_token, quote=True)}'>"
+            "<div class='profile-form'>"
+            "<div class='profile-field profile-wide'><label for='recipient_name'>Rechnung an (Name)</label>"
+            f"<input id='recipient_name' name='recipient_name' required value='{html.escape(str(billing_profile.get('recipient_name') or ''), quote=True)}'></div>"
+            "<div class='profile-field'><label for='recipient_email'>E-Mail</label>"
+            f"<input id='recipient_email' name='recipient_email' type='email' required value='{html.escape(str(billing_profile.get('recipient_email') or ''), quote=True)}'></div>"
+            "<div class='profile-field'><label for='company_name'>Firma (optional)</label>"
+            f"<input id='company_name' name='company_name' value='{html.escape(str(billing_profile.get('company_name') or ''), quote=True)}'></div>"
+            "<div class='profile-field profile-wide'><label for='street_line1'>Strasse + Hausnummer</label>"
+            f"<input id='street_line1' name='street_line1' required value='{html.escape(str(billing_profile.get('street_line1') or ''), quote=True)}'></div>"
+            "<div class='profile-field'><label for='postal_code'>PLZ</label>"
+            f"<input id='postal_code' name='postal_code' required value='{html.escape(str(billing_profile.get('postal_code') or ''), quote=True)}'></div>"
+            "<div class='profile-field'><label for='city'>Stadt</label>"
+            f"<input id='city' name='city' required value='{html.escape(str(billing_profile.get('city') or ''), quote=True)}'></div>"
+            "<div class='profile-field'><label for='country_code'>Land (ISO, z.B. DE)</label>"
+            f"<input id='country_code' name='country_code' required maxlength='2' value='{html.escape(str(billing_profile.get('country_code') or 'DE'), quote=True)}'></div>"
+            "<div class='profile-field'><label for='vat_id'>USt-IdNr (optional)</label>"
+            f"<input id='vat_id' name='vat_id' value='{html.escape(str(billing_profile.get('vat_id') or ''), quote=True)}'></div>"
+            "</div>"
+            "<div class='profile-actions'>"
+            "<button class='profile-save-btn' type='submit'>Rechnungsdaten speichern</button>"
+            "<span class='profile-help'>Pflichtfelder sind Name, E-Mail und Adresse.</span>"
+            "</div>"
+            "</form>"
+        )
+
+        plan_cards: list[str] = []
+        for plan in catalog.get("plans", []):
+            price = dict(plan.get("price") or {})
+            discount_percent = int(price.get("discount_percent") or 0)
+            plan_id = str(plan.get("id") or "").strip()
+            is_current = bool(plan_id and plan_id == current_plan_id)
+            badge = html.escape(str(plan.get("badge") or "").replace("_", " ").title())
+            current_badge = "<span class='pill pill-active'>Aktiv</span>" if is_current else ""
+            recommendation = (
+                "<span class='pill pill-rec'>Empfohlen</span>"
+                if bool(plan.get("recommended"))
+                else ""
+            )
+            discount_html = (
+                f"<p class='discount'>Rabatt im Zyklus: {discount_percent}%</p>"
+                if discount_percent > 0
+                else ""
+            )
+            feature_items = "".join(
+                f"<li>{html.escape(str(feature))}</li>" for feature in list(plan.get("features") or [])
+            )
+            is_paid_plan = int(plan.get("monthly_net_cents") or 0) > 0
+            pay_href = (
+                f"/twitch/abbo/bezahlen?plan_id={html.escape(plan_id, quote=True)}"
+                f"&cycle={selected_cycle}&quantity=1"
+            )
+            if is_paid_plan:
+                action_html = f"<a class='btn-plan' href='{pay_href}'>Bezahlen</a>"
+            elif is_current:
+                action_html = "<span class='pill pill-active'>Kostenlos aktiv</span>"
+            else:
+                action_html = "<span class='pill pill-active'>Kostenlos</span>"
+            plan_badge_slug = html.escape(str(plan.get("badge") or "default").lower())
+            card_class = (
+                f"plan-card plan-{plan_badge_slug}"
+                + (" recommended" if bool(plan.get("recommended")) else "")
+                + (" current" if is_current else "")
+            )
+            plan_cards.append(
+                f"<article class='{card_class}'>"
+                "<div class='plan-head'>"
+                f"<span class='pill'>{badge}</span>"
+                f"{current_badge}"
+                f"{recommendation}"
+                "</div>"
+                f"<h2>{html.escape(str(plan.get('name') or 'Plan'))}</h2>"
+                f"<p class='plan-desc'>{html.escape(str(plan.get('description') or ''))}</p>"
+                "<div class='price-box'>"
+                f"<div class='price'>{html.escape(str(price.get('total_net_label') or '0,00 EUR'))} netto</div>"
+                f"<div class='price-sub'>Effektiv/Monat: {html.escape(str(price.get('effective_monthly_net_label') or '0,00 EUR'))}</div>"
+                "</div>"
+                f"{discount_html}"
+                f"<ul>{feature_items}</ul>"
+                "<div class='plan-actions'>"
+                f"{action_html}"
+                "</div>"
+                "</article>"
+            )
+        plans_html = "".join(plan_cards)
+
+        page_html = render_abbo_page(
+            logout_url=logout_url,
+            cycle_switch_html=cycle_switch_html,
+            account_actions_html=account_actions_html,
+            billing_profile_form_html=billing_profile_form_html,
+            status_notice_html=status_notice_html,
+            plans_html=plans_html,
+            csrf_token=csrf_token,
+        )
+        return web.Response(text=page_html, content_type="text/html")
+
+    async def abbo_pay(self, request: web.Request) -> web.StreamResponse:
+        """Create Stripe Checkout session from plan page and redirect to payment."""
+        if not self._check_v2_auth(request):
+            login_url = (
+                TWITCH_ABBO_DISCORD_LOGIN_URL
+                if self._should_use_discord_admin_login(request)
+                else TWITCH_ABBO_LOGIN_URL
+            )
+            raise web.HTTPFound(login_url)
+
+        plan_id = str(request.query.get("plan_id") or "").strip()
+        if not plan_id:
+            raise web.HTTPFound("/twitch/abbo")
+
+        cycle_months = _normalize_billing_cycle(request.query.get("cycle"))
+        catalog = _build_billing_catalog(cycle_months)
+        selected_plan = next(
+            (plan for plan in catalog.get("plans") or [] if str(plan.get("id") or "") == plan_id),
+            None,
+        )
+        if selected_plan is None:
+            raise web.HTTPFound("/twitch/abbo")
+
+        try:
+            quantity = int(request.query.get("quantity") or "1")
+        except (TypeError, ValueError):
+            quantity = 1
+        quantity = min(max(quantity, 1), 24)
+
+        unit_net_cents = int((selected_plan.get("price") or {}).get("total_net_cents") or 0)
+        if unit_net_cents <= 0:
+            raise web.HTTPFound("/twitch/abbo")
+
+        readiness = self._billing_stripe_readiness_payload()
+        if not (bool(readiness.get("checkout_ready")) and bool(readiness.get("price_map_ready"))):
+            raise web.HTTPFound("/twitch/abbo")
+
+        stripe_price_id = self._billing_price_id_for_plan(plan_id, cycle_months)
+        if not stripe_price_id:
+            raise web.HTTPFound("/twitch/abbo")
+
+        stripe_secret_key = str(getattr(self, "_billing_stripe_secret_key", "") or "").strip()
+        if not stripe_secret_key:
+            log.warning("billing checkout unavailable: stripe secret key missing")
+            raise web.HTTPFound(
+                "/twitch/abbo?checkout=unavailable&reason=stripe_secret_key_missing"
+            )
+
+        scheme = "https" if self._is_secure_request(request) else "http"
+        host = str(request.headers.get("Host") or request.host or "twitch.earlysalty.com").strip()
+        base_url = f"{scheme}://{host}".rstrip("/")
+        fallback_success_url = (
+            f"{base_url}/twitch/abbo?checkout=success&session_id={{CHECKOUT_SESSION_ID}}"
+        )
+        fallback_cancel_url = f"{base_url}/twitch/abbo?checkout=cancelled"
+        success_url = (
+            str(getattr(self, "_billing_checkout_success_url", "") or "").strip()
+            or fallback_success_url
+        )
+        cancel_url = (
+            str(getattr(self, "_billing_checkout_cancel_url", "") or "").strip()
+            or fallback_cancel_url
+        )
+
+        session = self._get_dashboard_auth_session(request) or {}
+        billing_profile = self._billing_profile_for_request(request)
+        customer_reference = str(
+            session.get("twitch_login") or session.get("twitch_user_id") or ""
+        ).strip()
+        customer_email = str(billing_profile.get("recipient_email") or "").strip()
+        metadata: dict[str, str] = {
+            "plan_id": plan_id,
+            "cycle_months": str(cycle_months),
+            "quantity": str(quantity),
+            "source": "abbo_page_pay_link",
+        }
+        if customer_reference:
+            metadata["customer_reference"] = customer_reference
+
+        session_payload: dict[str, Any] = {
+            "mode": "subscription",
+            "success_url": success_url,
+            "cancel_url": cancel_url,
+            "line_items": [{"price": stripe_price_id, "quantity": quantity}],
+            "billing_address_collection": "required",
+            "tax_id_collection": {"enabled": True},
+            "metadata": metadata,
+        }
+        if customer_reference:
+            session_payload["client_reference_id"] = customer_reference
+        if customer_email:
+            session_payload["customer_email"] = customer_email
+
+        stripe_session, checkout_error = self._billing_create_checkout_session_best_effort(
+            session_payload=session_payload
+        )
+        if stripe_session is None:
+            log.warning("billing checkout redirect failed: %s", str(checkout_error or "unknown"))
+            raise web.HTTPFound("/twitch/abbo?checkout=unavailable&reason=checkout_create_failed")
+
+        checkout_url = str(self._billing_stripe_obj_get(stripe_session, "url", "") or "").strip()
+        if not checkout_url:
+            raise web.HTTPFound("/twitch/abbo?checkout=unavailable&reason=checkout_missing_url")
+        raise web.HTTPFound(checkout_url)
+
+    async def abbo_profile_save(self, request: web.Request) -> web.StreamResponse:
+        """Persist invoice recipient profile data for the current account."""
+        if not self._check_v2_auth(request):
+            login_url = (
+                TWITCH_ABBO_DISCORD_LOGIN_URL
+                if self._should_use_discord_admin_login(request)
+                else TWITCH_ABBO_LOGIN_URL
+            )
+            raise web.HTTPFound(login_url)
+
+        data = await request.post()
+
+        # Verify CSRF token
+        csrf_token = str(data.get("csrf_token") or "").strip()
+        if not self._csrf_verify_token(request, csrf_token):
+            return web.json_response({"error": "csrf_token_invalid"}, status=403)
+        cycle = _normalize_billing_cycle(data.get("cycle"))
+        session = self._get_dashboard_auth_session(request) or {}
+        customer_reference = str(
+            data.get("customer_reference")
+            or session.get("twitch_login")
+            or session.get("twitch_user_id")
+            or ""
+        ).strip()
+        recipient_name = str(data.get("recipient_name") or "").strip()[:180]
+        recipient_email = str(data.get("recipient_email") or "").strip()[:180]
+        company_name = str(data.get("company_name") or "").strip()[:200]
+        street_line1 = str(data.get("street_line1") or "").strip()[:200]
+        postal_code = str(data.get("postal_code") or "").strip()[:32]
+        city = str(data.get("city") or "").strip()[:120]
+        country_code = str(data.get("country_code") or "DE").strip().upper()[:2]
+        vat_id = str(data.get("vat_id") or "").strip()[:60]
+
+        if not (
+            customer_reference
+            and recipient_name
+            and recipient_email
+            and street_line1
+            and postal_code
+            and city
+            and country_code
+        ):
+            raise web.HTTPFound(f"/twitch/abbo?cycle={cycle}&profile=invalid")
+
+        try:
+            with storage.get_conn() as conn:
+                self._billing_ensure_storage_tables(conn)
+                self._billing_upsert_profile(
+                    conn,
+                    customer_reference=customer_reference,
+                    recipient_name=recipient_name,
+                    recipient_email=recipient_email,
+                    company_name=company_name,
+                    street_line1=street_line1,
+                    postal_code=postal_code,
+                    city=city,
+                    country_code=country_code,
+                    vat_id=vat_id,
+                )
+        except Exception:
+            log.exception("billing profile save failed")
+            raise web.HTTPFound(f"/twitch/abbo?cycle={cycle}&profile=error") from None
+
+        raise web.HTTPFound(f"/twitch/abbo?cycle={cycle}&profile=saved")
+
+    async def abbo_cancel(self, request: web.Request) -> web.StreamResponse:
+        """Start cancellation via Stripe customer portal, fallback to cancel-at-period-end."""
+        if not self._check_v2_auth(request):
+            login_url = (
+                TWITCH_ABBO_DISCORD_LOGIN_URL
+                if self._should_use_discord_admin_login(request)
+                else TWITCH_ABBO_LOGIN_URL
+            )
+            raise web.HTTPFound(login_url)
+
+        customer_record = self._billing_customer_record_for_request(request)
+        stripe_customer_id = str(customer_record.get("stripe_customer_id") or "").strip()
+        stripe_subscription_id = str(customer_record.get("stripe_subscription_id") or "").strip()
+        if not stripe_customer_id and not stripe_subscription_id:
+            raise web.HTTPFound("/twitch/abbo?cancel=missing")
+
+        stripe, _import_error = self._billing_import_stripe()
+        if stripe is None:
+            raise web.HTTPFound("/twitch/abbo?cancel=error")
+        stripe_secret_key = str(getattr(self, "_billing_stripe_secret_key", "") or "").strip()
+        if not stripe_secret_key:
+            raise web.HTTPFound("/twitch/abbo?cancel=error")
+        stripe.api_key = stripe_secret_key
+
+        scheme = "https" if self._is_secure_request(request) else "http"
+        host = str(request.headers.get("Host") or request.host or "twitch.earlysalty.com").strip()
+        base_url = f"{scheme}://{host}".rstrip("/")
+        portal_url = ""
+        if stripe_customer_id:
+            try:
+                portal_session = stripe.billing_portal.Session.create(
+                    customer=stripe_customer_id,
+                    return_url=f"{base_url}/twitch/abbo?cancel=returned",
+                )
+                portal_url = str(self._billing_stripe_obj_get(portal_session, "url", "") or "").strip()
+            except Exception:
+                log.debug("billing portal unavailable; trying direct cancel fallback", exc_info=True)
+        if portal_url:
+            raise web.HTTPFound(portal_url)
+
+        if not stripe_subscription_id:
+            raise web.HTTPFound("/twitch/abbo?cancel=missing")
+
+        try:
+            subscription_obj = stripe.Subscription.modify(
+                stripe_subscription_id,
+                cancel_at_period_end=True,
+                proration_behavior="none",
+            )
+            with storage.get_conn() as conn:
+                self._billing_ensure_storage_tables(conn)
+                payload = self._billing_subscription_payload_from_object(subscription_obj)
+                if payload:
+                    self._billing_upsert_subscription_state(conn, **payload)
+        except Exception:
+            log.exception("billing cancel fallback failed")
+            raise web.HTTPFound("/twitch/abbo?cancel=error") from None
+        raise web.HTTPFound("/twitch/abbo?cancel=scheduled")
+
+    async def abbo_invoices(self, request: web.Request) -> web.StreamResponse:
+        """Render downloadable Stripe invoices for the logged-in customer."""
+        if not self._check_v2_auth(request):
+            login_url = (
+                TWITCH_ABBO_DISCORD_LOGIN_URL
+                if self._should_use_discord_admin_login(request)
+                else TWITCH_ABBO_LOGIN_URL
+            )
+            raise web.HTTPFound(login_url)
+
+        customer_record = self._billing_customer_record_for_request(request)
+        stripe_customer_id = str(customer_record.get("stripe_customer_id") or "").strip()
+        if not stripe_customer_id:
+            raise web.HTTPFound("/twitch/abbo?invoice=missing_customer")
+
+        stripe, _import_error = self._billing_import_stripe()
+        if stripe is None:
+            raise web.HTTPFound("/twitch/abbo?invoice=error")
+        stripe_secret_key = str(getattr(self, "_billing_stripe_secret_key", "") or "").strip()
+        if not stripe_secret_key:
+            raise web.HTTPFound("/twitch/abbo?invoice=error")
+        stripe.api_key = stripe_secret_key
+
+        try:
+            invoice_list = stripe.Invoice.list(customer=stripe_customer_id, limit=24)
+            invoice_rows = list(self._billing_stripe_obj_get(invoice_list, "data", []) or [])
+        except Exception:
+            log.exception("billing invoice list failed")
+            raise web.HTTPFound("/twitch/abbo?invoice=error") from None
+
+        table_rows: list[str] = []
+        for invoice_obj in invoice_rows:
+            invoice_id = str(self._billing_stripe_obj_get(invoice_obj, "id", "") or "").strip()
+            invoice_number = str(
+                self._billing_stripe_obj_get(invoice_obj, "number", "")
+                or self._billing_stripe_obj_get(invoice_obj, "id", "")
+                or ""
+            ).strip()
+            status = str(self._billing_stripe_obj_get(invoice_obj, "status", "open") or "open").strip()
+            hosted_url = str(
+                self._billing_stripe_obj_get(invoice_obj, "hosted_invoice_url", "") or ""
+            ).strip()
+            pdf_url = str(self._billing_stripe_obj_get(invoice_obj, "invoice_pdf", "") or "").strip()
+            currency = str(self._billing_stripe_obj_get(invoice_obj, "currency", "eur") or "eur").upper()
+            total_cents = int(self._billing_stripe_obj_get(invoice_obj, "total", 0) or 0)
+            created_epoch = int(self._billing_stripe_obj_get(invoice_obj, "created", 0) or 0)
+            created_date = (
+                datetime.fromtimestamp(created_epoch, tz=UTC).date().isoformat()
+                if created_epoch > 0
+                else "-"
+            )
+            total_label = f"{total_cents / 100:.2f} {currency}"
+            pdf_html = (
+                f"<a href='{html.escape(pdf_url, quote=True)}' target='_blank' rel='noopener noreferrer'>PDF</a>"
+                if pdf_url
+                else "<span class='muted'>-</span>"
+            )
+            hosted_html = (
+                f"<a href='{html.escape(hosted_url, quote=True)}' target='_blank' rel='noopener noreferrer'>Stripe</a>"
+                if hosted_url
+                else "<span class='muted'>-</span>"
+            )
+            table_rows.append(
+                "<tr>"
+                f"<td>{html.escape(invoice_number or invoice_id or '-')}</td>"
+                f"<td>{html.escape(created_date)}</td>"
+                f"<td>{html.escape(status)}</td>"
+                f"<td>{html.escape(total_label)}</td>"
+                f"<td>{hosted_html}</td>"
+                f"<td>{pdf_html}</td>"
+                "</tr>"
+            )
+
+        if not table_rows:
+            table_rows.append(
+                "<tr><td colspan='6' class='muted'>Noch keine Stripe-Rechnungen vorhanden.</td></tr>"
+            )
+
+        logout_url = (
+            "/twitch/auth/discord/logout"
+            if self._is_discord_admin_request(request)
+            else "/twitch/auth/logout"
+        )
+        page_html = (
+            "<!doctype html><html lang='de'><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<title>Stripe Rechnungen</title>"
+            "<style>"
+            "body{margin:0;background:#0f172a;color:#e2e8f0;font-family:Segoe UI,Arial,sans-serif;}"
+            ".wrap{max-width:1040px;margin:0 auto;padding:30px 18px 40px;}"
+            ".top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;}"
+            "h1{margin:0;font-size:1.7rem;}"
+            ".muted{color:#94a3b8;font-size:13px;}"
+            ".card{margin-top:16px;background:#111827;border:1px solid #1f2937;border-radius:14px;padding:16px;}"
+            "table{width:100%;border-collapse:collapse;}"
+            "th,td{padding:11px 10px;border-bottom:1px solid #1f2937;text-align:left;font-size:13px;}"
+            "th{color:#94a3b8;font-size:12px;text-transform:uppercase;letter-spacing:.03em;}"
+            "a{color:#93c5fd;text-decoration:none;}a:hover{text-decoration:underline;}"
+            ".actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;}"
+            ".btn{display:inline-block;padding:9px 13px;border-radius:10px;text-decoration:none;font-weight:700;font-size:13px;}"
+            ".btn-primary{background:#2563eb;color:#eff6ff;}"
+            ".btn-ghost{background:#0b1220;color:#e2e8f0;border:1px solid #334155;}"
+            "</style></head><body><main class='wrap'>"
+            "<div class='top'>"
+            "<div><h1>Stripe Rechnungen</h1>"
+            "<p class='muted'>Direkte Download-Links aus Stripe für deinen Account.</p></div>"
+            f"<a class='muted' href='{logout_url}'>Logout</a>"
+            "</div>"
+            "<section class='card'>"
+            "<table><thead><tr>"
+            "<th>Rechnung</th><th>Datum</th><th>Status</th><th>Betrag</th><th>Hosted</th><th>Download</th>"
+            "</tr></thead><tbody>"
+            f"{''.join(table_rows)}"
+            "</tbody></table>"
+            "<div class='actions'>"
+            "<a class='btn btn-primary' href='/twitch/abbo'>Zur Abo Übersicht</a>"
+            "<a class='btn btn-ghost' href='/twitch/abbo/kündigen'>Abo kündigen</a>"
+            "</div>"
+            "</section>"
+            "</main></body></html>"
+        )
+        return web.Response(text=page_html, content_type="text/html")
+
+    async def abbo_stripe_settings(self, request: web.Request) -> web.StreamResponse:
+        """Internal Stripe readiness page for billing setup."""
+        if not self._check_v2_auth(request):
+            login_url = (
+                TWITCH_ABBO_DISCORD_LOGIN_URL
+                if self._should_use_discord_admin_login(request)
+                else TWITCH_ABBO_LOGIN_URL
+            )
+            raise web.HTTPFound(login_url)
+        admin_token = request.headers.get("X-Admin-Token") or request.query.get("token")
+        if not (
+            self._is_local_request(request)
+            or self._is_discord_admin_request(request)
+            or self._check_admin_token(admin_token)
+        ):
+            raise web.HTTPFound("/twitch/abbo")
+
+        readiness = self._billing_stripe_readiness_payload()
+        checks = list(readiness.get("checks") or [])
+        missing_count = len([check for check in checks if not bool(check.get("ready"))])
+        logout_url = (
+            "/twitch/auth/discord/logout"
+            if self._is_discord_admin_request(request)
+            else "/twitch/auth/logout"
+        )
+
+        if bool(readiness.get("ready_for_live")):
+            summary_title = "Live-ready"
+            summary_class = "status-live"
+            summary_text = "Checkout, Product/Price IDs und Webhook sind für Livebetrieb vorbereitet."
+        elif bool(readiness.get("checkout_ready")) and bool(readiness.get("price_map_ready")):
+            summary_title = "Fast bereit"
+            summary_class = "status-partial"
+            summary_text = "Checkout und Product/Price IDs sind bereit, Webhook fehlt noch."
+        elif bool(readiness.get("checkout_ready")):
+            summary_title = "Teilweise bereit"
+            summary_class = "status-partial"
+            summary_text = "Checkout ist bereit, aber Product/Price IDs oder Webhook fehlen."
+        else:
+            summary_title = "Nicht bereit"
+            summary_class = "status-missing"
+            summary_text = "Checkout kann so noch nicht live geschaltet werden."
+
+        rows_html: list[str] = []
+        for check in checks:
+            ready = bool(check.get("ready"))
+            status_label = "OK" if ready else "FEHLT"
+            row_class = "ok" if ready else "missing"
+            env_keys = ", ".join(str(value) for value in list(check.get("env_keys") or []))
+            preview = str(check.get("value_preview") or "").strip() or "nicht gesetzt"
+            rows_html.append(
+                "<tr>"
+                f"<td>{html.escape(str(check.get('label') or ''))}</td>"
+                f"<td><code>{html.escape(env_keys)}</code></td>"
+                f"<td>{html.escape(preview)}</td>"
+                f"<td class='{row_class}'>{status_label}</td>"
+                "</tr>"
+            )
+
+        missing_list_html = (
+            "<ul>"
+            + "".join(
+                f"<li>{html.escape(str(check.get('label') or str(check.get('id') or '')))}</li>"
+                for check in checks
+                if not bool(check.get("ready"))
+            )
+            + "</ul>"
+            if missing_count > 0
+            else "<p class='ok-note'>Keine fehlenden Keys/URLs.</p>"
+        )
+
+        page_html = (
+            "<!doctype html><html lang='de'><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<title>Stripe Settings</title>"
+            "<style>"
+            "body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Segoe UI,Arial,sans-serif;}"
+            ".wrap{max-width:1040px;margin:0 auto;padding:28px 18px 36px;}"
+            ".top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;}"
+            "h1{margin:0;font-size:1.7rem;}"
+            "a{color:#93c5fd;text-decoration:none;}"
+            ".panel{margin-top:14px;background:#111a2c;border:1px solid #22314d;border-radius:14px;padding:16px;}"
+            ".summary{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;}"
+            ".badge{display:inline-block;padding:6px 10px;border-radius:999px;font-weight:700;font-size:12px;}"
+            ".status-live{background:#064e3b;color:#a7f3d0;}"
+            ".status-partial{background:#78350f;color:#fde68a;}"
+            ".status-missing{background:#7f1d1d;color:#fecaca;}"
+            ".muted{color:#93a4bd;font-size:14px;}"
+            ".missing ul{margin:8px 0 0 18px;padding:0;color:#fecaca;}"
+            ".ok-note{color:#86efac;margin:8px 0 0;}"
+            "table{width:100%;border-collapse:collapse;margin-top:10px;}"
+            "th,td{padding:10px;border-bottom:1px solid #24324a;text-align:left;vertical-align:top;}"
+            "th{font-size:12px;color:#9fb0c8;text-transform:uppercase;letter-spacing:.02em;}"
+            "td code{font-size:12px;color:#cbd5e1;word-break:break-word;}"
+            "td.ok{color:#86efac;font-weight:700;}"
+            "td.missing{color:#fca5a5;font-weight:700;}"
+            ".actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;}"
+            ".btn{display:inline-block;padding:9px 13px;border-radius:10px;font-weight:600;text-decoration:none;}"
+            ".btn-primary{background:#2563eb;color:#fff;}"
+            ".btn-ghost{background:#0b1220;color:#cbd5e1;border:1px solid #334155;}"
+            "</style></head><body><main class='wrap'>"
+            "<div class='top'>"
+            "<h1>Stripe Settings</h1>"
+            f"<a href='{logout_url}'>Logout</a>"
+            "</div>"
+            "<p class='muted'>Readiness für Stripe Billing (Windows-Tresor first, kein Secret-Leakage).</p>"
+            "<section class='panel summary'>"
+            "<div>"
+            f"<span class='badge {summary_class}'>{summary_title}</span>"
+            f"<p class='muted' style='margin:8px 0 0;'>{html.escape(summary_text)}</p>"
+            "</div>"
+            "<div class='actions'>"
+            "<a class='btn btn-primary' href='/twitch/abbo'>Zur Abo Übersicht</a>"
+            "<a class='btn btn-ghost' href='https://docs.stripe.com/billing/quickstart' target='_blank' rel='noopener noreferrer'>Stripe Quickstart</a>"
+            "</div>"
+            "</section>"
+            "<section class='panel missing'>"
+            f"<h2 style='margin:0;font-size:1.05rem;'>Fehlende Keys/URLs: {missing_count}</h2>"
+            f"{missing_list_html}"
+            "</section>"
+            "<section class='panel'>"
+            "<h2 style='margin:0 0 4px;font-size:1.05rem;'>Konfiguration</h2>"
+            "<table>"
+            "<thead><tr><th>Check</th><th>Env Keys</th><th>Aktueller Wert</th><th>Status</th></tr></thead>"
+            f"<tbody>{''.join(rows_html)}</tbody>"
+            "</table>"
+            "</section>"
+            "</main></body></html>"
+        )
+        return web.Response(text=page_html, content_type="text/html")
+
+    async def api_billing_catalog(self, request: web.Request) -> web.Response:
+        """Expose prepared subscription plans and cycle pricing for dashboard UI."""
+        if not self._check_v2_auth(request):
+            return web.json_response({"error": "auth_required"}, status=401)
+
+        cycle_raw = (request.query.get("cycle") or "1").strip()
+        payload = _build_billing_catalog(cycle_raw)
+        readiness = self._billing_stripe_readiness_payload()
+        cycle = int(payload.get("cycle_months") or 1)
+        price_map = self._billing_price_id_map()
+        current_plan = self._billing_current_plan_for_request(request)
+        current_plan_id = str(current_plan.get("plan_id") or "raid_free").strip() or "raid_free"
+        for plan in list(payload.get("plans") or []):
+            plan_id = str(plan.get("id") or "").strip()
+            plan["is_current"] = bool(plan_id and plan_id == current_plan_id)
+            if not _billing_is_paid_plan(plan):
+                plan["checkout_available"] = False
+                plan["stripe_price_id"] = None
+                continue
+            price_id = self._billing_price_id_for_plan(plan_id, cycle, price_map=price_map)
+            plan["stripe_price_id"] = price_id or None
+            plan["checkout_available"] = bool(price_id and readiness.get("checkout_ready"))
+
+        payment = dict(payload.get("payment") or {})
+        payment["integration_state"] = str(readiness.get("integration_state") or "planned")
+        payment["checkout_enabled"] = bool(
+            readiness.get("checkout_ready") and readiness.get("price_map_ready")
+        )
+        payment["invoice_preview_path"] = "/twitch/api/billing/invoice-preview"
+        payment["invoice_page_path"] = "/twitch/abbo/rechnung"
+        payment["stripe_sync_path"] = "/twitch/api/billing/stripe/sync-products"
+        payload["payment"] = payment
+        payload["current_subscription"] = current_plan
+        return web.json_response(payload, dumps=lambda data: json.dumps(data, ensure_ascii=True))
+
+    async def api_billing_readiness(self, request: web.Request) -> web.Response:
+        """Expose Stripe setup readiness without leaking any secrets."""
+        if not self._check_v2_auth(request):
+            return web.json_response({"error": "auth_required"}, status=401)
+
+        payload = self._billing_stripe_readiness_payload()
+        return web.json_response(payload, dumps=lambda data: json.dumps(data, ensure_ascii=True))
+
+    async def api_billing_stripe_webhook(self, request: web.Request) -> web.Response:
+        """Receive and verify Stripe webhook events for subscription lifecycle updates."""
+        self._billing_refresh_runtime_secrets()
+        webhook_secret = str(getattr(self, "_billing_stripe_webhook_secret", "") or "").strip()
+        if not webhook_secret:
+            return web.json_response(
+                {"error": "stripe_webhook_secret_missing"},
+                status=503,
+            )
+
+        stripe, import_error = self._billing_import_stripe()
+        if stripe is None:
+            return web.json_response(
+                {"error": "stripe_sdk_missing", "details": import_error or "stripe import failed"},
+                status=503,
+            )
+
+        payload_bytes = await request.read()
+        signature = str(request.headers.get("Stripe-Signature") or "").strip()
+        if not signature:
+            return web.json_response({"error": "stripe_signature_missing"}, status=400)
+
+        try:
+            event = stripe.Webhook.construct_event(
+                payload=payload_bytes,
+                sig_header=signature,
+                secret=webhook_secret,
+            )
+        except Exception:
+            return web.json_response({"error": "invalid_stripe_signature"}, status=400)
+
+        event_id = str(self._billing_stripe_obj_get(event, "id", "") or "").strip()
+        event_type = str(self._billing_stripe_obj_get(event, "type", "") or "").strip()
+        event_data = self._billing_stripe_obj_get(event, "data", {}) or {}
+        event_object = self._billing_stripe_obj_get(event_data, "object", {}) or {}
+        object_id = str(self._billing_stripe_obj_get(event_object, "id", "") or "").strip()
+        livemode = bool(self._billing_stripe_obj_get(event, "livemode", False))
+        payload_text = payload_bytes.decode("utf-8", errors="replace")
+        received_at = datetime.now(UTC).isoformat()
+
+        duplicate = False
+        action = "ignored"
+        try:
+            with storage.get_conn() as conn:
+                self._billing_ensure_storage_tables(conn)
+                if event_id:
+                    existing = conn.execute(
+                        "SELECT stripe_event_id FROM twitch_billing_events WHERE stripe_event_id = ?",
+                        (event_id,),
+                    ).fetchone()
+                    duplicate = bool(existing)
+
+                if not duplicate and event_id:
+                    conn.execute(
+                        """
+                        INSERT INTO twitch_billing_events (
+                            stripe_event_id,
+                            event_type,
+                            object_id,
+                            received_at,
+                            livemode,
+                            payload
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            event_id,
+                            event_type,
+                            object_id,
+                            received_at,
+                            1 if livemode else 0,
+                            payload_text,
+                        ),
+                    )
+
+                if not duplicate:
+                    action = self._billing_apply_webhook_event(
+                        conn,
+                        stripe=stripe,
+                        event_id=event_id,
+                        event_type=event_type,
+                        event_object=event_object,
+                    )
+        except Exception:
+            log.exception("stripe webhook processing failed")
+            return web.json_response({"error": "stripe_webhook_processing_failed"}, status=500)
+
+        return web.json_response(
+            {
+                "ok": True,
+                "status": "duplicate" if duplicate else "processed",
+                "event_id": event_id,
+                "event_type": event_type,
+                "action": action,
+            },
+            dumps=lambda data: json.dumps(data, ensure_ascii=True),
+        )
+
+    async def api_billing_checkout_preview(self, request: web.Request) -> web.Response:
+        """Validate plan selection and return Stripe-ready checkout metadata (without live checkout)."""
+        if not self._check_v2_auth(request):
+            return web.json_response({"error": "auth_required"}, status=401)
+
+        body = await self._billing_read_request_body(request)
+        selected_plan_id = str(body.get("plan_id") or "").strip()
+        catalog = _build_billing_catalog(body.get("cycle_months"))
+        selected_plan = next(
+            (plan for plan in catalog["plans"] if str(plan.get("id")) == selected_plan_id),
+            None,
+        )
+        if not selected_plan:
+            return web.json_response(
+                {
+                    "error": "unknown_plan_id",
+                    "available_plan_ids": [str(plan.get("id")) for plan in catalog["plans"]],
+                },
+                status=404,
+            )
+
+        total_cents = int((selected_plan.get("price") or {}).get("total_net_cents") or 0)
+        readiness = self._billing_stripe_readiness_payload()
+        cycle = int(catalog.get("cycle_months") or 1)
+        price_id = self._billing_price_id_for_plan(selected_plan_id, cycle)
+        checkout_possible = bool(
+            total_cents > 0
+            and readiness.get("checkout_ready")
+            and readiness.get("price_map_ready")
+            and price_id
+        )
+        if total_cents <= 0:
+            message = "Dieser Plan bleibt kostenlos und benoetigt keinen Stripe-Checkout."
+        elif checkout_possible:
+            message = "Stripe Checkout ist bereit und kann direkt gestartet werden."
+        elif readiness.get("checkout_ready") and not price_id:
+            message = "Checkout Keys sind gesetzt, aber für diesen Plan fehlt noch eine Stripe Price ID."
+        else:
+            message = "Stripe Checkout ist noch nicht vollstaendig konfiguriert."
+        payload = {
+            "ready": bool(total_cents <= 0 or checkout_possible),
+            "provider": "stripe",
+            "integration_state": str(readiness.get("integration_state") or "planned"),
+            "currency": catalog["currency"],
+            "tax_mode": catalog["tax_mode"],
+            "gross_available": catalog["gross_available"],
+            "cycle_months": catalog["cycle_months"],
+            "cycle_label": catalog["cycle_label"],
+            "plan": selected_plan,
+            "stripe_price_id": price_id or None,
+            "checkout_session_path": "/twitch/api/billing/checkout-session",
+            "invoice_preview_path": "/twitch/api/billing/invoice-preview",
+            "invoice_page_path": "/twitch/abbo/rechnung",
+            "message": message,
+            "stripe_docs_url": _BILLING_STRIPE_QUICKSTART_URL,
+            "next_steps": [
+                "stripe_product_price_ids_hinterlegen",
+                "checkout_session_endpoint_live_testen",
+                "webhook_verarbeitung_fuer_abos_aktivieren",
+            ],
+        }
+        return web.json_response(payload, dumps=lambda data: json.dumps(data, ensure_ascii=True))
+
+    async def api_billing_checkout_session(self, request: web.Request) -> web.Response:
+        """Create a live Stripe Checkout Session for a paid billing plan."""
+        if not self._check_v2_auth(request):
+            return web.json_response({"error": "auth_required"}, status=401)
+
+        body = await self._billing_read_request_body(request)
+        selected_plan_id = str(body.get("plan_id") or "").strip()
+        if not selected_plan_id:
+            return web.json_response(
+                {
+                    "error": "plan_id_required",
+                    "contract_version": "2026-02-27",
+                    "required_fields": ["plan_id"],
+                },
+                status=400,
+            )
+
+        catalog = _build_billing_catalog(body.get("cycle_months"))
+        selected_plan = next(
+            (plan for plan in catalog["plans"] if str(plan.get("id")) == selected_plan_id),
+            None,
+        )
+        if not selected_plan:
+            return web.json_response(
+                {
+                    "error": "unknown_plan_id",
+                    "contract_version": "2026-02-27",
+                    "available_plan_ids": [str(plan.get("id")) for plan in catalog["plans"]],
+                },
+                status=404,
+            )
+
+        quantity_raw = body.get("quantity", 1)
+        try:
+            quantity = int(quantity_raw or 1)
+        except (TypeError, ValueError):
+            quantity = -1
+        if quantity < 1 or quantity > 24:
+            return web.json_response(
+                {
+                    "error": "invalid_quantity",
+                    "contract_version": "2026-02-27",
+                    "allowed_range": [1, 24],
+                },
+                status=400,
+            )
+
+        unit_net_cents = int((selected_plan.get("price") or {}).get("total_net_cents") or 0)
+        if unit_net_cents <= 0:
+            return web.json_response(
+                {
+                    "error": "free_plan_no_checkout_required",
+                    "contract_version": "2026-02-27",
+                    "plan_id": selected_plan_id,
+                },
+                status=400,
+            )
+
+        default_success_url = str(getattr(self, "_billing_checkout_success_url", "") or "").strip()
+        default_cancel_url = str(getattr(self, "_billing_checkout_cancel_url", "") or "").strip()
+        success_url = str(body.get("success_url") or default_success_url).strip()
+        cancel_url = str(body.get("cancel_url") or default_cancel_url).strip()
+
+        if success_url and not self._billing_is_http_url(success_url):
+            return web.json_response(
+                {
+                    "error": "invalid_success_url",
+                    "contract_version": "2026-02-27",
+                    "field": "success_url",
+                },
+                status=400,
+            )
+        if cancel_url and not self._billing_is_http_url(cancel_url):
+            return web.json_response(
+                {
+                    "error": "invalid_cancel_url",
+                    "contract_version": "2026-02-27",
+                    "field": "cancel_url",
+                },
+                status=400,
+            )
+
+        readiness = self._billing_stripe_readiness_payload()
+        if not bool(readiness.get("checkout_ready")):
+            return web.json_response(
+                {
+                    "error": "checkout_not_ready",
+                    "contract_version": "2026-02-27",
+                    "missing": list(readiness.get("missing") or []),
+                    "readiness": readiness,
+                },
+                status=409,
+            )
+        if not bool(readiness.get("price_map_ready")):
+            return web.json_response(
+                {
+                    "error": "stripe_price_id_map_missing",
+                    "contract_version": "2026-02-27",
+                    "required_price_ids": int(readiness.get("required_price_ids") or 0),
+                    "mapped_price_ids": int(readiness.get("mapped_price_ids") or 0),
+                    "missing_price_slots": list(readiness.get("missing_price_slots") or []),
+                },
+                status=409,
+            )
+        if not success_url or not cancel_url:
+            return web.json_response(
+                {
+                    "error": "missing_checkout_urls",
+                    "contract_version": "2026-02-27",
+                    "required_fields": ["success_url", "cancel_url"],
+                },
+                status=409,
+            )
+
+        cycle_months = int(catalog.get("cycle_months") or 1)
+        stripe_price_id = self._billing_price_id_for_plan(selected_plan_id, cycle_months)
+        if not stripe_price_id:
+            return web.json_response(
+                {
+                    "error": "missing_stripe_price_id",
+                    "contract_version": "2026-02-27",
+                    "plan_id": selected_plan_id,
+                    "cycle_months": cycle_months,
+                },
+                status=409,
+            )
+
+        customer_reference = str(body.get("customer_reference") or "").strip()
+        billing_profile = self._billing_profile_for_request(request)
+        if not customer_reference:
+            session = self._get_dashboard_auth_session(request) or {}
+            customer_reference = str(session.get("twitch_login") or session.get("twitch_user_id") or "").strip()
+
+        customer_email = str(
+            body.get("customer_email") or billing_profile.get("recipient_email") or ""
+        ).strip()
+        idempotency_key = str(
+            request.headers.get("Idempotency-Key") or body.get("idempotency_key") or ""
+        ).strip()
+
+        raw_metadata = body.get("metadata")
+        metadata: dict[str, str] = {}
+        if isinstance(raw_metadata, dict):
+            for raw_key, raw_value in raw_metadata.items():
+                key = str(raw_key or "").strip()
+                if not key:
+                    continue
+                value = str(raw_value or "").strip()
+                if value:
+                    metadata[key[:40]] = value[:500]
+
+        total_net_cents = unit_net_cents * quantity
+        metadata.setdefault("plan_id", selected_plan_id)
+        metadata.setdefault("cycle_months", str(cycle_months))
+        metadata.setdefault("quantity", str(quantity))
+        if customer_reference:
+            metadata.setdefault("customer_reference", customer_reference)
+
+        stripe_secret_key = str(getattr(self, "_billing_stripe_secret_key", "") or "").strip()
+        if not stripe_secret_key:
+            return web.json_response(
+                {
+                    "error": "stripe_secret_key_missing",
+                    "contract_version": "2026-02-27",
+                },
+                status=409,
+            )
+
+        session_payload: dict[str, Any] = {
+            "mode": "subscription",
+            "success_url": success_url,
+            "cancel_url": cancel_url,
+            "line_items": [{"price": stripe_price_id, "quantity": quantity}],
+            "billing_address_collection": "required",
+            "tax_id_collection": {"enabled": True},
+            "metadata": metadata,
+        }
+        if customer_reference:
+            session_payload["client_reference_id"] = customer_reference
+        if customer_email:
+            session_payload["customer_email"] = customer_email
+
+        stripe_session, checkout_error = self._billing_create_checkout_session_best_effort(
+            session_payload=session_payload,
+            idempotency_key=idempotency_key,
+        )
+        if stripe_session is None:
+            return web.json_response(
+                {
+                    "error": "stripe_checkout_create_failed",
+                    "contract_version": "2026-02-27",
+                    "message": str(checkout_error or "Stripe checkout create failed"),
+                },
+                status=502,
+            )
+
+        session_id = str(self._billing_stripe_obj_get(stripe_session, "id", "") or "")
+        session_url = str(self._billing_stripe_obj_get(stripe_session, "url", "") or "")
+        expires_at_epoch = int(self._billing_stripe_obj_get(stripe_session, "expires_at", 0) or 0)
+        expires_at_iso = (
+            datetime.fromtimestamp(expires_at_epoch, tz=UTC).isoformat()
+            if expires_at_epoch > 0
+            else None
+        )
+
+        payload = {
+            "ok": True,
+            "provider": "stripe",
+            "integration_state": "live",
+            "contract_version": "2026-02-27",
+            "currency": catalog["currency"],
+            "tax_mode": catalog["tax_mode"],
+            "request": {
+                "plan_id": selected_plan_id,
+                "stripe_price_id": stripe_price_id,
+                "cycle_months": cycle_months,
+                "quantity": quantity,
+                "success_url": success_url,
+                "cancel_url": cancel_url,
+                "customer_reference": customer_reference,
+                "customer_email": customer_email,
+                "idempotency_key": idempotency_key,
+                "metadata": metadata,
+            },
+            "plan": selected_plan,
+            "amount": {
+                "unit_net_cents": unit_net_cents,
+                "total_net_cents": total_net_cents,
+                "unit_net_label": _format_eur_cents(unit_net_cents),
+                "total_net_label": _format_eur_cents(total_net_cents),
+            },
+            "checkout": {
+                "status": "created",
+                "mode": "subscription",
+                "session_id": session_id,
+                "session_url": session_url or None,
+                "expires_at": expires_at_iso,
+            },
+            "invoice_preview_path": "/twitch/api/billing/invoice-preview",
+            "invoice_page_path": "/twitch/abbo/rechnung",
+            "message": "Stripe Checkout Session wurde erfolgreich erstellt.",
+        }
+        return web.json_response(payload, status=201, dumps=lambda data: json.dumps(data, ensure_ascii=True))
+
+    async def abbo_invoice(self, request: web.Request) -> web.StreamResponse:
+        """Render an invoice preview page for the selected plan and cycle."""
+        if not self._check_v2_auth(request):
+            login_url = (
+                TWITCH_ABBO_DISCORD_LOGIN_URL
+                if self._should_use_discord_admin_login(request)
+                else TWITCH_ABBO_LOGIN_URL
+            )
+            raise web.HTTPFound(login_url)
+
+        cycle_months = _normalize_billing_cycle(request.query.get("cycle"))
+        catalog = _build_billing_catalog(cycle_months)
+        plans = list(catalog.get("plans") or [])
+        if not plans:
+            return web.Response(text="Keine Billing-Plaene verfügbar.", status=404)
+
+        requested_plan_id = str(request.query.get("plan_id") or "").strip()
+        default_plan = next(
+            (plan for plan in plans if bool(plan.get("recommended"))),
+            plans[0],
+        )
+        selected_plan = next(
+            (plan for plan in plans if str(plan.get("id") or "") == requested_plan_id),
+            default_plan,
+        )
+
+        try:
+            quantity = int(request.query.get("quantity") or "1")
+        except (TypeError, ValueError):
+            quantity = 1
+        quantity = min(max(quantity, 1), 24)
+
+        session = self._get_dashboard_auth_session(request) or {}
+        billing_profile = self._billing_profile_for_request(request)
+        customer_reference = str(
+            request.query.get("customer_reference")
+            or billing_profile.get("customer_reference")
+            or session.get("twitch_login")
+            or session.get("twitch_user_id")
+            or ""
+        ).strip()
+        customer_name = str(
+            request.query.get("customer_name")
+            or billing_profile.get("recipient_name")
+            or session.get("display_name")
+            or session.get("twitch_login")
+            or "Streamer Partner"
+        ).strip()
+        customer_email = str(
+            request.query.get("customer_email")
+            or billing_profile.get("recipient_email")
+            or ""
+        ).strip()
+
+        invoice = self._billing_build_invoice_preview(
+            plan=selected_plan,
+            cycle_months=cycle_months,
+            quantity=quantity,
+            customer_reference=customer_reference,
+            customer_name=customer_name,
+            customer_email=customer_email,
+            customer_profile=billing_profile,
+        )
+        page_html = self._billing_render_invoice_html(invoice)
+        return web.Response(text=page_html, content_type="text/html")
+
+    async def api_billing_invoice_preview(self, request: web.Request) -> web.Response:
+        """Return structured + HTML invoice preview for the selected billing plan."""
+        if not self._check_v2_auth(request):
+            return web.json_response({"error": "auth_required"}, status=401)
+
+        body = await self._billing_read_request_body(request)
+        selected_plan_id = str(body.get("plan_id") or "").strip()
+        if not selected_plan_id:
+            return web.json_response(
+                {
+                    "error": "plan_id_required",
+                    "required_fields": ["plan_id"],
+                },
+                status=400,
+            )
+
+        cycle_months = _normalize_billing_cycle(body.get("cycle_months"))
+        catalog = _build_billing_catalog(cycle_months)
+        selected_plan = next(
+            (plan for plan in catalog.get("plans") or [] if str(plan.get("id") or "") == selected_plan_id),
+            None,
+        )
+        if not selected_plan:
+            return web.json_response(
+                {
+                    "error": "unknown_plan_id",
+                    "available_plan_ids": [str(plan.get("id") or "") for plan in catalog.get("plans") or []],
+                },
+                status=404,
+            )
+
+        try:
+            quantity = int(body.get("quantity") or 1)
+        except (TypeError, ValueError):
+            quantity = 1
+        quantity = min(max(quantity, 1), 24)
+
+        session = self._get_dashboard_auth_session(request) or {}
+        billing_profile = self._billing_profile_for_request(request)
+        customer_reference = str(
+            body.get("customer_reference")
+            or billing_profile.get("customer_reference")
+            or session.get("twitch_login")
+            or session.get("twitch_user_id")
+            or ""
+        ).strip()
+        customer_name = str(
+            body.get("customer_name")
+            or billing_profile.get("recipient_name")
+            or session.get("display_name")
+            or session.get("twitch_login")
+            or "Streamer Partner"
+        ).strip()
+        customer_email = str(
+            body.get("customer_email")
+            or billing_profile.get("recipient_email")
+            or ""
+        ).strip()
+
+        invoice = self._billing_build_invoice_preview(
+            plan=selected_plan,
+            cycle_months=cycle_months,
+            quantity=quantity,
+            customer_reference=customer_reference,
+            customer_name=customer_name,
+            customer_email=customer_email,
+            customer_profile=billing_profile,
+        )
+        payload = {
+            "ok": True,
+            "provider": "stripe",
+            "invoice": invoice,
+            "html": self._billing_render_invoice_html(invoice),
+        }
+        return web.json_response(payload, dumps=lambda data: json.dumps(data, ensure_ascii=True))
+
+    async def api_billing_stripe_sync_products(self, request: web.Request) -> web.Response:
+        """Create/reuse Stripe products and prices and persist IDs into the Windows vault."""
+        if not self._check_v2_auth(request):
+            return web.json_response({"error": "auth_required"}, status=401)
+
+        body = await self._billing_read_request_body(request)
+        dry_run_raw = str(body.get("dry_run") or "").strip().lower()
+        dry_run = dry_run_raw in {"1", "true", "yes", "on"}
+
+        stripe, import_error = self._billing_import_stripe()
+        if stripe is None:
+            return web.json_response(
+                {
+                    "error": "stripe_sdk_missing",
+                    "details": import_error or "stripe import failed",
+                },
+                status=503,
+            )
+
+        stripe_secret_key = str(getattr(self, "_billing_stripe_secret_key", "") or "").strip()
+        if not stripe_secret_key:
+            return web.json_response(
+                {
+                    "error": "stripe_secret_key_missing",
+                    "missing": ["stripe_secret_key"],
+                },
+                status=409,
+            )
+        stripe.api_key = stripe_secret_key
+
+        product_map = self._billing_product_id_map()
+        price_map = self._billing_price_id_map()
+        cycle_catalogs = {
+            cycle: _build_billing_catalog(cycle) for cycle in sorted(_BILLING_CYCLE_DISCOUNTS.keys())
+        }
+        base_catalog = cycle_catalogs.get(1) or _build_billing_catalog(1)
+        paid_plans = [plan for plan in list(base_catalog.get("plans") or []) if _billing_is_paid_plan(plan)]
+
+        operations: list[dict[str, Any]] = []
+        created_products = 0
+        reused_products = 0
+        created_prices = 0
+        reused_prices = 0
+
+        for plan in paid_plans:
+            plan_id = str(plan.get("id") or "").strip()
+            plan_name = str(plan.get("name") or "").strip() or plan_id
+            plan_description = str(plan.get("description") or "").strip()
+            product_id = str(product_map.get(plan_id) or "").strip()
+            operation: dict[str, Any] = {
+                "plan_id": plan_id,
+                "name": plan_name,
+                "product": {"id": product_id or None, "status": "missing"},
+                "prices": [],
+            }
+
+            if product_id and not dry_run:
+                try:
+                    product_obj = stripe.Product.retrieve(product_id)
+                    if bool(self._billing_stripe_obj_get(product_obj, "deleted", False)):
+                        product_id = ""
+                    else:
+                        operation["product"] = {"id": product_id, "status": "reused"}
+                        reused_products += 1
+                except Exception:
+                    product_id = ""
+
+            if not product_id:
+                if dry_run:
+                    operation["product"] = {"id": None, "status": "would_create"}
+                else:
+                    try:
+                        product_obj = stripe.Product.create(
+                            name=plan_name,
+                            description=plan_description or None,
+                            metadata={
+                                "plan_id": plan_id,
+                                "source": "twitch.earlysalty.com",
+                                "billing": "subscriptions",
+                            },
+                        )
+                    except Exception as exc:
+                        return web.json_response(
+                            {
+                                "error": "stripe_product_create_failed",
+                                "plan_id": plan_id,
+                                "message": str(getattr(exc, "user_message", "") or str(exc)),
+                            },
+                            status=502,
+                        )
+                    product_id = str(self._billing_stripe_obj_get(product_obj, "id", "") or "").strip()
+                    if not product_id:
+                        return web.json_response(
+                            {
+                                "error": "stripe_product_id_missing",
+                                "plan_id": plan_id,
+                            },
+                            status=502,
+                        )
+                    product_map[plan_id] = product_id
+                    operation["product"] = {"id": product_id, "status": "created"}
+                    created_products += 1
+
+            for cycle in sorted(_BILLING_CYCLE_DISCOUNTS.keys()):
+                cycle_catalog = cycle_catalogs.get(cycle) or _build_billing_catalog(cycle)
+                cycle_plan = next(
+                    (
+                        entry
+                        for entry in list(cycle_catalog.get("plans") or [])
+                        if str(entry.get("id") or "") == plan_id
+                    ),
+                    None,
+                )
+                if not cycle_plan:
+                    continue
+                amount_cents = int((cycle_plan.get("price") or {}).get("total_net_cents") or 0)
+                if amount_cents <= 0:
+                    continue
+
+                cycle_map = price_map.setdefault(plan_id, {})
+                price_id = str(cycle_map.get(cycle) or "").strip()
+                lookup_key = f"deadlock_{plan_id}_{cycle}m_net_v1"
+                price_status = "missing"
+
+                if price_id and not dry_run:
+                    try:
+                        price_obj = stripe.Price.retrieve(price_id)
+                        price_status = "reused"
+                        reused_prices += 1
+                    except Exception:
+                        price_id = ""
+
+                if not price_id and not dry_run:
+                    try:
+                        price_list = stripe.Price.list(active=True, lookup_keys=[lookup_key], limit=1)
+                        existing_prices = list(
+                            self._billing_stripe_obj_get(price_list, "data", []) or []
+                        )
+                    except Exception:
+                        existing_prices = []
+
+                    if existing_prices:
+                        existing_price = existing_prices[0]
+                        price_id = str(self._billing_stripe_obj_get(existing_price, "id", "") or "").strip()
+                        if price_id:
+                            cycle_map[cycle] = price_id
+                            price_status = "reused_lookup"
+                            reused_prices += 1
+
+                if not price_id:
+                    if dry_run:
+                        price_status = "would_create"
+                    else:
+                        try:
+                            price_obj = stripe.Price.create(
+                                currency="eur",
+                                product=product_id,
+                                unit_amount=amount_cents,
+                                recurring={"interval": "month", "interval_count": cycle},
+                                lookup_key=lookup_key,
+                                metadata={
+                                    "plan_id": plan_id,
+                                    "cycle_months": str(cycle),
+                                    "source": "twitch.earlysalty.com",
+                                },
+                            )
+                        except Exception as exc:
+                            return web.json_response(
+                                {
+                                    "error": "stripe_price_create_failed",
+                                    "plan_id": plan_id,
+                                    "cycle_months": cycle,
+                                    "message": str(getattr(exc, "user_message", "") or str(exc)),
+                                },
+                                status=502,
+                            )
+                        price_id = str(self._billing_stripe_obj_get(price_obj, "id", "") or "").strip()
+                        if not price_id:
+                            return web.json_response(
+                                {
+                                    "error": "stripe_price_id_missing",
+                                    "plan_id": plan_id,
+                                    "cycle_months": cycle,
+                                },
+                                status=502,
+                            )
+                        cycle_map[cycle] = price_id
+                        price_status = "created"
+                        created_prices += 1
+
+                operation["prices"].append(
+                    {
+                        "cycle_months": cycle,
+                        "amount_net_cents": amount_cents,
+                        "price_id": price_id or None,
+                        "lookup_key": lookup_key,
+                        "status": price_status,
+                    }
+                )
+            operations.append(operation)
+
+        persisted = False
+        if not dry_run:
+            product_persisted = self._billing_set_product_id_map(product_map)
+            price_persisted = self._billing_set_price_id_map(price_map)
+            persisted = bool(product_persisted and price_persisted)
+
+        readiness = self._billing_stripe_readiness_payload()
+        payload = {
+            "ok": True,
+            "provider": "stripe",
+            "dry_run": dry_run,
+            "persisted_to_windows_vault": persisted,
+            "created_products": created_products,
+            "reused_products": reused_products,
+            "created_prices": created_prices,
+            "reused_prices": reused_prices,
+            "operations": operations,
+            "product_id_map": product_map,
+            "price_id_map": price_map,
+            "readiness": readiness,
+        }
+        return web.json_response(payload, dumps=lambda data: json.dumps(data, ensure_ascii=True))
 
     async def auth_logout(self, request: web.Request) -> web.StreamResponse:
         """Logout and clear dashboard session cookie."""
@@ -868,6 +2674,8 @@ class _DashboardRoutesMixin:
         app.add_routes(
             [
                 web.get("/", self.public_home),
+                web.get("/dashboads", self.stats_entry),
+                web.get("/dashboards", self.stats_entry),
                 web.get("/twitch", self.index),
                 web.get("/twitch/", self.index),
                 web.get("/twitch/admin", self.admin),
@@ -882,7 +2690,19 @@ class _DashboardRoutesMixin:
                 web.post("/twitch/discord_flag", self.discord_flag),
                 web.get("/twitch/stats", self.stats),
                 web.get("/twitch/partners", self.partner_stats),
+                web.get("/twitch/dashboads", self.stats_entry),
                 web.get("/twitch/dashboards", self.stats_entry),
+                web.get("/twitch/abo", self.abbo_entry),
+                web.get("/twitch/abbo", self.abbo_entry),
+                web.get("/twitch/abos", self.abbo_entry),
+                web.get("/twitch/abbo/bezahlen", self.abbo_pay),
+                web.post("/twitch/abbo/rechnungsdaten", self.abbo_profile_save),
+                web.get("/twitch/abbo/kündigen", self.abbo_cancel),
+                web.get("/twitch/abbo/rechnungen", self.abbo_invoices),
+                web.get("/twitch/abbo/stripe-settings", self.abbo_stripe_settings),
+                web.get("/twitch/abbo/rechnung", self.abbo_invoice),
+                web.get("/twitch/impressum", self.abbo_impressum),
+                web.get("/twitch/datenschutz", self.abbo_datenschutz),
                 web.get("/twitch/raid/auth", self.raid_auth_start),
                 web.get("/twitch/raid/go", self.raid_auth_go),
                 web.get("/twitch/raid/requirements", self.raid_requirements),
@@ -899,6 +2719,13 @@ class _DashboardRoutesMixin:
                 web.post("/twitch/reload", self.reload_cog),
                 web.get("/twitch/market", self.market_research),
                 web.get("/twitch/api/market_data", self.api_market_data),
+                web.get("/twitch/api/billing/catalog", self.api_billing_catalog),
+                web.get("/twitch/api/billing/readiness", self.api_billing_readiness),
+                web.post("/twitch/api/billing/stripe/webhook", self.api_billing_stripe_webhook),
+                web.post("/twitch/api/billing/checkout-preview", self.api_billing_checkout_preview),
+                web.post("/twitch/api/billing/checkout-session", self.api_billing_checkout_session),
+                web.post("/twitch/api/billing/invoice-preview", self.api_billing_invoice_preview),
+                web.post("/twitch/api/billing/stripe/sync-products", self.api_billing_stripe_sync_products),
             ]
         )
         self._register_v2_routes(app.router)

@@ -475,7 +475,7 @@ def _seed_default_templates_pg(conn) -> None:
     conn.execute(
         """
         INSERT INTO clip_templates_global (template_name, description_template, hashtags, category, created_by)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT (template_name) DO NOTHING
         """,
         templates[0],
@@ -484,7 +484,7 @@ def _seed_default_templates_pg(conn) -> None:
         conn.execute(
             """
             INSERT INTO clip_templates_global (template_name, description_template, hashtags, category, created_by)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (template_name) DO NOTHING
             """,
             t,
@@ -556,7 +556,7 @@ def ensure_schema(conn) -> None:
         try:
             conn.execute(
                 """
-                SELECT decompress_chunk(format('%I.%I', chunk_schema, chunk_name)::regclass)
+                SELECT decompress_chunk((quote_ident(chunk_schema) || '.' || quote_ident(chunk_name))::regclass)
                 FROM timescaledb_information.chunks
                 WHERE hypertable_name = %s AND is_compressed
                 """,

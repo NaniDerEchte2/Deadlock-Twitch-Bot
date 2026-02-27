@@ -187,7 +187,7 @@ class TwitchDashboardMixin:
                         break
             except Exception:
                 log.debug(
-                    "Konnte Non-Partner-Suggestions fuer Analytics nicht laden",
+                    "Konnte Non-Partner-Suggestions für Analytics nicht laden",
                     exc_info=True,
                 )
 
