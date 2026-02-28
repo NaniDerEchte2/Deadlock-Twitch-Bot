@@ -2066,6 +2066,11 @@ class _DashboardRoutesMixin:
             raise web.HTTPFound(location=safe_location)
 
         data = await request.post()
+        csrf_token = str(data.get("csrf_token") or "").strip()
+        if not self._csrf_verify_token(request, csrf_token):
+            location = self._redirect_location(request, err="Ungültiges CSRF-Token")
+            safe_location = self._safe_internal_redirect(location, fallback="/twitch/stats")
+            raise web.HTTPFound(location=safe_location)
         login = (data.get("login") or "").strip()
         discord_user_id = (data.get("discord_user_id") or "").strip()
         discord_display_name = (data.get("discord_display_name") or "").strip()
@@ -2711,9 +2716,9 @@ class _DashboardRoutesMixin:
                 web.get("/twitch/", self.index),
                 web.get("/twitch/admin", self.admin),
                 web.get("/twitch/live", self.admin),
-                web.get("/twitch/add_any", self.add_any),
-                web.get("/twitch/add_url", self.add_url),
-                web.get("/twitch/add_login/{login}", self.add_login),
+                web.post("/twitch/add_any", self.add_any),
+                web.post("/twitch/add_url", self.add_url),
+                web.post("/twitch/add_login/{login}", self.add_login),
                 web.post("/twitch/add_streamer", self.add_streamer),
                 web.post("/twitch/remove", self.remove),
                 web.post("/twitch/verify", self.verify),

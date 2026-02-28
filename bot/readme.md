@@ -8,7 +8,7 @@
 
 ## Dashboard
 - `GET /twitch`
-- `POST /twitch/add`, `GET /twitch/add_url?url=https://twitch.tv/<login>`, `GET /twitch/add_login/<login>`
+- `POST /twitch/add`, `POST /twitch/add_url`, `POST /twitch/add_login/<login>`
 - `POST /twitch/rescan`
 - `GET /twitch/stats`
 

@@ -674,7 +674,13 @@ class _DashboardAuthMixin:
                 headers={"Retry-After": "60"},
             )
         if not self._discord_admin_required:
-            raise web.HTTPFound("/twitch/admin")
+            return web.Response(
+                text=(
+                    "Discord Admin OAuth ist nicht konfiguriert. "
+                    "Bitte Client ID, Client Secret und Redirect URI setzen."
+                ),
+                status=503,
+            )
         existing = self._get_discord_admin_session(request)
         next_path = self._normalize_discord_admin_next_path(request.query.get("next"))
         if existing:
@@ -720,7 +726,13 @@ class _DashboardAuthMixin:
                 headers={"Retry-After": "60"},
             )
         if not self._discord_admin_required:
-            raise web.HTTPFound("/twitch/admin")
+            return web.Response(
+                text=(
+                    "Discord Admin OAuth ist nicht konfiguriert. "
+                    "Bitte Client ID, Client Secret und Redirect URI setzen."
+                ),
+                status=503,
+            )
 
         error = (request.query.get("error") or "").strip()
         if error:
@@ -807,7 +819,7 @@ class _DashboardAuthMixin:
         if session_id:
             self._discord_admin_sessions.pop(session_id, None)
         login_url = (
-            TWITCH_ADMIN_DISCORD_LOGIN_URL if self._discord_admin_required else "/twitch/admin"
+            TWITCH_ADMIN_DISCORD_LOGIN_URL if self._discord_admin_required else "/twitch/dashboards"
         )
         response = web.HTTPFound(login_url)
         self._clear_discord_admin_cookie(response, request)

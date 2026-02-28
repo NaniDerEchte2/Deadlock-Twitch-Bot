@@ -30,7 +30,6 @@ TWITCH_HELIX_USERS_URL = "https://api.twitch.tv/helix/users"
 DISCORD_API_BASE_URL = "https://discord.com/api/v10"
 TWITCH_DASHBOARDS_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboards"
 TWITCH_DASHBOARD_V2_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
-TWITCH_ADMIN_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fadmin"
 TWITCH_DASHBOARDS_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboards"
 LOGIN_RE = re.compile(r"^[A-Za-z0-9_]{3,25}$")
 DEFAULT_DASHBOARD_MODERATOR_ROLE_ID = 1337518124647579661
@@ -181,9 +180,9 @@ class DashboardV2Server(
             and self._discord_admin_redirect_uri
         )
         if self._discord_admin_enabled and not self._discord_admin_required:
-            log.warning(
+            log.error(
                 "Twitch Admin Discord OAuth ist unvollständig (Client ID/Secret/Redirect fehlen). "
-                "Fallback auf Token/localhost."
+                "Admin-Zugriff bleibt deaktiviert, bis die Konfiguration vollständig ist."
             )
 
     async def _empty_add(self, _: str, __: bool) -> str:
@@ -324,17 +323,10 @@ class DashboardV2Server(
         return ""
 
     def _effective_client_host(self, request: web.Request, peer_host: str) -> str:
-        normalized_peer = self._host_without_port(peer_host)
-        if self._is_loopback_host(normalized_peer):
-            forwarded_for = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-            normalized_forwarded = self._host_without_port(forwarded_for)
-            if normalized_forwarded:
-                return normalized_forwarded
-            real_ip = (request.headers.get("X-Real-IP") or "").split(",")[0].strip()
-            normalized_real = self._host_without_port(real_ip)
-            if normalized_real:
-                return normalized_real
-        return normalized_peer
+        # Deliberately ignore forwarded headers. Without an explicit trusted-proxy
+        # allowlist, user-controlled forwarding headers can be spoofed.
+        del request
+        return self._host_without_port(peer_host)
 
     def _rate_limit_key(self, request: web.Request) -> str:
         peer = self._peer_host(request)
@@ -402,7 +394,7 @@ class DashboardV2Server(
         self, request: web.Request, *, next_path: str | None = None
     ) -> str:
         if not self._discord_admin_required:
-            return "/twitch/admin"
+            return "/twitch/dashboards"
         normalized_next = self._normalize_discord_admin_next_path(
             next_path or (request.rel_url.path_qs if request.rel_url else "/twitch/admin")
         )
@@ -472,31 +464,32 @@ class DashboardV2Server(
             "/twitch/raid/analytics",
             "/twitch/reload",
             "/twitch/market",
+            "/twitch/stats",
         )
         if request.path.startswith(admin_only_prefixes):
-            token = request.headers.get("X-Admin-Token")
-            if self._is_local_request(request):
-                return
+            if not self._discord_admin_required:
+                raise web.HTTPServiceUnavailable(
+                    text=(
+                        "Discord Admin OAuth ist nicht konfiguriert. "
+                        "Admin-Zugriff ist bis zur vollständigen Konfiguration deaktiviert."
+                    )
+                )
             if self._is_discord_admin_request(request):
                 return
-            if self._check_admin_token(token):
-                return
-            login_url = (
-                TWITCH_ADMIN_DISCORD_LOGIN_URL if self._discord_admin_required else "/twitch/admin"
+            login_url = self._build_discord_admin_login_url(
+                request,
+                next_path=request.rel_url.path_qs if request.rel_url else request.path,
             )
             if request.method in {"GET", "HEAD"}:
                 raise web.HTTPFound(login_url)
             raise web.HTTPUnauthorized(
-                text="Admin authentication required",
+                text="Discord admin authentication required",
                 headers={"X-Auth-Login": login_url},
             )
 
         if self._check_v2_auth(request):
             return
-        token = request.headers.get("X-Admin-Token")
-        if self._check_admin_token(token):
-            return
-        raise web.HTTPUnauthorized(text="missing or invalid token")
+        raise web.HTTPUnauthorized(text="missing or invalid authentication")
 
     def _require_partner_token(self, request: web.Request) -> None:
         if self._check_v2_auth(request):
@@ -574,7 +567,7 @@ class DashboardV2Server(
         max_requests: int = 10,
         window_seconds: float = 60.0,
     ) -> bool:
-        """Sliding-window rate limiter per client IP (proxy-aware). Returns True if allowed."""
+        """Sliding-window rate limiter per peer IP. Returns True if allowed."""
         key = self._rate_limit_key(request)
         now = time.time()
         hits = self._rate_limits.get(key, [])

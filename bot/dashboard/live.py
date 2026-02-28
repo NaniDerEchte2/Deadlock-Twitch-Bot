@@ -63,12 +63,30 @@ _CRITICAL_SCOPES: set[str] = {
 
 
 class DashboardLiveMixin:
+    async def _read_post_with_csrf(
+        self, request: web.Request, *, fallback_path: str = "/twitch/admin"
+    ):
+        data = await request.post()
+        csrf_token = str(data.get("csrf_token") or "").strip()
+        if self._csrf_verify_token(request, csrf_token):
+            return data
+        location = self._redirect_location(
+            request,
+            err="Ungültiges CSRF-Token",
+            default_path=fallback_path,
+        )
+        raise web.HTTPFound(location=location)
+
     async def index(self, request: web.Request):
         self._require_token(request)
         items = await self._list()
 
         msg = request.query.get("ok", "")
         err = request.query.get("err", "")
+        csrf_token = self._csrf_generate_token(request)
+        csrf_input_html = (
+            f"<input type='hidden' name='csrf_token' value='{html.escape(csrf_token, quote=True)}'>"
+        )
 
         discord_filter = (request.query.get("discord") or "any").lower()
         if discord_filter not in {"any", "yes", "no", "linked"}:
@@ -314,6 +332,7 @@ class DashboardLiveMixin:
                 "    <div class='advanced-content'>"
                 f"      <div class='discord-preview'>{discord_preview_html}</div>"
                 "      <form method='post' action='/twitch/discord_link'>"
+                f"        {csrf_input_html}"
                 f"        <input type='hidden' name='login' value='{escaped_login}' />"
                 "        <div class='form-row'>"
                 f"          <label>Discord User ID<input type='text' name='discord_user_id' value='{escaped_user_id}' placeholder='123456789012345678'></label>"
@@ -381,6 +400,7 @@ class DashboardLiveMixin:
                 "  <td>"
                 "    <div class='action-stack'>"
                 "      <form method='post' action='/twitch/verify' class='inline'>"
+                f"        {csrf_input_html}"
                 f"        <input type='hidden' name='login' value='{escaped_login}'>"
                 "        <select name='mode'>"
                 "          <option value='permanent'>Permanent</option>"
@@ -391,16 +411,19 @@ class DashboardLiveMixin:
                 "        <button class='btn btn-small'>Anwenden</button>"
                 "      </form>"
                 "      <form method='post' action='/twitch/discord_flag' class='inline'>"
+                f"        {csrf_input_html}"
                 f"        <input type='hidden' name='login' value='{escaped_login}'>"
                 f"        <input type='hidden' name='mode' value='{toggle_mode}'>"
                 f"        <button class='{toggle_classes}'>{html.escape(toggle_label)}</button>"
                 "      </form>"
                 "      <form method='post' action='/twitch/archive' class='inline'>"
+                f"        {csrf_input_html}"
                 f"        <input type='hidden' name='login' value='{escaped_login}'>"
                 "        <input type='hidden' name='mode' value='archive'>"
                 "        <button class='btn btn-small btn-secondary'>Archivieren</button>"
                 "      </form>"
                 "      <form method='post' action='/twitch/remove' class='inline'>"
+                f"        {csrf_input_html}"
                 f"        <input type='hidden' name='login' value='{escaped_login}'>"
                 "        <button class='btn btn-small btn-danger'>Streamer entfernen</button>"
                 "      </form>"
@@ -431,6 +454,7 @@ class DashboardLiveMixin:
             "<div class='card add-streamer-card'>"
             "  <h2>Twitch Streamer hinzufügen</h2>"
             "  <form method='post' action='/twitch/add_streamer'>"
+            f"    {csrf_input_html}"
             "    <div class='form-grid'>"
             "      <label>"
             "        Twitch Login oder URL"
@@ -534,6 +558,7 @@ class DashboardLiveMixin:
                     "    <div class='manage-body'>"
                     f"      <div class='discord-preview'>{preview_html}</div>"
                     "      <form method='post' action='/twitch/verify' class='inline'>"
+                    f"        {csrf_input_html}"
                     f"        <input type='hidden' name='login' value='{entry['escaped_login']}'>"
                     "        <select name='mode'>"
                     "          <option value='permanent'>Permanent</option>"
@@ -544,6 +569,7 @@ class DashboardLiveMixin:
                     "        <button class='btn btn-small'>Anwenden</button>"
                     "      </form>"
                     "      <form method='post' action='/twitch/discord_link'>"
+                    f"        {csrf_input_html}"
                     f"        <input type='hidden' name='login' value='{entry['escaped_login']}' />"
                     "        <div class='form-row'>"
                     f"          <label>Discord User ID<input type='text' name='discord_user_id' value='{entry['escaped_user_id']}' placeholder='123456789012345678'></label>"
@@ -561,11 +587,13 @@ class DashboardLiveMixin:
                     "      </form>"
                     "      <div class='non-partner-actions'>"
                     "        <form method='post' action='/twitch/discord_flag' class='inline'>"
+                    f"          {csrf_input_html}"
                     f"          <input type='hidden' name='login' value='{entry['escaped_login']}'>"
                     f"          <input type='hidden' name='mode' value='{entry['toggle_mode']}'>"
                     f"          <button class='{entry['toggle_classes']}'>{html.escape(entry['toggle_label'])}</button>"
                     "        </form>"
                     "        <form method='post' action='/twitch/remove' class='inline'>"
+                    f"          {csrf_input_html}"
                     f"          <input type='hidden' name='login' value='{entry['escaped_login']}'>"
                     "          <button class='btn btn-small btn-danger'>Streamer entfernen</button>"
                     "        </form>"
@@ -617,11 +645,13 @@ class DashboardLiveMixin:
                     "  </div>"
                     "  <div class='non-partner-actions'>"
                     "    <form method='post' action='/twitch/archive' class='inline'>"
+                    f"      {csrf_input_html}"
                     f"      <input type='hidden' name='login' value='{entry['escaped_login']}'>"
                     "      <input type='hidden' name='mode' value='unarchive'>"
                     "      <button class='btn btn-small'>Reaktivieren</button>"
                     "    </form>"
                     "    <form method='post' action='/twitch/remove' class='inline'>"
+                    f"      {csrf_input_html}"
                     f"      <input type='hidden' name='login' value='{entry['escaped_login']}'>"
                     "      <button class='btn btn-small btn-danger'>Streamer entfernen</button>"
                     "    </form>"
@@ -851,6 +881,7 @@ class DashboardLiveMixin:
         hero_actions = (
             (raid_history_link + " " if raid_history_link else "")
             + "<form method='post' action='/twitch/reload'>"
+            + csrf_input_html
             + "<button class='btn btn-warn'>Reload Twitch Cog</button>"
             + "</form>"
         )
@@ -904,9 +935,10 @@ class DashboardLiveMixin:
         )
 
     async def add_any(self, request: web.Request):
-        """Flexible Variante: nimmt ?q= … oder ?login= … oder ?url= …"""
+        """Flexible Variante: nimmt POST-Felder `q`, `login` oder `url`."""
         self._require_token(request)
-        raw = request.query.get("q") or request.query.get("login") or request.query.get("url") or ""
+        data = await self._read_post_with_csrf(request)
+        raw = str(data.get("q") or data.get("login") or data.get("url") or "").strip()
         try:
             msg = await self._do_add(raw)
             raise web.HTTPFound(location="/twitch?ok=" + quote_plus(msg))
@@ -917,9 +949,10 @@ class DashboardLiveMixin:
             raise web.HTTPFound(location="/twitch?err=" + quote_plus("could not add (twitch api)"))
 
     async def add_url(self, request: web.Request):
-        """Backward-compatible: nimmt ?url=… (kann jetzt auch Login enthalten)."""
+        """Backward-compatible: nimmt POST-Feld `url` (kann auch Login enthalten)."""
         self._require_token(request)
-        raw = request.query.get("url") or ""
+        data = await self._read_post_with_csrf(request)
+        raw = str(data.get("url") or "").strip()
         try:
             msg = await self._do_add(raw)
             raise web.HTTPFound(location="/twitch?ok=" + quote_plus(msg))
@@ -932,7 +965,8 @@ class DashboardLiveMixin:
     async def add_login(self, request: web.Request):
         """Pfad-Shortcut: /twitch/add_login/<login>"""
         self._require_token(request)
-        raw = request.match_info.get("login", "")
+        data = await self._read_post_with_csrf(request)
+        raw = str(request.match_info.get("login") or data.get("login") or "").strip()
         try:
             msg = await self._do_add(raw)
             raise web.HTTPFound(location="/twitch?ok=" + quote_plus(msg))
@@ -944,7 +978,7 @@ class DashboardLiveMixin:
 
     async def add_streamer(self, request: web.Request):
         self._require_token(request)
-        data = await request.post()
+        data = await self._read_post_with_csrf(request)
         raw_login = (data.get("login") or "").strip()
         discord_user_id = (data.get("discord_user_id") or "").strip()
         discord_display_name = (data.get("discord_display_name") or "").strip()
@@ -995,7 +1029,7 @@ class DashboardLiveMixin:
 
     async def discord_flag(self, request: web.Request):
         self._require_token(request)
-        data = await request.post()
+        data = await self._read_post_with_csrf(request)
         login = (data.get("login") or "").strip()
         mode = (data.get("mode") or "").strip().lower()
         desired: bool | None
@@ -1022,7 +1056,7 @@ class DashboardLiveMixin:
 
     async def discord_link(self, request: web.Request):
         self._require_token(request)
-        data = await request.post()
+        data = await self._read_post_with_csrf(request)
         login = (data.get("login") or "").strip()
         discord_user_id = (data.get("discord_user_id") or "").strip()
         discord_display_name = (data.get("discord_display_name") or "").strip()
@@ -1048,7 +1082,7 @@ class DashboardLiveMixin:
 
     async def remove(self, request: web.Request):
         self._require_token(request)
-        data = await request.post()
+        data = await self._read_post_with_csrf(request)
         login = (data.get("login") or "").strip()
         try:
             msg = await self._remove(login)
@@ -1064,7 +1098,7 @@ class DashboardLiveMixin:
 
     async def verify(self, request: web.Request):
         self._require_token(request)
-        data = await request.post()
+        data = await self._read_post_with_csrf(request)
         login = (data.get("login") or "").strip()
         mode = (data.get("mode") or "").strip().lower()
         try:
@@ -1081,7 +1115,7 @@ class DashboardLiveMixin:
 
     async def archive(self, request: web.Request):
         self._require_token(request)
-        data = await request.post()
+        data = await self._read_post_with_csrf(request)
         login = (data.get("login") or "").strip()
         mode = (data.get("mode") or "").strip().lower() or "toggle"
         try:

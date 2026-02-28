@@ -8,7 +8,9 @@ from aiohttp import web
 from bot.analytics.api_overview import _AnalyticsOverviewMixin
 from bot.analytics.api_v2 import AnalyticsV2Mixin
 from bot.dashboard.billing_mixin import _DashboardBillingMixin
+from bot.dashboard.live import DashboardLiveMixin
 from bot.dashboard.routes_mixin import _DashboardRoutesMixin
+from bot.dashboard.server_v2 import DashboardV2Server
 from bot.social_media.clip_manager import ClipManager
 from bot.social_media.dashboard import SocialMediaDashboard
 
@@ -67,6 +69,28 @@ class _DummyOverviewAssetsAuth(_AnalyticsOverviewMixin):
 
     def _should_use_discord_admin_login(self, request):
         return False
+
+
+class _DummyLiveActions(DashboardLiveMixin):
+    def __init__(self) -> None:
+        self.add_calls: list[str] = []
+
+    def _require_token(self, request):
+        return None
+
+    def _csrf_verify_token(self, request, provided_token: str) -> bool:
+        return provided_token == "valid-csrf"
+
+    def _redirect_location(self, request, *, ok=None, err=None, default_path="/twitch/stats"):
+        if err:
+            return "/twitch/admin?err=csrf"
+        if ok:
+            return "/twitch/admin?ok=1"
+        return default_path
+
+    async def _do_add(self, raw: str) -> str:
+        self.add_calls.append(raw)
+        return raw or "added"
 
 
 class _WebhookConn:
@@ -249,6 +273,154 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler._get_auth_level(request_partner_header), "partner")
         self.assertTrue(handler._check_v2_auth(request_admin_header))
         self.assertEqual(handler._get_auth_level(request_admin_header), "admin")
+
+    def test_admin_require_token_rejects_header_token_without_discord_session(self) -> None:
+        class _Gate:
+            _discord_admin_required = True
+
+            def _is_discord_admin_request(self, request):
+                return False
+
+            def _build_discord_admin_login_url(self, request, *, next_path=None):
+                return "/twitch/auth/discord/login?next=%2Ftwitch%2Fadmin"
+
+            def _check_v2_auth(self, request):
+                return False
+
+        request = SimpleNamespace(
+            path="/twitch/admin",
+            method="GET",
+            headers={"X-Admin-Token": "admin-secret"},
+            rel_url=SimpleNamespace(path_qs="/twitch/admin"),
+        )
+
+        with self.assertRaises(web.HTTPFound) as ctx:
+            DashboardV2Server._require_token(_Gate(), request)
+        self.assertEqual(ctx.exception.location, "/twitch/auth/discord/login?next=%2Ftwitch%2Fadmin")
+
+    def test_admin_require_token_returns_503_when_discord_oauth_missing(self) -> None:
+        class _Gate:
+            _discord_admin_required = False
+
+            def _is_discord_admin_request(self, request):
+                return False
+
+            def _check_v2_auth(self, request):
+                return False
+
+        request = SimpleNamespace(
+            path="/twitch/admin",
+            method="GET",
+            headers={},
+            rel_url=SimpleNamespace(path_qs="/twitch/admin"),
+        )
+
+        with self.assertRaises(web.HTTPServiceUnavailable):
+            DashboardV2Server._require_token(_Gate(), request)
+
+    def test_add_routes_are_post_only(self) -> None:
+        app = web.Application()
+        handler = DashboardV2Server(
+            app_token="admin-secret",
+            noauth=False,
+            partner_token="partner-secret",
+        )
+        handler.attach(app)
+
+        for path in ("/twitch/add_any", "/twitch/add_url", "/twitch/add_login/{login}"):
+            methods = {route.method for route in app.router.routes() if route.resource.canonical == path}
+            self.assertEqual(methods, {"POST"})
+
+    def test_rate_limit_key_ignores_forwarded_headers(self) -> None:
+        handler = DashboardV2Server.__new__(DashboardV2Server)
+        request = SimpleNamespace(
+            headers={
+                "X-Forwarded-For": "203.0.113.99",
+                "X-Real-IP": "198.51.100.42",
+            },
+            remote="127.0.0.1",
+            transport=None,
+        )
+
+        key = DashboardV2Server._rate_limit_key(handler, request)
+        self.assertEqual(key, "127.0.0.1")
+
+    async def test_live_add_any_requires_csrf(self) -> None:
+        handler = _DummyLiveActions()
+
+        class _BadRequest:
+            path = "/twitch/add_any"
+            method = "POST"
+            headers = {}
+            rel_url = SimpleNamespace(path_qs="/twitch/add_any")
+            query = {}
+
+            async def post(self):
+                return {"q": "streamer_a", "csrf_token": "invalid"}
+
+        with self.assertRaises(web.HTTPFound) as bad_ctx:
+            await handler.add_any(_BadRequest())
+        self.assertEqual(bad_ctx.exception.location, "/twitch/admin?err=csrf")
+        self.assertEqual(handler.add_calls, [])
+
+        class _GoodRequest:
+            path = "/twitch/add_any"
+            method = "POST"
+            headers = {}
+            rel_url = SimpleNamespace(path_qs="/twitch/add_any")
+            query = {}
+
+            async def post(self):
+                return {"q": "streamer_a", "csrf_token": "valid-csrf"}
+
+        with self.assertRaises(web.HTTPFound) as good_ctx:
+            await handler.add_any(_GoodRequest())
+        self.assertEqual(good_ctx.exception.location, "/twitch?ok=streamer_a")
+        self.assertEqual(handler.add_calls, ["streamer_a"])
+
+    async def test_discord_link_rejects_invalid_csrf(self) -> None:
+        class _DiscordLinkHandler(_DummyRoutes):
+            def __init__(self) -> None:
+                super().__init__()
+                self.dashboard_session = {"csrf_token": "valid-csrf"}
+                self.saved_login = None
+
+                async def _profile(login, **kwargs):
+                    self.saved_login = login
+                    return "saved"
+
+                self._discord_profile = _profile
+
+            def _require_token(self, request):
+                return None
+
+            def _redirect_location(self, request, *, ok=None, err=None, default_path="/twitch/stats"):
+                if err:
+                    return "/twitch/stats?err=csrf"
+                return "/twitch/stats?ok=1"
+
+            def _safe_internal_redirect(self, location, fallback="/twitch/stats"):
+                return location
+
+        handler = _DiscordLinkHandler()
+
+        class _BadRequest:
+            async def post(self):
+                return {"login": "streamer_a", "csrf_token": "invalid"}
+
+        with self.assertRaises(web.HTTPFound) as bad_ctx:
+            await handler.discord_link(_BadRequest())
+        self.assertEqual(bad_ctx.exception.location, "/twitch/stats?err=csrf")
+        self.assertIsNone(handler.saved_login)
+
+        class _GoodRequest:
+            async def post(self):
+                return {"login": "streamer_a", "csrf_token": "valid-csrf"}
+
+        with self.assertRaises(web.HTTPFound) as good_ctx:
+            await handler.discord_link(_GoodRequest())
+        self.assertEqual(good_ctx.exception.location, "/twitch/stats?ok=1")
+        self.assertEqual(handler.saved_login, "streamer_a")
 
     async def test_dashboard_v2_assets_redirect_when_unauthenticated(self) -> None:
         handler = _DummyOverviewAssetsAuth()

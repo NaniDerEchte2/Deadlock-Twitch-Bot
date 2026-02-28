@@ -21,6 +21,10 @@ class DashboardStatsMixin:
             focus_mode = "time"
 
         show_discord_private = self._is_local_request(request)
+        csrf_token = self._csrf_generate_token(request)
+        csrf_input_html = (
+            f"<input type='hidden' name='csrf_token' value='{html.escape(csrf_token, quote=True)}'>"
+        )
 
         streamer_query = request.query.get("streamer") or ""
         normalized_streamer: str | None = None
@@ -196,6 +200,7 @@ class DashboardStatsMixin:
                         "  <summary title='Discord verknüpfen'>+</summary>"
                         "  <div class='discord-inline-body'>"
                         "    <form method='post' action='/twitch/discord_link'>"
+                        f"      {csrf_input_html}"
                         f"      <input type='hidden' name='login' value='{escaped_login}'>"
                         "      <label>Discord User ID<input type='text' name='discord_user_id' placeholder='123456789012345678'></label>"
                         "      <label>Discord Anzeigename<input type='text' name='discord_display_name' placeholder='Discord-Name'></label>"
