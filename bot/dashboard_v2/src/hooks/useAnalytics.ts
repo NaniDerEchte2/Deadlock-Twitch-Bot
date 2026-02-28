@@ -34,6 +34,9 @@ import {
   fetchViewerDirectory,
   fetchViewerDetail,
   fetchViewerSegments,
+  fetchChatHypeTimeline,
+  fetchChatContentAnalysis,
+  fetchChatSocialGraph,
 } from '@/api/client';
 import type { TimeRange, ViewerSortField, ViewerFilterType } from '@/types/analytics';
 
@@ -337,6 +340,36 @@ export function useViewerSegments(streamer: string | null) {
   return useQuery({
     queryKey: ['viewer-segments', streamer],
     queryFn: () => fetchViewerSegments(streamer),
+    staleTime: STALE_TIME,
+    enabled: !!streamer,
+  });
+}
+
+// Chat Hype Timeline Hook
+export function useChatHypeTimeline(streamer: string | null, sessionId?: number) {
+  return useQuery({
+    queryKey: ['chat-hype-timeline', streamer, sessionId],
+    queryFn: () => fetchChatHypeTimeline(streamer, sessionId),
+    staleTime: STALE_TIME,
+    enabled: !!streamer,
+  });
+}
+
+// Chat Content Analysis Hook
+export function useChatContentAnalysis(streamer: string | null, days: number) {
+  return useQuery({
+    queryKey: ['chat-content-analysis', streamer, days],
+    queryFn: () => fetchChatContentAnalysis(streamer, days),
+    staleTime: STALE_TIME,
+    enabled: !!streamer,
+  });
+}
+
+// Chat Social Graph Hook
+export function useChatSocialGraph(streamer: string | null, days: number) {
+  return useQuery({
+    queryKey: ['chat-social-graph', streamer, days],
+    queryFn: () => fetchChatSocialGraph(streamer, days),
     staleTime: STALE_TIME,
     enabled: !!streamer,
   });

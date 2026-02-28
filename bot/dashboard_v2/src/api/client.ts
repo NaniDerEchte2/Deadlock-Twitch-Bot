@@ -33,6 +33,9 @@ import type {
   ViewerSegments,
   ViewerSortField,
   ViewerFilterType,
+  ChatHypeTimeline,
+  ChatContentAnalysis,
+  ChatSocialGraph,
 } from '@/types/analytics';
 
 const API_BASE = '/twitch/api/v2';
@@ -480,6 +483,39 @@ export async function fetchViewerSegments(
 ): Promise<ViewerSegments> {
   return fetchApi<ViewerSegments>('/viewer-segments', {
     streamer: streamer || '',
+  });
+}
+
+// Chat Hype Timeline
+export async function fetchChatHypeTimeline(
+  streamer: string | null,
+  sessionId?: number
+): Promise<ChatHypeTimeline> {
+  return fetchApi<ChatHypeTimeline>('/chat-hype-timeline', {
+    streamer: streamer || '',
+    ...(sessionId != null && { session_id: sessionId }),
+  });
+}
+
+// Chat Content Analysis (hero mentions, topics, sentiment)
+export async function fetchChatContentAnalysis(
+  streamer: string | null,
+  days: number
+): Promise<ChatContentAnalysis> {
+  return fetchApi<ChatContentAnalysis>('/chat-content-analysis', {
+    streamer: streamer || '',
+    days,
+  });
+}
+
+// Chat Social Graph (@mentions network)
+export async function fetchChatSocialGraph(
+  streamer: string | null,
+  days: number
+): Promise<ChatSocialGraph> {
+  return fetchApi<ChatSocialGraph>('/chat-social-graph', {
+    streamer: streamer || '',
+    days,
   });
 }
 

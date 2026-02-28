@@ -16,6 +16,7 @@ from .api_audience import _AnalyticsAudienceMixin
 from .api_insights import _AnalyticsInsightsMixin
 from .api_overview import _AnalyticsOverviewMixin
 from .api_performance import _AnalyticsPerformanceMixin
+from .api_chat_deep import _AnalyticsChatDeepMixin
 from .api_raids import _AnalyticsRaidsMixin
 from .api_viewers import _AnalyticsViewersMixin
 
@@ -78,6 +79,7 @@ class AnalyticsV2Mixin(
     _AnalyticsInsightsMixin,
     _AnalyticsRaidsMixin,
     _AnalyticsViewersMixin,
+    _AnalyticsChatDeepMixin,
 ):
     """Mixin providing v2 analytics API endpoints for the dashboard."""
 

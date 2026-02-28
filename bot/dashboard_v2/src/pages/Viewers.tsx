@@ -54,6 +54,18 @@ const FILTER_OPTIONS: { value: ViewerFilterType; label: string }[] = [
   { value: 'churned', label: 'Churned' },
 ];
 
+const PERSONALITY_LABELS: Record<string, string> = {
+  'Command': 'Befehlsgeber',
+  'Greeting': 'Willkommener',
+  'Question': 'Fragesteller',
+  'Reaction': 'Reactor',
+  'Game-Related': 'Game-Diskutierer',
+  'Engagement': 'Engagierter',
+  'Other': 'Allrounder',
+};
+
+const PERSONALITY_COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#8b5cf6', '#ef4444', '#06b6d4', '#6b7280'];
+
 function formatNumber(n: number): string {
   return n.toLocaleString('de-DE');
 }
@@ -278,6 +290,65 @@ function ViewerExpandedRow({ login, streamer }: { login: string; streamer: strin
           </div>
         </div>
       </div>
+
+      {/* Personality Panel */}
+      {data.personality && (
+        <div className="mt-4 bg-card rounded-lg border border-border p-4">
+          <h4 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
+            <Users className="w-4 h-4 text-success" />
+            Personality
+            <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-success/10 text-success border border-success/20">
+              {PERSONALITY_LABELS[data.personality.primary] || data.personality.primary}
+            </span>
+          </h4>
+          <div className="flex items-center gap-4">
+            <div className="h-[100px] w-[100px] shrink-0">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={Object.entries(data.personality.distribution).map(([k, v]) => ({
+                      name: k,
+                      value: v,
+                    }))}
+                    innerRadius={25}
+                    outerRadius={42}
+                    dataKey="value"
+                    stroke="none"
+                  >
+                    {Object.keys(data.personality.distribution).map((key, idx) => (
+                      <Cell key={key} fill={PERSONALITY_COLORS[idx % PERSONALITY_COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#1f2937',
+                      border: '1px solid rgba(194,221,240,0.25)',
+                      borderRadius: '8px',
+                      fontSize: '12px',
+                    }}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="flex flex-wrap gap-2 text-xs">
+              {Object.entries(data.personality.distribution)
+                .sort(([, a], [, b]) => b - a)
+                .map(([key, val]) => {
+                  const total = Object.values(data.personality!.distribution).reduce((s, v) => s + v, 0);
+                  return (
+                    <span key={key} className="flex items-center gap-1 text-text-secondary">
+                      <span
+                        className="w-2 h-2 rounded-sm"
+                        style={{ backgroundColor: PERSONALITY_COLORS[Object.keys(data.personality!.distribution).indexOf(key) % PERSONALITY_COLORS.length] }}
+                      />
+                      {key}: {total > 0 ? Math.round(val / total * 100) : 0}%
+                    </span>
+                  );
+                })}
+            </div>
+          </div>
+        </div>
+      )}
     </motion.div>
   );
 }

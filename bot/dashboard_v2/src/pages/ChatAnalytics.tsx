@@ -1,11 +1,16 @@
+import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { MessageCircle, Users, Heart, TrendingUp, AlertCircle, Loader2, Award, Info } from 'lucide-react';
+import { MessageCircle, Users, Heart, TrendingUp, AlertCircle, Loader2, Award, Info, Zap, Smile, AtSign } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { useId } from 'react';
+import {
+  ComposedChart, Bar, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
+  AreaChart, Area, PieChart, Pie, Cell,
+} from 'recharts';
 import { fetchChatAnalytics } from '@/api/client';
-import { useViewerProfiles, useCoaching } from '@/hooks/useAnalytics';
+import { useViewerProfiles, useCoaching, useChatHypeTimeline, useChatContentAnalysis, useChatSocialGraph } from '@/hooks/useAnalytics';
 import { ViewerProfiles } from '@/components/charts/ViewerProfiles';
-import type { ChatAnalytics as ChatAnalyticsType, CoachingData } from '@/types/analytics';
+import type { ChatAnalytics as ChatAnalyticsType, CoachingData, ChatHypeTimeline, ChatContentAnalysis, ChatSocialGraph } from '@/types/analytics';
 import {
   CHAT_AUDIENCE_TOOLTIP,
   normalizeHourlyActivity,
@@ -30,6 +35,12 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
 
   const { data: viewerProfilesData } = useViewerProfiles(streamer, days);
   const { data: coachingData } = useCoaching(streamer, days);
+
+  // Chat Deep Analysis hooks
+  const [selectedSessionId, setSelectedSessionId] = useState<number | undefined>(undefined);
+  const { data: hypeData } = useChatHypeTimeline(streamer, selectedSessionId);
+  const { data: contentData } = useChatContentAnalysis(streamer, days);
+  const { data: socialData } = useChatSocialGraph(streamer, days);
 
   if (!streamer) {
     return (
@@ -405,6 +416,17 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
           )}
         </div>
       </motion.div>
+
+      {/* ═══ Chat Deep Analysis Sections ═══ */}
+
+      {/* Hype-Momente */}
+      {hypeData && <HypeMomenteSection data={hypeData} selectedSessionId={selectedSessionId} onSessionChange={setSelectedSessionId} />}
+
+      {/* Stimmung & Topics */}
+      {contentData && <StimmungTopicsSection data={contentData} />}
+
+      {/* Chat-Netzwerk */}
+      {socialData && <ChatNetzwerkSection data={socialData} />}
     </div>
   );
 }
@@ -662,6 +684,447 @@ function ChatConcentrationSection({ data }: { data: CoachingData }) {
                 <span className="text-xs text-text-secondary w-12 text-right">{c.sharePct.toFixed(1)}%</span>
               </div>
             ))}
+          </div>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Hype-Momente Section
+// ---------------------------------------------------------------------------
+
+const CHART_TOOLTIP_STYLE = {
+  backgroundColor: '#1f2937',
+  border: '1px solid rgba(194,221,240,0.25)',
+  borderRadius: '8px',
+  fontSize: '12px',
+};
+
+function HypeMomenteSection({
+  data,
+  selectedSessionId,
+  onSessionChange,
+}: {
+  data: ChatHypeTimeline;
+  selectedSessionId?: number;
+  onSessionChange: (id: number | undefined) => void;
+}) {
+  const correlationLabel = (() => {
+    const r = data.correlation.chatViewerR;
+    if (Math.abs(r) >= 0.7) return `stark (r=${r})`;
+    if (Math.abs(r) >= 0.4) return `moderat (r=${r})`;
+    if (Math.abs(r) >= 0.2) return `schwach (r=${r})`;
+    return `keine (r=${r})`;
+  })();
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.35 }}
+      className="panel-card rounded-2xl p-6"
+    >
+      <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center gap-3">
+          <Zap className="w-6 h-6 text-warning" />
+          <h2 className="text-xl font-bold text-white">Hype-Momente</h2>
+        </div>
+        {/* Session Selector */}
+        {data.recentSessions.length > 0 && (
+          <select
+            className="bg-background border border-border rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-primary/50"
+            value={selectedSessionId ?? data.sessionId}
+            onChange={e => {
+              const val = parseInt(e.target.value, 10);
+              onSessionChange(val === data.sessionId && !selectedSessionId ? undefined : val);
+            }}
+          >
+            <option value={data.sessionId}>
+              Aktuelle Session — {data.sessionTitle || data.startedAt.split('T')[0]}
+            </option>
+            {data.recentSessions.map(s => (
+              <option key={s.id} value={s.id}>
+                {s.date} — {s.title || `Session #${s.id}`} (Ø {s.avgMPM} MPM)
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      {/* KPI Row */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <div className="text-center p-3 rounded-lg bg-background/50">
+          <div className="text-2xl font-bold text-white">{data.avgMPM}</div>
+          <div className="text-xs text-text-secondary">Ø Messages/Min</div>
+        </div>
+        <div className="text-center p-3 rounded-lg bg-background/50">
+          <div className="text-2xl font-bold text-warning">{data.peakMPM}</div>
+          <div className="text-xs text-text-secondary">Peak MPM</div>
+        </div>
+        <div className="text-center p-3 rounded-lg bg-background/50">
+          <div className="text-2xl font-bold text-accent">{data.spikes.length}</div>
+          <div className="text-xs text-text-secondary">Hype-Spikes</div>
+        </div>
+        <div className="text-center p-3 rounded-lg bg-background/50">
+          <div className={`text-sm font-bold ${Math.abs(data.correlation.chatViewerR) >= 0.4 ? 'text-success' : 'text-text-secondary'}`}>
+            {correlationLabel}
+          </div>
+          <div className="text-xs text-text-secondary">Chat↔Viewer Korrelation</div>
+        </div>
+      </div>
+
+      {/* Dual-Axis Chart */}
+      {data.timeline.length > 0 && (
+        <div className="h-[280px] mb-4">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={data.timeline}>
+              <XAxis
+                dataKey="minute"
+                tickFormatter={v => `${v}m`}
+                tick={{ fontSize: 11, fill: 'var(--color-text-secondary)' }}
+              />
+              <YAxis yAxisId="left" tick={{ fontSize: 11, fill: 'var(--color-text-secondary)' }} />
+              <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11, fill: 'var(--color-text-secondary)' }} />
+              <Tooltip contentStyle={CHART_TOOLTIP_STYLE} labelFormatter={v => `Minute ${v}`} />
+              <Bar
+                yAxisId="left"
+                dataKey="messages"
+                fill="var(--color-primary)"
+                opacity={0.7}
+                radius={[2, 2, 0, 0]}
+                name="Messages"
+              />
+              <Line
+                yAxisId="right"
+                type="monotone"
+                dataKey="viewers"
+                stroke="var(--color-accent)"
+                strokeWidth={2}
+                dot={false}
+                name="Viewer"
+              />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* Top Spikes Table */}
+      {data.spikes.length > 0 && (
+        <div>
+          <h3 className="text-sm font-medium text-text-secondary mb-2">Top Hype-Spikes</h3>
+          <div className="space-y-1.5">
+            {data.spikes.slice(0, 5).map((spike, i) => (
+              <div key={i} className="flex items-center justify-between text-xs bg-background/50 rounded-lg px-3 py-2">
+                <span className="text-white font-medium">Minute {spike.minute}</span>
+                <span className="text-warning font-bold">{spike.messages} Messages</span>
+                <span className="text-text-secondary">{spike.multiplier}x Durchschnitt</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </motion.div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Stimmung & Topics Section
+// ---------------------------------------------------------------------------
+
+const TOPIC_COLORS: Record<string, string> = {
+  heroes: '#3b82f6',
+  builds: '#f59e0b',
+  ranked: '#8b5cf6',
+  meta: '#ef4444',
+  gameplay: '#06b6d4',
+  backseat: '#f97316',
+  other: '#6b7280',
+};
+
+function StimmungTopicsSection({ data }: { data: ChatContentAnalysis }) {
+  const sentimentColor = data.overallSentiment.score > 0.2 ? 'text-success' : data.overallSentiment.score < -0.2 ? 'text-error' : 'text-text-secondary';
+  const trendArrow = data.overallSentiment.trend === 'rising' ? '↑' : data.overallSentiment.trend === 'falling' ? '↓' : '→';
+
+  // Donut data for topics
+  const topicEntries = Object.entries(data.topicBreakdown).filter(([, v]) => v > 0);
+  const topicTotal = topicEntries.reduce((s, [, v]) => s + v, 0);
+  const donutData = topicEntries.map(([key, val]) => ({
+    name: key === 'heroes' ? 'Heroes' : key === 'builds' ? 'Builds' : key === 'ranked' ? 'Ranked' : key === 'meta' ? 'Meta' : key === 'gameplay' ? 'Gameplay' : key === 'backseat' ? 'Backseat' : 'Sonstiges',
+    value: val,
+    color: TOPIC_COLORS[key] || '#6b7280',
+  }));
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.4 }}
+      className="panel-card rounded-2xl p-6"
+    >
+      <div className="flex items-center gap-3 mb-6">
+        <Smile className="w-6 h-6 text-success" />
+        <h2 className="text-xl font-bold text-white">Stimmung & Topics</h2>
+        <span className={`text-sm font-bold ${sentimentColor}`}>
+          {data.overallSentiment.label} {trendArrow}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Sentiment Timeline */}
+        <div>
+          <h3 className="text-sm font-medium text-text-secondary mb-3">Stimmungsverlauf</h3>
+          {data.sentimentTimeline.length > 0 ? (
+            <div className="h-[200px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={data.sentimentTimeline}>
+                  <XAxis dataKey="bucket" hide />
+                  <YAxis domain={[-1, 1]} tick={{ fontSize: 10, fill: 'var(--color-text-secondary)' }} />
+                  <Tooltip contentStyle={CHART_TOOLTIP_STYLE} labelFormatter={v => String(v)} />
+                  <Area
+                    type="monotone"
+                    dataKey="score"
+                    stroke="var(--color-success)"
+                    fill="var(--color-success)"
+                    fillOpacity={0.2}
+                    strokeWidth={2}
+                    name="Sentiment"
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <p className="text-xs text-text-secondary py-8 text-center">Keine Sentiment-Daten</p>
+          )}
+          <div className="flex justify-between text-xs text-text-secondary mt-2">
+            <span>Positiv: {data.overallSentiment.positiveCount}</span>
+            <span>Negativ: {data.overallSentiment.negativeCount}</span>
+            <span>Analysiert: {data.overallSentiment.totalAnalyzed}</span>
+          </div>
+        </div>
+
+        {/* Hero Mentions + Topic Donut */}
+        <div className="space-y-4">
+          {/* Hero Mentions */}
+          {data.heroMentions.length > 0 && (
+            <div>
+              <h3 className="text-sm font-medium text-text-secondary mb-2">Hero-Mentions</h3>
+              <div className="space-y-2">
+                {data.heroMentions.slice(0, 8).map(hero => (
+                  <div key={hero.hero} className="flex items-center gap-2">
+                    <span className="text-xs text-white w-24 truncate capitalize">{hero.hero.replace('_', ' ')}</span>
+                    <div className="flex-1 h-2 bg-background/80 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-primary/70 rounded-full"
+                        style={{ width: `${hero.pct}%` }}
+                      />
+                    </div>
+                    <span className="text-xs text-text-secondary w-16 text-right">{hero.count} ({hero.pct}%)</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Topic Donut */}
+          {donutData.length > 0 && (
+            <div>
+              <h3 className="text-sm font-medium text-text-secondary mb-2">Topic-Verteilung</h3>
+              <div className="flex items-center gap-4">
+                <div className="h-[120px] w-[120px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie data={donutData} innerRadius={30} outerRadius={50} dataKey="value" stroke="none">
+                        {donutData.map((entry, idx) => (
+                          <Cell key={idx} fill={entry.color} />
+                        ))}
+                      </Pie>
+                      <Tooltip contentStyle={CHART_TOOLTIP_STYLE} formatter={(value) => `${Number(value).toLocaleString('de-DE')}`} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="flex flex-wrap gap-2 text-xs">
+                  {donutData.map(d => (
+                    <span key={d.name} className="flex items-center gap-1.5 text-text-secondary">
+                      <span className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: d.color }} />
+                      {d.name}: {topicTotal > 0 ? Math.round(d.value / topicTotal * 100) : 0}%
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Backseat + Engagement Depth Row */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+        {/* Backseat Gaming */}
+        <div className="bg-background/30 rounded-xl border border-border/50 p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-medium text-text-secondary">Backseat Gaming</h3>
+            <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+              data.backseat.pct > 10 ? 'bg-warning/10 text-warning' : 'bg-success/10 text-success'
+            }`}>
+              {data.backseat.pct}%
+            </span>
+          </div>
+          <div className="flex items-baseline gap-2 mb-3">
+            <span className="text-2xl font-bold text-white">{data.backseat.count.toLocaleString('de-DE')}</span>
+            <span className="text-xs text-text-secondary">Messages mit Coaching-Charakter</span>
+          </div>
+          {data.backseat.examples.length > 0 && (
+            <div className="space-y-1 max-h-[100px] overflow-y-auto">
+              {data.backseat.examples.slice(0, 5).map((ex, i) => (
+                <div key={i} className="text-xs text-text-secondary bg-background/50 rounded px-2 py-1 truncate italic">
+                  "{ex}"
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Chat Engagement Depth */}
+        <div className="bg-background/30 rounded-xl border border-border/50 p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-medium text-text-secondary">Chat-Tiefe</h3>
+            <span className="text-xs text-text-secondary">
+              Ø {data.engagementDepth.avgWordCount} Wörter/Message
+            </span>
+          </div>
+          {/* Stacked bar */}
+          <div className="flex rounded-lg overflow-hidden h-8 mb-3">
+            {data.engagementDepth.reactionPct > 0 && (
+              <div
+                className="bg-warning/60 flex items-center justify-center text-xs text-white font-medium"
+                style={{ width: `${data.engagementDepth.reactionPct}%`, minWidth: data.engagementDepth.reactionPct > 8 ? undefined : '2px' }}
+                title={`Reactions: ${data.engagementDepth.reaction}`}
+              >
+                {data.engagementDepth.reactionPct >= 10 && `${data.engagementDepth.reactionPct}%`}
+              </div>
+            )}
+            {data.engagementDepth.shortPct > 0 && (
+              <div
+                className="bg-primary/60 flex items-center justify-center text-xs text-white font-medium"
+                style={{ width: `${data.engagementDepth.shortPct}%`, minWidth: data.engagementDepth.shortPct > 8 ? undefined : '2px' }}
+                title={`Kurz: ${data.engagementDepth.short}`}
+              >
+                {data.engagementDepth.shortPct >= 10 && `${data.engagementDepth.shortPct}%`}
+              </div>
+            )}
+            {data.engagementDepth.discussionPct > 0 && (
+              <div
+                className="bg-success/60 flex items-center justify-center text-xs text-white font-medium"
+                style={{ width: `${data.engagementDepth.discussionPct}%`, minWidth: data.engagementDepth.discussionPct > 8 ? undefined : '2px' }}
+                title={`Diskussionen: ${data.engagementDepth.discussion}`}
+              >
+                {data.engagementDepth.discussionPct >= 10 && `${data.engagementDepth.discussionPct}%`}
+              </div>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-3 text-xs">
+            <span className="flex items-center gap-1.5 text-text-secondary">
+              <span className="w-2.5 h-2.5 rounded-sm bg-warning/60" />
+              Reactions (1-3): {data.engagementDepth.reaction.toLocaleString('de-DE')} ({data.engagementDepth.reactionPct}%)
+            </span>
+            <span className="flex items-center gap-1.5 text-text-secondary">
+              <span className="w-2.5 h-2.5 rounded-sm bg-primary/60" />
+              Kurz (4-10): {data.engagementDepth.short.toLocaleString('de-DE')} ({data.engagementDepth.shortPct}%)
+            </span>
+            <span className="flex items-center gap-1.5 text-text-secondary">
+              <span className="w-2.5 h-2.5 rounded-sm bg-success/60" />
+              Diskussion (11+): {data.engagementDepth.discussion.toLocaleString('de-DE')} ({data.engagementDepth.discussionPct}%)
+            </span>
+          </div>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Chat-Netzwerk Section
+// ---------------------------------------------------------------------------
+
+function ChatNetzwerkSection({ data }: { data: ChatSocialGraph }) {
+  if (data.totalMentions === 0) return null;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.45 }}
+      className="panel-card rounded-2xl p-6"
+    >
+      <div className="flex items-center gap-3 mb-6">
+        <AtSign className="w-6 h-6 text-accent" />
+        <h2 className="text-xl font-bold text-white">Chat-Netzwerk</h2>
+      </div>
+
+      {/* Stats Row */}
+      <div className="grid grid-cols-3 gap-4 mb-6">
+        <div className="text-center p-3 rounded-lg bg-background/50">
+          <div className="text-2xl font-bold text-white">{data.totalMentions}</div>
+          <div className="text-xs text-text-secondary">@Mentions gesamt</div>
+        </div>
+        <div className="text-center p-3 rounded-lg bg-background/50">
+          <div className="text-2xl font-bold text-accent">{data.uniqueMentioners}</div>
+          <div className="text-xs text-text-secondary">Unique Mentioner</div>
+        </div>
+        <div className="text-center p-3 rounded-lg bg-background/50">
+          <div className="text-2xl font-bold text-primary">{data.uniqueMentioned}</div>
+          <div className="text-xs text-text-secondary">Erwähnte User</div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Hub Cards */}
+        <div>
+          <h3 className="text-sm font-medium text-text-secondary mb-3">Conversation-Hubs</h3>
+          <div className="space-y-2">
+            {data.hubs.slice(0, 5).map((hub, i) => (
+              <div key={hub.login} className="flex items-center gap-3 p-3 rounded-xl bg-background/75 border border-border/65">
+                <div className="w-7 h-7 rounded-full bg-accent/20 flex items-center justify-center text-xs font-bold text-accent">
+                  {i + 1}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium text-white text-sm truncate">{hub.login}</div>
+                  <div className="text-xs text-text-secondary">
+                    {hub.mentionsSent} gesendet · {hub.mentionsReceived} erhalten
+                  </div>
+                </div>
+                <div className="text-sm font-bold text-accent">{hub.score}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Top Pairs + Distribution */}
+        <div className="space-y-4">
+          <div>
+            <h3 className="text-sm font-medium text-text-secondary mb-3">Top-Gespräche</h3>
+            <div className="space-y-1.5">
+              {data.topPairs.slice(0, 8).map((pair, i) => (
+                <div key={i} className="flex items-center justify-between text-xs bg-background/50 rounded-lg px-3 py-2">
+                  <span className="text-white">
+                    <span className="font-medium">{pair.from}</span>
+                    <span className="text-text-secondary mx-1.5">→</span>
+                    <span className="font-medium">{pair.to}</span>
+                  </span>
+                  <span className="text-accent font-bold">{pair.count}x</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <h3 className="text-sm font-medium text-text-secondary mb-2">Mention-Verteilung</h3>
+            <div className="flex gap-3 text-xs">
+              <span className="text-text-secondary">1x: <span className="text-white font-medium">{data.mentionDistribution.mentionedOnce}</span></span>
+              <span className="text-text-secondary">2-5x: <span className="text-white font-medium">{data.mentionDistribution.mentioned2to5}</span></span>
+              <span className="text-text-secondary">5+: <span className="text-white font-medium">{data.mentionDistribution.mentioned5plus}</span></span>
+            </div>
           </div>
         </div>
       </div>

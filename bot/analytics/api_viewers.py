@@ -436,6 +436,39 @@ class _AnalyticsViewersMixin:
                 dow_names = ["Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"]
                 most_active_day = dow_names[max(dow_counts, key=lambda d: dow_counts[d])] if dow_counts else "N/A"
 
+                # ── Personality: classify messages into types ──
+                personality = None
+                personality_cutoff = (now - timedelta(days=90)).isoformat()
+                personality_bot_clause, personality_bot_params = build_known_chat_bot_not_in_clause(
+                    column_expr="m.chatter_login"
+                )
+                msg_rows = conn.execute(
+                    f"""
+                    SELECT m.content
+                    FROM twitch_chat_messages m
+                    JOIN twitch_stream_sessions s ON s.id = m.session_id
+                    WHERE LOWER(s.streamer_login) = ?
+                      AND LOWER(m.chatter_login) = ?
+                      AND m.message_ts >= ?
+                      AND {personality_bot_clause}
+                    LIMIT 2000
+                    """,
+                    [streamer, login, personality_cutoff, *personality_bot_params],
+                ).fetchall()
+
+                if msg_rows:
+                    type_counts: dict[str, int] = {}
+                    for mr in msg_rows:
+                        msg_type = self._classify_message(mr[0] or "")
+                        type_counts[msg_type] = type_counts.get(msg_type, 0) + 1
+
+                    total_msgs_classified = sum(type_counts.values())
+                    primary_type = max(type_counts, key=lambda k: type_counts[k]) if type_counts else "Other"
+                    personality = {
+                        "primary": primary_type,
+                        "distribution": type_counts,
+                    }
+
                 # Message trend: compare first half vs second half of timeline
                 if len(activity_timeline) >= 4:
                     mid = len(activity_timeline) // 2
@@ -470,6 +503,7 @@ class _AnalyticsViewersMixin:
                         "mostActiveDay": most_active_day,
                         "messagesTrend": trend,
                     },
+                    **({"personality": personality} if personality else {}),
                 })
 
         except Exception as exc:

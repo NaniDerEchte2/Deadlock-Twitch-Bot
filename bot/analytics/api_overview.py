@@ -71,6 +71,10 @@ class _AnalyticsOverviewMixin:
         router.add_get("/twitch/api/v2/viewer-directory", self._api_v2_viewer_directory)
         router.add_get("/twitch/api/v2/viewer-detail", self._api_v2_viewer_detail)
         router.add_get("/twitch/api/v2/viewer-segments", self._api_v2_viewer_segments)
+        # Chat Deep Analysis
+        router.add_get("/twitch/api/v2/chat-hype-timeline", self._api_v2_chat_hype_timeline)
+        router.add_get("/twitch/api/v2/chat-content-analysis", self._api_v2_chat_content_analysis)
+        router.add_get("/twitch/api/v2/chat-social-graph", self._api_v2_chat_social_graph)
         # Serve the dashboard
         router.add_get("/twitch/dashboard-v2", self._serve_dashboard_v2)
         router.add_get("/twitch/dashboard-v2/{path:.*}", self._serve_dashboard_v2_assets)

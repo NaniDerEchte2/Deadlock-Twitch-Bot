@@ -899,6 +899,7 @@ export interface ViewerDetail {
   activityTimeline: ViewerActivityDay[];
   crossChannelPresence: ViewerCrossChannel[];
   chatPatterns: ViewerChatPatterns;
+  personality?: ViewerPersonality;
 }
 
 export interface SegmentData {
@@ -939,4 +940,129 @@ export interface ViewerSegments {
   segments: Record<string, SegmentData>;
   churnRisk: ChurnRisk;
   crossChannelStats: CrossChannelStats;
+}
+
+// ── Chat Deep Analysis Types ──
+
+export interface HypeTimelineEntry {
+  minute: number;
+  messages: number;
+  chatters: number;
+  viewers: number;
+  isSpike: boolean;
+}
+
+export interface HypeSpike {
+  minute: number;
+  messages: number;
+  multiplier: number;
+}
+
+export interface HypeCorrelation {
+  chatViewerR: number;
+  interpretation: string;
+  chatLeadsViewers: boolean;
+  lagMinutes: number;
+}
+
+export interface HypeRecentSession {
+  id: number;
+  date: string;
+  title: string;
+  avgMPM: number;
+  peakMPM: number;
+}
+
+export interface ChatHypeTimeline {
+  sessionId: number;
+  sessionTitle: string;
+  startedAt: string;
+  duration: number;
+  avgMPM: number;
+  peakMPM: number;
+  timeline: HypeTimelineEntry[];
+  spikes: HypeSpike[];
+  correlation: HypeCorrelation;
+  recentSessions: HypeRecentSession[];
+}
+
+export interface HeroMention {
+  hero: string;
+  count: number;
+  pct: number;
+}
+
+export interface SentimentBucket {
+  bucket: string;
+  positive: number;
+  negative: number;
+  score: number;
+}
+
+export interface OverallSentiment {
+  score: number;
+  label: string;
+  trend: string;
+  totalAnalyzed: number;
+  positiveCount: number;
+  negativeCount: number;
+}
+
+export interface BackseatData {
+  count: number;
+  pct: number;
+  examples: string[];
+}
+
+export interface EngagementDepth {
+  reaction: number;
+  reactionPct: number;
+  short: number;
+  shortPct: number;
+  discussion: number;
+  discussionPct: number;
+  total: number;
+  avgWordCount: number;
+}
+
+export interface ChatContentAnalysis {
+  heroMentions: HeroMention[];
+  topicBreakdown: Record<string, number>;
+  sentimentTimeline: SentimentBucket[];
+  overallSentiment: OverallSentiment;
+  backseat: BackseatData;
+  engagementDepth: EngagementDepth;
+}
+
+export interface SocialHub {
+  login: string;
+  mentionsSent: number;
+  mentionsReceived: number;
+  score: number;
+}
+
+export interface SocialPair {
+  from: string;
+  to: string;
+  count: number;
+}
+
+export interface MentionDistribution {
+  mentionedOnce: number;
+  mentioned2to5: number;
+  mentioned5plus: number;
+}
+
+export interface ChatSocialGraph {
+  totalMentions: number;
+  uniqueMentioners: number;
+  uniqueMentioned: number;
+  hubs: SocialHub[];
+  topPairs: SocialPair[];
+  mentionDistribution: MentionDistribution;
+}
+
+export interface ViewerPersonality {
+  primary: string;
+  distribution: Record<string, number>;
 }
