@@ -169,6 +169,7 @@ class _AnalyticsOverviewMixin:
         # Demo dashboard HTML
         router.add_get("/twitch/demo/", self._serve_demo_dashboard)
         router.add_get("/twitch/demo", self._serve_demo_dashboard)
+        router.add_get("/twitch/demo/dashboard-v2/{path:.*}", self._serve_demo_dashboard_assets)
 
     async def _serve_demo_dashboard(self, request: web.Request) -> web.Response:
         """Serve the demo dashboard HTML without authentication."""
@@ -181,6 +182,9 @@ class _AnalyticsOverviewMixin:
                 status=404,
             )
         html = dist_path.read_text(encoding="utf-8")
+        # Keep demo assets on a dedicated public path so dashboard-v2 auth
+        # rules cannot interfere with demo rendering.
+        html = html.replace("/twitch/dashboard-v2/", "/twitch/demo/dashboard-v2/")
         # Inject demo config + fetch interceptor before the app boots.
         # The built JS has the API base hardcoded as "/twitch/api/v2", so we
         # intercept fetch() to transparently rewrite those calls to the public
@@ -190,12 +194,26 @@ class _AnalyticsOverviewMixin:
             "window.__DEMO_MODE__=true;"
             'window.__DEMO_STREAMER__="deadlock_de_demo";'
             "(function(){"
+            'var INTERNAL_PREFIX="/twitch/api/v2/";'
+            'var DEMO_PREFIX="/twitch/demo/api/v2/";'
             "var _f=window.fetch;"
-            "window.fetch=function(u,o){"
-            'if(typeof u==="string"&&u.indexOf("/twitch/api/v2/")!==-1){'
-            'u=u.replace("/twitch/api/v2/","/twitch/demo/api/v2/");'
+            "function _rewriteUrl(raw){"
+            "if(raw==null){return raw;}"
+            "var s=String(raw);"
+            "var abs;"
+            "try{abs=new URL(s,window.location.origin);}catch(_){return raw;}"
+            'if(abs.origin!==window.location.origin||abs.pathname.indexOf(INTERNAL_PREFIX)!==0){return raw;}'
+            'abs.pathname=DEMO_PREFIX+abs.pathname.slice(INTERNAL_PREFIX.length);'
+            "return abs.toString();"
             "}"
+            "window.fetch=function(u,o){"
+            "if(typeof Request!==\"undefined\"&&u instanceof Request){"
+            "var rewrittenReq=_rewriteUrl(u.url);"
+            "if(rewrittenReq!==u.url){return _f.call(this,new Request(rewrittenReq,u),o);}"
             "return _f.call(this,u,o);"
+            "}"
+            "var rewritten=_rewriteUrl(u);"
+            "return _f.call(this,rewritten,o);"
             "};"
             "})();"
             "</script>"
@@ -230,10 +248,16 @@ class _AnalyticsOverviewMixin:
             else:
                 login_url = DASHBOARD_V2_LOGIN_URL
             raise web.HTTPFound(login_url)
+        return self._resolve_dashboard_v2_asset_response(request.match_info.get("path", ""))
 
+    async def _serve_demo_dashboard_assets(self, request: web.Request) -> web.Response:
+        """Serve static assets for the public demo dashboard without auth."""
+        return self._resolve_dashboard_v2_asset_response(request.match_info.get("path", ""))
+
+    def _resolve_dashboard_v2_asset_response(self, raw_path: str) -> web.StreamResponse:
+        """Resolve dashboard-v2 dist files with strict path validation."""
         import pathlib
 
-        raw_path = request.match_info.get("path", "")
         if not raw_path:
             return web.Response(text="Not found", status=404)
 

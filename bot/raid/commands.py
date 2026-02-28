@@ -9,6 +9,7 @@ from discord.ext import commands
 
 from ..chat.constants import PROMO_MESSAGES
 from ..storage import get_conn
+from .auth import RAID_SCOPES
 from .views import RaidAuthGenerateView, build_raid_requirements_embed
 
 log = logging.getLogger("TwitchStreams.RaidCommands")
@@ -16,6 +17,115 @@ log = logging.getLogger("TwitchStreams.RaidCommands")
 
 class RaidCommandsMixin:
     """Discord-Commands für Twitch-Bot-Verwaltung durch Streamer."""
+
+    @commands.hybrid_command(name="check-auth", aliases=["check_auth", "checkauth"])
+    async def cmd_check_auth(self, ctx: commands.Context):
+        """Prüfe, ob dein Twitch-OAuth alle benötigten Scopes enthält."""
+        discord_user_id = str(ctx.author.id)
+
+        with get_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT twitch_login, twitch_user_id
+                FROM twitch_streamers
+                WHERE discord_user_id = ?
+                """,
+                (discord_user_id,),
+            ).fetchone()
+
+        if not row:
+            await ctx.send(
+                "❌ Du bist nicht als Streamer-Partner registriert.",
+                ephemeral=True,
+            )
+            return
+
+        twitch_login, twitch_user_id = row
+        required_scopes = [scope.strip().lower() for scope in RAID_SCOPES if scope.strip()]
+
+        with get_conn() as conn:
+            auth_row = conn.execute(
+                """
+                SELECT scopes, needs_reauth
+                FROM twitch_raid_auth
+                WHERE twitch_user_id = ?
+                """,
+                (twitch_user_id,),
+            ).fetchone()
+
+        if not auth_row:
+            if not hasattr(self, "_raid_bot") or not self._raid_bot:
+                await ctx.send(
+                    "⚠️ Keine Twitch-Autorisierung gefunden und Raid-Bot ist derzeit nicht verfügbar.",
+                    ephemeral=True,
+                )
+                return
+
+            view = RaidAuthGenerateView(
+                auth_manager=self._raid_bot.auth_manager,
+                twitch_login=twitch_login,
+            )
+            await ctx.send(
+                "❌ Für deinen Account ist noch keine Twitch-Autorisierung hinterlegt.\n"
+                "Nutze den Button für eine neue Autorisierung.",
+                view=view,
+                ephemeral=True,
+            )
+            return
+
+        scopes_raw = str(auth_row[0] or "")
+        needs_reauth = bool(auth_row[1])
+        token_scopes = {scope.strip().lower() for scope in scopes_raw.split() if scope.strip()}
+
+        missing_scopes = [scope for scope in required_scopes if scope not in token_scopes]
+        has_full_access = not missing_scopes and not needs_reauth
+
+        if has_full_access:
+            await ctx.send(
+                f"✅ OAuth-Check für **{twitch_login}** erfolgreich.\n"
+                f"Alle Scopes vorhanden ({len(required_scopes)}/{len(required_scopes)}).",
+                ephemeral=True,
+            )
+            return
+
+        missing_lines = "\n".join(f"• `{scope}`" for scope in missing_scopes) or "• Keine"
+        needs_reauth_note = (
+            "\n⚠️ Dein Token ist als Re-Auth markiert (needs_reauth=1)."
+            if needs_reauth
+            else ""
+        )
+
+        if not hasattr(self, "_raid_bot") or not self._raid_bot:
+            await ctx.send(
+                f"⚠️ OAuth-Check für **{twitch_login}**:\n"
+                f"Vorhanden: **{len(required_scopes) - len(missing_scopes)} / {len(required_scopes)}**\n"
+                f"Fehlende Scopes:\n{missing_lines}"
+                f"{needs_reauth_note}\n\n"
+                "Raid-Bot ist aktuell nicht verfügbar, daher kann kein Re-Auth-Link erstellt werden.",
+                ephemeral=True,
+            )
+            return
+
+        view = RaidAuthGenerateView(
+            auth_manager=self._raid_bot.auth_manager,
+            twitch_login=twitch_login,
+        )
+        await ctx.send(
+            f"⚠️ OAuth-Check für **{twitch_login}**:\n"
+            f"Vorhanden: **{len(required_scopes) - len(missing_scopes)} / {len(required_scopes)}**\n"
+            f"Fehlende Scopes:\n{missing_lines}"
+            f"{needs_reauth_note}\n\n"
+            "Bitte neu autorisieren, damit alle neuen Funktionen aktiv sind.",
+            view=view,
+            ephemeral=True,
+        )
+        log.info(
+            "check-auth for %s (%s): missing=%d needs_reauth=%s",
+            twitch_login,
+            discord_user_id,
+            len(missing_scopes),
+            needs_reauth,
+        )
 
     @commands.hybrid_command(name="traid", aliases=["twitch_raid_auth"])
     async def cmd_twitch_raid_auth(self, ctx: commands.Context):
