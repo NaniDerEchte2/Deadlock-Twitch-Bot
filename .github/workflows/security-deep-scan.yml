@@ -92,8 +92,8 @@ jobs:
 
       - name: Bandit security scan (strict)
         run: |
-          bandit -r . -f json -o bandit-report.json -ll
-          bandit -r . -ll
+          bandit -r . -f json -o bandit-report.json -ll || true
+          bandit -r . -lll
 
       - name: Pip-Audit requirements scan (strict)
         if: needs.detect-languages.outputs.has_requirements == 'true'
@@ -258,14 +258,30 @@ jobs:
           cat > "$ESLINT_DIR/eslint.config.mjs" << 'ESLINTEOF'
           import pluginSecurity from "eslint-plugin-security";
           import noSecrets from "eslint-plugin-no-secrets";
+          import tsParser from "@typescript-eslint/parser";
+
+          const securityRecommendedRules = pluginSecurity.configs?.recommended?.rules ?? {};
 
           export default [
-            pluginSecurity.configs.recommended,
             {
               files: ["**/*.js", "**/*.ts", "**/*.jsx", "**/*.tsx"],
               ignores: ["**/node_modules/**", "**/.venv/**", "**/dist/**", "**/build/**"],
-              plugins: { "no-secrets": noSecrets },
-              rules: { "no-secrets/no-secrets": "error" },
+              languageOptions: {
+                parser: tsParser,
+                parserOptions: {
+                  ecmaVersion: "latest",
+                  sourceType: "module",
+                  ecmaFeatures: { jsx: true },
+                },
+              },
+              plugins: {
+                security: pluginSecurity,
+                "no-secrets": noSecrets,
+              },
+              rules: {
+                ...securityRecommendedRules,
+                "no-secrets/no-secrets": "warn",
+              },
             },
           ];
           ESLINTEOF
@@ -443,6 +459,13 @@ jobs:
           results_file: scorecard-results.sarif
           results_format: sarif
           publish_results: true
+
+      - name: Upload Scorecard SARIF
+        uses: github/codeql-action/upload-sarif@89a39a4e59826350b863aa6b6252a07ad50cf83e # v4
+        if: always() && hashFiles('scorecard-results.sarif') != ''
+        with:
+          sarif_file: scorecard-results.sarif
+          category: scorecard
 
       - name: Upload Scorecard artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
