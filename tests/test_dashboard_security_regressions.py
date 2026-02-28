@@ -535,6 +535,22 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
             await handler._serve_dashboard_v2_assets(request)
         self.assertEqual(ctx.exception.location, "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2")
 
+    async def test_demo_dashboard_v2_assets_do_not_redirect_when_unauthenticated(self) -> None:
+        handler = _DummyOverviewAssetsAuth()
+        request = SimpleNamespace(match_info={"path": "missing-demo-asset.js"})
+
+        response = await handler._serve_demo_dashboard_assets(request)
+        self.assertEqual(response.status, 404)
+
+    async def test_demo_dashboard_rewrites_asset_prefix_to_demo_path(self) -> None:
+        handler = _DummyOverviewAssetsAuth()
+        request = SimpleNamespace()
+
+        response = await handler._serve_demo_dashboard(request)
+        self.assertEqual(response.status, 200)
+        self.assertIn("/twitch/demo/dashboard-v2/assets/", response.text)
+        self.assertNotIn("/twitch/dashboard-v2/assets/", response.text)
+
     async def test_social_media_fetch_clips_without_twitch_api_returns_503(self) -> None:
         handler = SocialMediaDashboard(clip_manager=ClipManager(), auth_checker=lambda _req: True)
 
