@@ -157,16 +157,37 @@ class _DashboardRoutesMixin:
     # CSRF Token Protection                                                #
     # ------------------------------------------------------------------ #
 
+    def _csrf_session(self, request: web.Request) -> dict[str, Any]:
+        """Resolve the active authenticated session used for CSRF state."""
+        dashboard_getter = getattr(self, "_get_dashboard_auth_session", None)
+        if callable(dashboard_getter):
+            try:
+                dashboard_session = dashboard_getter(request)
+            except Exception:
+                dashboard_session = None
+            if isinstance(dashboard_session, dict):
+                return dashboard_session
+
+        admin_getter = getattr(self, "_get_discord_admin_session", None)
+        if callable(admin_getter):
+            try:
+                admin_session = admin_getter(request)
+            except Exception:
+                admin_session = None
+            if isinstance(admin_session, dict):
+                return admin_session
+        return {}
+
     def _csrf_generate_token(self, request: web.Request) -> str:
         """Generate and store CSRF token in session."""
         token = secrets.token_urlsafe(32)
-        session = self._get_dashboard_auth_session(request) or {}
+        session = self._csrf_session(request)
         session["csrf_token"] = token
         return token
 
     def _csrf_get_token(self, request: web.Request) -> str | None:
         """Get stored CSRF token from session."""
-        session = self._get_dashboard_auth_session(request) or {}
+        session = self._csrf_session(request)
         return session.get("csrf_token", "")
 
     def _csrf_verify_token(self, request: web.Request, provided_token: str) -> bool:
@@ -625,7 +646,10 @@ class _DashboardRoutesMixin:
             "<a class='action-btn action-neutral' href='/twitch/abbo/rechnungen'>Rechnungen herunterladen</a>"
         )
         account_actions.append(
-            "<a class='action-btn action-danger' href='/twitch/abbo/kündigen'>Abo kündigen</a>"
+            "<form method='post' action='/twitch/abbo/kündigen' style='margin:0;'>"
+            f"<input type='hidden' name='csrf_token' value='{html.escape(csrf_token, quote=True)}'>"
+            "<button class='action-btn action-danger' type='submit'>Abo kündigen</button>"
+            "</form>"
         )
         if self._is_local_request(request) or self._is_discord_admin_request(request):
             account_actions.append(
@@ -633,14 +657,9 @@ class _DashboardRoutesMixin:
             )
         account_actions_html = "".join(account_actions)
 
-        form_customer_reference = html.escape(
-            str(billing_profile.get("customer_reference") or ""),
-            quote=True,
-        )
         billing_profile_form_html = (
             "<form method='post' action='/twitch/abbo/rechnungsdaten'>"
             f"<input type='hidden' name='cycle' value='{selected_cycle}'>"
-            f"<input type='hidden' name='customer_reference' value='{form_customer_reference}'>"
             f"<input type='hidden' name='csrf_token' value='{html.escape(csrf_token, quote=True)}'>"
             "<div class='profile-form'>"
             "<div class='profile-field profile-wide'><label for='recipient_name'>Rechnung an (Name)</label>"
@@ -802,11 +821,8 @@ class _DashboardRoutesMixin:
             or fallback_cancel_url
         )
 
-        session = self._get_dashboard_auth_session(request) or {}
         billing_profile = self._billing_profile_for_request(request)
-        customer_reference = str(
-            session.get("twitch_login") or session.get("twitch_user_id") or ""
-        ).strip()
+        customer_reference = self._billing_primary_ref_for_request(request)
         customer_email = str(billing_profile.get("recipient_email") or "").strip()
         metadata: dict[str, str] = {
             "plan_id": plan_id,
@@ -860,13 +876,7 @@ class _DashboardRoutesMixin:
         if not self._csrf_verify_token(request, csrf_token):
             return web.json_response({"error": "csrf_token_invalid"}, status=403)
         cycle = _normalize_billing_cycle(data.get("cycle"))
-        session = self._get_dashboard_auth_session(request) or {}
-        customer_reference = str(
-            data.get("customer_reference")
-            or session.get("twitch_login")
-            or session.get("twitch_user_id")
-            or ""
-        ).strip()
+        customer_reference = self._billing_primary_ref_for_request(request)
         recipient_name = str(data.get("recipient_name") or "").strip()[:180]
         recipient_email = str(data.get("recipient_email") or "").strip()[:180]
         company_name = str(data.get("company_name") or "").strip()[:200]
@@ -917,6 +927,13 @@ class _DashboardRoutesMixin:
                 else TWITCH_ABBO_LOGIN_URL
             )
             raise web.HTTPFound(login_url)
+
+        if request.method != "POST":
+            raise web.HTTPFound("/twitch/abbo?cancel=post_required")
+        data = await request.post()
+        csrf_token = str(data.get("csrf_token") or "").strip()
+        if not self._csrf_verify_token(request, csrf_token):
+            raise web.HTTPFound("/twitch/abbo?cancel=csrf_invalid")
 
         customer_record = self._billing_customer_record_for_request(request)
         stripe_customer_id = str(customer_record.get("stripe_customer_id") or "").strip()
@@ -1050,6 +1067,13 @@ class _DashboardRoutesMixin:
             if self._is_discord_admin_request(request)
             else "/twitch/auth/logout"
         )
+        csrf_token = self._csrf_generate_token(request)
+        cancel_form_html = (
+            "<form method='post' action='/twitch/abbo/kündigen' style='margin:0;'>"
+            f"<input type='hidden' name='csrf_token' value='{html.escape(csrf_token, quote=True)}'>"
+            "<button class='btn btn-ghost' type='submit'>Abo kündigen</button>"
+            "</form>"
+        )
         page_html = (
             "<!doctype html><html lang='de'><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -1083,7 +1107,7 @@ class _DashboardRoutesMixin:
             "</tbody></table>"
             "<div class='actions'>"
             "<a class='btn btn-primary' href='/twitch/abbo'>Zur Abo Übersicht</a>"
-            "<a class='btn btn-ghost' href='/twitch/abbo/kündigen'>Abo kündigen</a>"
+            f"{cancel_form_html}"
             "</div>"
             "</section>"
             "</main></body></html>"
@@ -1099,12 +1123,7 @@ class _DashboardRoutesMixin:
                 else TWITCH_ABBO_LOGIN_URL
             )
             raise web.HTTPFound(login_url)
-        admin_token = request.headers.get("X-Admin-Token") or request.query.get("token")
-        if not (
-            self._is_local_request(request)
-            or self._is_discord_admin_request(request)
-            or self._check_admin_token(admin_token)
-        ):
+        if not self._check_v2_admin_auth(request):
             raise web.HTTPFound("/twitch/abbo")
 
         readiness = self._billing_stripe_readiness_payload()
@@ -1310,33 +1329,33 @@ class _DashboardRoutesMixin:
             with storage.get_conn() as conn:
                 self._billing_ensure_storage_tables(conn)
                 if event_id:
-                    existing = conn.execute(
-                        "SELECT stripe_event_id FROM twitch_billing_events WHERE stripe_event_id = ?",
-                        (event_id,),
-                    ).fetchone()
-                    duplicate = bool(existing)
-
-                if not duplicate and event_id:
-                    conn.execute(
-                        """
-                        INSERT INTO twitch_billing_events (
-                            stripe_event_id,
-                            event_type,
-                            object_id,
-                            received_at,
-                            livemode,
-                            payload
-                        ) VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            event_id,
-                            event_type,
-                            object_id,
-                            received_at,
-                            1 if livemode else 0,
-                            payload_text,
-                        ),
-                    )
+                    try:
+                        conn.execute(
+                            """
+                            INSERT INTO twitch_billing_events (
+                                stripe_event_id,
+                                event_type,
+                                object_id,
+                                received_at,
+                                livemode,
+                                payload
+                            ) VALUES (?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                event_id,
+                                event_type,
+                                object_id,
+                                received_at,
+                                1 if livemode else 0,
+                                payload_text,
+                            ),
+                        )
+                    except Exception as exc:
+                        err_text = str(exc).lower()
+                        if "unique" in err_text or "primary key" in err_text:
+                            duplicate = True
+                        else:
+                            raise
 
                 if not duplicate:
                     action = self._billing_apply_webhook_event(
@@ -1551,11 +1570,8 @@ class _DashboardRoutesMixin:
                 status=409,
             )
 
-        customer_reference = str(body.get("customer_reference") or "").strip()
+        customer_reference = self._billing_primary_ref_for_request(request)
         billing_profile = self._billing_profile_for_request(request)
-        if not customer_reference:
-            session = self._get_dashboard_auth_session(request) or {}
-            customer_reference = str(session.get("twitch_login") or session.get("twitch_user_id") or "").strip()
 
         customer_email = str(
             body.get("customer_email") or billing_profile.get("recipient_email") or ""
@@ -1576,11 +1592,11 @@ class _DashboardRoutesMixin:
                     metadata[key[:40]] = value[:500]
 
         total_net_cents = unit_net_cents * quantity
-        metadata.setdefault("plan_id", selected_plan_id)
-        metadata.setdefault("cycle_months", str(cycle_months))
-        metadata.setdefault("quantity", str(quantity))
+        metadata["plan_id"] = selected_plan_id
+        metadata["cycle_months"] = str(cycle_months)
+        metadata["quantity"] = str(quantity)
         if customer_reference:
-            metadata.setdefault("customer_reference", customer_reference)
+            metadata["customer_reference"] = customer_reference
 
         stripe_secret_key = str(getattr(self, "_billing_stripe_secret_key", "") or "").strip()
         if not stripe_secret_key:
@@ -1700,15 +1716,9 @@ class _DashboardRoutesMixin:
             quantity = 1
         quantity = min(max(quantity, 1), 24)
 
-        session = self._get_dashboard_auth_session(request) or {}
+        session = self._csrf_session(request)
         billing_profile = self._billing_profile_for_request(request)
-        customer_reference = str(
-            request.query.get("customer_reference")
-            or billing_profile.get("customer_reference")
-            or session.get("twitch_login")
-            or session.get("twitch_user_id")
-            or ""
-        ).strip()
+        customer_reference = self._billing_primary_ref_for_request(request)
         customer_name = str(
             request.query.get("customer_name")
             or billing_profile.get("recipient_name")
@@ -1771,15 +1781,9 @@ class _DashboardRoutesMixin:
             quantity = 1
         quantity = min(max(quantity, 1), 24)
 
-        session = self._get_dashboard_auth_session(request) or {}
+        session = self._csrf_session(request)
         billing_profile = self._billing_profile_for_request(request)
-        customer_reference = str(
-            body.get("customer_reference")
-            or billing_profile.get("customer_reference")
-            or session.get("twitch_login")
-            or session.get("twitch_user_id")
-            or ""
-        ).strip()
+        customer_reference = self._billing_primary_ref_for_request(request)
         customer_name = str(
             body.get("customer_name")
             or billing_profile.get("recipient_name")
@@ -1812,8 +1816,9 @@ class _DashboardRoutesMixin:
 
     async def api_billing_stripe_sync_products(self, request: web.Request) -> web.Response:
         """Create/reuse Stripe products and prices and persist IDs into the Windows vault."""
-        if not self._check_v2_auth(request):
-            return web.json_response({"error": "auth_required"}, status=401)
+        admin_error = self._require_v2_admin_api(request)
+        if admin_error is not None:
+            return admin_error
 
         body = await self._billing_read_request_body(request)
         dry_run_raw = str(body.get("dry_run") or "").strip().lower()
@@ -2186,6 +2191,12 @@ class _DashboardRoutesMixin:
 
             <script>
                 let marketChart = null;
+                const escapeHtml = (value) => String(value ?? '')
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
 
                 const showError = (msg) => {
                     const kpi = document.getElementById('kpi');
@@ -2193,7 +2204,7 @@ class _DashboardRoutesMixin:
                         kpi.innerHTML = `
                             <div class="stat-box">
                                 <div class="stat-val" style="color:#f87171;">Fehler</div>
-                                <div class="stat-label">${msg}</div>
+                                <div class="stat-label">${escapeHtml(msg)}</div>
                             </div>
                         `;
                     }
@@ -2312,17 +2323,17 @@ class _DashboardRoutesMixin:
                     // Questions
                     document.getElementById('questions').innerHTML = questions.map(q => `
                         <div class="question-item">
-                            <div>${q.content}</div>
-                            <div class="question-meta">in @${q.streamer} • ${(q.ts || '').split('T')[1]?.substring(0, 5) || '--:--'} Uhr</div>
+                            <div>${escapeHtml(q.content)}</div>
+                            <div class="question-meta">in @${escapeHtml(q.streamer)} • ${(q.ts || '').split('T')[1]?.substring(0, 5) || '--:--'} Uhr</div>
                         </div>
                     `).join('');
 
                     // Meta Snapshot
                     document.getElementById('meta-table').querySelector('tbody').innerHTML = meta_snapshot.map(m => `
                         <tr>
-                            <td><strong>${m.term}</strong></td>
-                            <td>${m.count}</td>
-                            <td><div class="progress-bar"><div class="progress-fill" style="width: ${Math.min(100, m.count * 2)}%"></div></div></td>
+                            <td><strong>${escapeHtml(m.term)}</strong></td>
+                            <td>${safeNumber(m.count)}</td>
+                            <td><div class="progress-bar"><div class="progress-fill" style="width: ${Math.min(100, safeNumber(m.count) * 2)}%"></div></div></td>
                         </tr>
                     `).join('');
 
@@ -2344,9 +2355,9 @@ class _DashboardRoutesMixin:
                     // Overlap
                     document.getElementById('overlap-table').querySelector('tbody').innerHTML = overlap.map(o => `
                         <tr>
-                            <td>${o.a}</td>
-                            <td>${o.b}</td>
-                            <td>${o.shared}</td>
+                            <td>${escapeHtml(o.a)}</td>
+                            <td>${escapeHtml(o.b)}</td>
+                            <td>${safeNumber(o.shared)}</td>
                         </tr>
                     `).join('');
 
@@ -2355,14 +2366,14 @@ class _DashboardRoutesMixin:
                     tbody.innerHTML = channels.map(c => `
                         <tr>
                             <td>
-                                <strong>${c.login}</strong>
+                                <strong>${escapeHtml(c.login)}</strong>
                                 ${c.is_live ? '<span class="badge badge-live">LIVE</span>' : ''}
                             </td>
-                            <td>${c.viewers}</td>
-                            <td>${c.chat_health.toFixed(1)}%</td>
-                            <td>${c.lurker_ratio.toFixed(1)}%</td>
-                            <td>${c.msg_per_min.toFixed(1)}</td>
-                            <td>${c.top_topic || '-'}</td>
+                            <td>${safeNumber(c.viewers)}</td>
+                            <td>${safeNumber(c.chat_health).toFixed(1)}%</td>
+                            <td>${safeNumber(c.lurker_ratio).toFixed(1)}%</td>
+                            <td>${safeNumber(c.msg_per_min).toFixed(1)}</td>
+                            <td>${escapeHtml(c.top_topic || '-')}</td>
                         </tr>
                     `).join('');
                 }
@@ -2376,10 +2387,12 @@ class _DashboardRoutesMixin:
 
     async def api_market_data(self, request: web.Request) -> web.Response:
         """API providing aggregated data for market research including Meta & Sentiment."""
-        # Simple auth check (internal/admin only)
-        if not self._check_admin_token(
-            request.headers.get("X-Admin-Token") or request.query.get("token")
-        ) and not self._is_local_request(request):
+        admin_token = request.headers.get("X-Admin-Token") or request.query.get("token")
+        if not (
+            self._is_local_request(request)
+            or self._is_discord_admin_request(request)
+            or self._check_admin_token(admin_token)
+        ):
             return web.json_response({"error": "Unauthorized"}, status=401)
 
         try:
@@ -2698,6 +2711,7 @@ class _DashboardRoutesMixin:
                 web.get("/twitch/abbo/bezahlen", self.abbo_pay),
                 web.post("/twitch/abbo/rechnungsdaten", self.abbo_profile_save),
                 web.get("/twitch/abbo/kündigen", self.abbo_cancel),
+                web.post("/twitch/abbo/kündigen", self.abbo_cancel),
                 web.get("/twitch/abbo/rechnungen", self.abbo_invoices),
                 web.get("/twitch/abbo/stripe-settings", self.abbo_stripe_settings),
                 web.get("/twitch/abbo/rechnung", self.abbo_invoice),

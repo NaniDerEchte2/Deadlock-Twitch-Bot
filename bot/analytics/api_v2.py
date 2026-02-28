@@ -324,6 +324,32 @@ class AnalyticsV2Mixin(
                 )
             raise web.HTTPUnauthorized(text=payload["error"])
 
+    def _check_v2_admin_auth(self, request: web.Request) -> bool:
+        """Check if request has admin-level API access."""
+        return self._get_auth_level(request) in ("localhost", "admin")
+
+    def _require_v2_admin_api(self, request: web.Request) -> web.Response | None:
+        """Return JSON error response when request lacks admin privileges."""
+        auth_level = self._get_auth_level(request)
+        if auth_level in ("localhost", "admin"):
+            return None
+        if auth_level == "none":
+            return web.json_response(
+                {
+                    "error": "auth_required",
+                    "required": "admin",
+                },
+                status=401,
+            )
+        return web.json_response(
+            {
+                "error": "admin_required",
+                "required": "admin",
+                "auth_level": auth_level,
+            },
+            status=403,
+        )
+
     def _get_auth_level(self, request: web.Request) -> str:
         """Get the authentication level for the request.
 

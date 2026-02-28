@@ -563,19 +563,61 @@ class _DashboardBillingMixin:
 
         return "ignored_unsupported_event"
 
-    def _billing_candidate_refs_for_request(self, request: Any) -> list[str]:
-        """Collect stable customer references from query + auth session."""
-        session = self._get_dashboard_auth_session(request) or {}
-        candidate_refs: list[str] = []
-        for raw in (
-            request.query.get("customer_reference"),
-            session.get("twitch_login"),
-            session.get("twitch_user_id"),
-        ):
+    def _billing_auth_sessions_for_request(self, request: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        dashboard_session: dict[str, Any] = {}
+        dashboard_getter = getattr(self, "_get_dashboard_auth_session", None)
+        if callable(dashboard_getter):
+            try:
+                maybe_dashboard = dashboard_getter(request) or {}
+                if isinstance(maybe_dashboard, dict):
+                    dashboard_session = maybe_dashboard
+            except Exception:
+                dashboard_session = {}
+
+        discord_admin_session: dict[str, Any] = {}
+        admin_getter = getattr(self, "_get_discord_admin_session", None)
+        if callable(admin_getter):
+            try:
+                maybe_admin = admin_getter(request) or {}
+                if isinstance(maybe_admin, dict):
+                    discord_admin_session = maybe_admin
+            except Exception:
+                discord_admin_session = {}
+
+        return dashboard_session, discord_admin_session
+
+    @staticmethod
+    def _billing_refs_from_session(session: dict[str, Any]) -> list[str]:
+        refs: list[str] = []
+        for raw in (session.get("twitch_user_id"), session.get("twitch_login")):
             value = str(raw or "").strip()
+            if value and value not in refs:
+                refs.append(value)
+        return refs
+
+    def _billing_candidate_refs_for_request(self, request: Any) -> list[str]:
+        """Collect trusted customer references from server-side sessions only."""
+        dashboard_session, discord_admin_session = self._billing_auth_sessions_for_request(request)
+        candidate_refs: list[str] = []
+
+        for value in self._billing_refs_from_session(dashboard_session):
             if value and value not in candidate_refs:
                 candidate_refs.append(value)
+
+        for value in self._billing_refs_from_session(discord_admin_session):
+            if value and value not in candidate_refs:
+                candidate_refs.append(value)
+
+        admin_user_id = str(discord_admin_session.get("user_id") or "").strip()
+        if admin_user_id:
+            admin_ref = f"discord_admin:{admin_user_id}"
+            if admin_ref not in candidate_refs:
+                candidate_refs.append(admin_ref)
         return candidate_refs
+
+    def _billing_primary_ref_for_request(self, request: Any) -> str:
+        refs = self._billing_candidate_refs_for_request(request)
+        return refs[0] if refs else ""
 
     def _billing_customer_record_for_request(self, request: Any) -> dict[str, str]:
         """Return best matching Stripe customer/subscription ids for current request."""
@@ -715,7 +757,8 @@ class _DashboardBillingMixin:
 
     def _billing_profile_for_request(self, request: Any) -> dict[str, str]:
         """Resolve persisted invoice recipient profile for current request."""
-        session = self._get_dashboard_auth_session(request) or {}
+        dashboard_session, discord_admin_session = self._billing_auth_sessions_for_request(request)
+        session = dashboard_session or discord_admin_session
         refs = self._billing_candidate_refs_for_request(request)
         primary_ref = refs[0] if refs else ""
         profile = {
@@ -1203,5 +1246,3 @@ class _DashboardBillingMixin:
     def _billing_is_http_url(raw: str | None) -> bool:
         value = str(raw or "").strip().lower()
         return value.startswith("https://") or value.startswith("http://")
-
-
