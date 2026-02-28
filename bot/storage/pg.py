@@ -74,6 +74,23 @@ def _align_serial_sequence(conn: psycopg.Connection, table: str, column: str) ->
         log.debug("Could not align serial sequence for %s.%s: %s", table, column, exc)
 
 
+def _run_startup_maintenance(conn: psycopg.Connection) -> None:
+    """
+    One-time runtime maintenance for existing schemas.
+    Keeps known SERIAL sequences aligned even when ensure_schema() is skipped
+    (for example when a migration-managed schema_version table exists).
+    """
+    if getattr(_run_startup_maintenance, "_done", False):
+        return
+
+    # Keep this list focused on tables where stale sequences have caused issues.
+    _align_serial_sequence(conn, "twitch_stream_sessions", "id")
+    _align_serial_sequence(conn, "clip_fetch_history", "id")
+    _align_serial_sequence(conn, "twitch_clips_social_media", "id")
+
+    _run_startup_maintenance._done = True
+
+
 class RowCompat:
     """Row that supports both numeric and name-based access."""
 
@@ -374,6 +391,7 @@ def get_conn():
                     get_conn._schema_ok = True
                 except Exception as exc:  # pragma: no cover - best effort
                     log.warning("Schema initialization failed: %s", exc, exc_info=True)
+        _run_startup_maintenance(conn)
         yield _CompatConnection(conn)
     finally:
         conn.close()
@@ -1384,6 +1402,7 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_twitch_clips_social_media_status ON twitch_clips_social_media(status)"
     )
+    _align_serial_sequence(conn, "twitch_clips_social_media", "id")
 
     conn.execute(
         """
