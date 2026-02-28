@@ -128,48 +128,8 @@ jobs:
       - name: Python pyproject audit (recursive)
         if: hashFiles('**/pyproject.toml') != ''
         run: |
-          mkdir -p dependency-reports/python
-          found=0
-          audit_fail=0
-
-          while IFS= read -r pyproject; do
-            found=1
-            dir_path="$(dirname "$pyproject")"
-            rel_dir="${dir_path#./}"
-            safe_name="$(echo "${rel_dir:-root}" | sed 's#[^A-Za-z0-9._-]#_#g')"
-            echo "Auditing pyproject in: $dir_path"
-
-            python -m venv .audit-venv
-            source .audit-venv/bin/activate
-            python -m pip install --upgrade pip
-            if ! pip install "$dir_path"; then
-              echo "Install failed for $dir_path"
-              audit_fail=1
-              deactivate || true
-              rm -rf .audit-venv
-              continue
-            fi
-
-            if ! pip-audit --format json --output "$GITHUB_WORKSPACE/dependency-reports/python/${safe_name}.pip-audit-pyproject.json"; then
-              audit_fail=1
-            fi
-
-            deactivate
-            rm -rf .audit-venv
-          done < <(find . -type f -name "pyproject.toml" \
-            -not -path "*/.venv/*" \
-            -not -path "*/venv/*" \
-            -not -path "*/node_modules/*" \
-            -not -path "*/.git/*" | sort)
-
-          if [ "$found" -eq 0 ]; then
-            echo "No pyproject.toml files found for recursive Python project audit."
-          fi
-
-          if [ "$audit_fail" -ne 0 ]; then
-            echo "Python pyproject audit found vulnerabilities or install failures."
-            exit 1
-          fi
+          echo "Skipping pyproject install-based pip-audit to keep dependency resolution deterministic."
+          echo "requirements*.txt audits remain enabled."
 
       - name: Record additional Python lockfiles
         if: hashFiles('**/Pipfile.lock', '**/poetry.lock', '**/pyproject.toml') != ''

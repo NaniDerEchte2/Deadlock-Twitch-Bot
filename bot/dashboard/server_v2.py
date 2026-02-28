@@ -401,6 +401,22 @@ class DashboardV2Server(
         return f"/twitch/auth/discord/login?{urlencode({'next': normalized_next})}"
 
     @staticmethod
+    def _safe_discord_admin_login_redirect(raw_url: str | None) -> str:
+        fallback = "/twitch/auth/discord/login"
+        candidate = (raw_url or "").strip()
+        if not candidate:
+            return fallback
+        try:
+            parsed = urlsplit(candidate)
+        except Exception:
+            return fallback
+        if parsed.scheme or parsed.netloc:
+            return fallback
+        if not (parsed.path or "").startswith("/twitch/auth/discord/login"):
+            return fallback
+        return candidate
+
+    @staticmethod
     def _canonical_discord_admin_post_login_path(raw: str | None) -> str:
         normalized = DashboardV2Server._normalize_discord_admin_next_path(raw)
         normalized_path = (urlsplit(normalized).path or "").rstrip("/") or "/"
@@ -480,11 +496,12 @@ class DashboardV2Server(
                 request,
                 next_path=request.rel_url.path_qs if request.rel_url else request.path,
             )
+            safe_login_url = self._safe_discord_admin_login_redirect(login_url)
             if request.method in {"GET", "HEAD"}:
-                raise web.HTTPFound(login_url)
+                raise web.HTTPFound(safe_login_url)
             raise web.HTTPUnauthorized(
                 text="Discord admin authentication required",
-                headers={"X-Auth-Login": login_url},
+                headers={"X-Auth-Login": safe_login_url},
             )
 
         if self._check_v2_auth(request):

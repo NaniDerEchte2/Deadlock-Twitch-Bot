@@ -8,8 +8,10 @@ Bietet UI für:
 """
 
 import html
+import ipaddress
 import logging
-from urllib.parse import urlencode
+import os
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from aiohttp import web
 
@@ -35,16 +37,27 @@ def _dashboard_url(**params: str) -> str:
 class SocialMediaDashboard:
     """Web Dashboard für Social Media Clip Management."""
 
-    def __init__(self, clip_manager: ClipManager, auth_checker=None, auth_session_getter=None):
+    def __init__(
+        self,
+        clip_manager: ClipManager,
+        auth_checker=None,
+        auth_session_getter=None,
+        auth_level_getter=None,
+        public_base_url: str | None = None,
+    ):
         """
         Args:
             clip_manager: ClipManager instance
             auth_checker: Callable that checks authentication (from parent dashboard server)
             auth_session_getter: Callable that resolves dashboard OAuth session (dict)
+            auth_level_getter: Callable that returns auth level (admin/partner/localhost/none)
+            public_base_url: Trusted public dashboard base URL for OAuth callbacks
         """
         self.clip_manager = clip_manager
         self.auth_checker = auth_checker
         self.auth_session_getter = auth_session_getter
+        self.auth_level_getter = auth_level_getter
+        self.public_base_url = str(public_base_url or "").strip()
 
     def _require_auth(self, request: web.Request) -> None:
         """Check authentication using parent dashboard's OAuth system."""
@@ -74,6 +87,103 @@ class SocialMediaDashboard:
         login = str(session.get("twitch_login") or "").strip().lower()
         return login or None
 
+    def _get_auth_level(self, request: web.Request) -> str:
+        getter = self.auth_level_getter
+        if not callable(getter):
+            return "unknown"
+        try:
+            raw_level = str(getter(request) or "").strip().lower()
+        except Exception:
+            log.debug("Failed to resolve auth level for social-media", exc_info=True)
+            return "unknown"
+        if raw_level in {"localhost", "admin", "partner", "none"}:
+            return raw_level
+        return "unknown"
+
+    @staticmethod
+    def _is_loopback_host(raw_host: str | None) -> bool:
+        token = str(raw_host or "").strip().lower()
+        if not token:
+            return False
+        if token.startswith("["):
+            end = token.find("]")
+            if end != -1:
+                token = token[1:end]
+        elif token.count(":") == 1:
+            host_part, port_part = token.rsplit(":", 1)
+            if port_part.isdigit():
+                token = host_part
+        if token == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(token).is_loopback
+        except ValueError:
+            return False
+
+    def _is_localhost_request(self, request: web.Request) -> bool:
+        host_header = request.headers.get("Host") or request.host or ""
+        if not self._is_loopback_host(host_header):
+            return False
+
+        remote = (request.remote or "").strip() if hasattr(request, "remote") else ""
+        if remote and self._is_loopback_host(remote):
+            return True
+
+        transport = getattr(request, "transport", None)
+        if transport is None:
+            return False
+        peer = transport.get_extra_info("peername")
+        if isinstance(peer, tuple) and peer and self._is_loopback_host(str(peer[0]).strip()):
+            return True
+        if isinstance(peer, str) and self._is_loopback_host(peer.strip()):
+            return True
+        return False
+
+    @staticmethod
+    def _normalize_public_origin(raw_url: str | None) -> str | None:
+        value = str(raw_url or "").strip()
+        if not value:
+            return None
+        candidate = value if "://" in value else f"https://{value}"
+        try:
+            parsed = urlsplit(candidate)
+        except Exception:
+            return None
+        scheme = str(parsed.scheme or "").strip().lower()
+        host = str(parsed.hostname or "").strip().lower()
+        if scheme not in {"http", "https"}:
+            return None
+        if not host or not parsed.netloc:
+            return None
+        if parsed.username or parsed.password:
+            return None
+        if scheme == "http" and host not in {"127.0.0.1", "localhost", "::1"}:
+            return None
+        return urlunsplit((scheme, parsed.netloc, "", "", "")).rstrip("/")
+
+    def _oauth_public_origin(self, request: web.Request) -> str:
+        configured = self._normalize_public_origin(self.public_base_url)
+        if configured:
+            return configured
+
+        env_origin = self._normalize_public_origin(
+            os.getenv("SOCIAL_MEDIA_PUBLIC_URL")
+            or os.getenv("TWITCH_ADMIN_PUBLIC_URL")
+            or os.getenv("MASTER_DASHBOARD_PUBLIC_URL")
+            or "https://admin.earlysalty.de"
+        )
+        if self._is_localhost_request(request):
+            try:
+                request_origin = self._normalize_public_origin(str(request.url.origin()))
+            except Exception:
+                request_origin = None
+            if request_origin:
+                return request_origin
+
+        if env_origin:
+            return env_origin
+        return "https://admin.earlysalty.de"
+
     def _resolve_streamer_scope(
         self,
         request: web.Request,
@@ -84,6 +194,7 @@ class SocialMediaDashboard:
         """Resolve effective streamer with session-based ownership enforcement."""
         requested = str(requested_streamer or "").strip().lower()
         session_streamer = self._get_auth_streamer_login(request)
+        auth_level = self._get_auth_level(request)
 
         if session_streamer:
             if requested and requested.lower() != session_streamer:
@@ -98,6 +209,16 @@ class SocialMediaDashboard:
                     text="Du kannst nur auf deinen eigenen Twitch-Account zugreifen."
                 )
             return session_streamer
+
+        if auth_level == "partner":
+            safe_requested = _sanitize_log_value(requested or "<none>")
+            log.warning(
+                "Blocked token-only social-media scope access without session: requested=%s",
+                safe_requested,
+            )
+            raise web.HTTPForbidden(
+                text="Partner-Token benötigt für Social-Media einen Twitch-Login mit Session."
+            )
 
         if required and not requested:
             raise web.HTTPBadRequest(text="streamer parameter required")
@@ -1370,7 +1491,25 @@ anfordern.</p>
         """Clips list API endpoint."""
         self._require_auth(request)
 
-        limit = int(request.query.get("limit", "50"))
+        try:
+            limit = int(request.query.get("limit", "50"))
+        except (TypeError, ValueError):
+            return web.json_response(
+                {
+                    "error": "invalid_limit",
+                    "allowed_range": [1, 200],
+                },
+                status=400,
+            )
+        if limit < 1 or limit > 200:
+            return web.json_response(
+                {
+                    "error": "invalid_limit",
+                    "allowed_range": [1, 200],
+                },
+                status=400,
+            )
+
         streamer = self._resolve_streamer_scope(request, request.query.get("streamer"))
         status = request.query.get("status")
 
@@ -1720,7 +1859,7 @@ anfordern.</p>
         oauth_mgr = SocialMediaOAuthManager()
 
         try:
-            redirect_uri = str(request.url.origin()) + "/social-media/oauth/callback"
+            redirect_uri = f"{self._oauth_public_origin(request)}/social-media/oauth/callback"
             auth_url = oauth_mgr.generate_auth_url(platform, streamer, redirect_uri)
 
             return web.HTTPFound(auth_url)
@@ -1840,6 +1979,8 @@ def create_social_media_app(
     clip_manager: ClipManager,
     auth_checker=None,
     auth_session_getter=None,
+    auth_level_getter=None,
+    public_base_url: str | None = None,
 ) -> web.Application:
     """
     Create Social Media Dashboard aiohttp app.
@@ -1848,6 +1989,8 @@ def create_social_media_app(
         clip_manager: ClipManager instance
         auth_checker: Callable that checks authentication (from parent dashboard server)
         auth_session_getter: Callable that resolves dashboard OAuth session
+        auth_level_getter: Callable that resolves auth level for token/session enforcement
+        public_base_url: Trusted public dashboard base URL for OAuth callback construction
 
     Returns:
         aiohttp Application
@@ -1856,5 +1999,7 @@ def create_social_media_app(
         clip_manager,
         auth_checker=auth_checker,
         auth_session_getter=auth_session_getter,
+        auth_level_getter=auth_level_getter,
+        public_base_url=public_base_url,
     )
     return dashboard._build_app()

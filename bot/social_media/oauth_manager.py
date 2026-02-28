@@ -187,23 +187,20 @@ class SocialMediaOAuthManager:
         Raises:
             ValueError: If state invalid or expired
         """
-        # Verify and consume state token
+        # Atomically consume state token (single-use, race-safe)
         with get_conn() as conn:
             state_row = conn.execute(
                 """
-                SELECT platform, streamer_login, redirect_uri, pkce_verifier
-                FROM oauth_state_tokens
+                DELETE FROM oauth_state_tokens
                 WHERE state_token = ?
                   AND expires_at > ?
+                RETURNING platform, streamer_login, redirect_uri, pkce_verifier
                 """,
                 (state, datetime.now(UTC).isoformat()),
             ).fetchone()
 
             if not state_row:
                 raise ValueError("Invalid or expired state token")
-
-            # Delete state (one-time use)
-            conn.execute("DELETE FROM oauth_state_tokens WHERE state_token = ?", (state,))
 
         platform = state_row["platform"]
         streamer_login = state_row["streamer_login"]

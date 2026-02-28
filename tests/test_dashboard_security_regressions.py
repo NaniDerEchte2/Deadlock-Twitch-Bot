@@ -1,7 +1,7 @@
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 
@@ -145,6 +145,108 @@ class _DummyWebhookRoutes(_DashboardRoutesMixin, _DashboardBillingMixin):
 
 
 class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
+    def test_billing_checkout_url_host_allowlist_blocks_untrusted_domain(self) -> None:
+        handler = _DummyBilling()
+        handler._billing_checkout_success_url = "https://safe.example/twitch/abbo?checkout=success"
+        handler._billing_checkout_cancel_url = "https://safe.example/twitch/abbo?checkout=cancelled"
+
+        self.assertTrue(handler._billing_is_http_url("https://safe.example/ok"))
+        self.assertTrue(handler._billing_is_http_url("http://localhost:8080/ok"))
+        self.assertFalse(handler._billing_is_http_url("https://evil.example/phish"))
+
+    def test_billing_base_url_ignores_untrusted_host_header(self) -> None:
+        class _BaseUrlRoutes(_DummyRoutes):
+            _billing_checkout_success_url = "https://safe.example/checkout/success"
+            _billing_checkout_cancel_url = "https://safe.example/checkout/cancel"
+
+            def _is_local_request(self, _request):
+                return False
+
+        handler = _BaseUrlRoutes()
+        request = SimpleNamespace(host="evil.example")
+
+        self.assertEqual(handler._billing_base_url_for_request(request), "https://safe.example")
+
+    async def test_checkout_session_helper_runs_in_thread(self) -> None:
+        handler = _DummyRoutes()
+
+        with patch(
+            "bot.dashboard.routes_mixin.asyncio.to_thread",
+            new=AsyncMock(return_value=({"id": "cs_test"}, None)),
+        ) as mocked_to_thread:
+            session_obj, error = await handler._billing_create_checkout_session_best_effort_async(
+                session_payload={"mode": "subscription"},
+                idempotency_key="idem_test",
+            )
+
+        self.assertEqual(session_obj, {"id": "cs_test"})
+        self.assertIsNone(error)
+        mocked_to_thread.assert_awaited_once()
+
+    def test_social_media_blocks_partner_token_without_session_scope(self) -> None:
+        dashboard = SocialMediaDashboard(
+            clip_manager=ClipManager(),
+            auth_checker=lambda _req: True,
+            auth_level_getter=lambda _req: "partner",
+        )
+        request = SimpleNamespace(
+            headers={"Host": "dashboard.example"},
+            host="dashboard.example",
+            remote="203.0.113.10",
+            transport=None,
+        )
+
+        with self.assertRaises(web.HTTPForbidden):
+            dashboard._resolve_streamer_scope(request, requested_streamer="victim_streamer")
+
+    def test_social_media_oauth_origin_uses_configured_public_url(self) -> None:
+        dashboard = SocialMediaDashboard(
+            clip_manager=ClipManager(),
+            auth_checker=lambda _req: True,
+            auth_level_getter=lambda _req: "admin",
+            public_base_url="https://safe.example",
+        )
+        request = SimpleNamespace(
+            headers={"Host": "evil.example"},
+            host="evil.example",
+            remote="203.0.113.10",
+            transport=None,
+            url=SimpleNamespace(origin=lambda: "https://evil.example"),
+        )
+
+        self.assertEqual(dashboard._oauth_public_origin(request), "https://safe.example")
+
+    async def test_social_media_clips_list_rejects_invalid_limit(self) -> None:
+        dashboard = SocialMediaDashboard(
+            clip_manager=ClipManager(),
+            auth_checker=lambda _req: True,
+            auth_level_getter=lambda _req: "admin",
+        )
+        request = SimpleNamespace(query={"limit": "invalid"})
+
+        response = await dashboard.clips_list(request)
+        payload = json.loads(response.text)
+
+        self.assertEqual(response.status, 400)
+        self.assertEqual(payload.get("error"), "invalid_limit")
+
+    async def test_market_data_error_response_hides_internal_exception_message(self) -> None:
+        class _MarketAuth(_DummyRoutesApi):
+            def _is_discord_admin_request(self, request):
+                return True
+
+        handler = _MarketAuth()
+        request = SimpleNamespace(headers={}, query={})
+
+        with patch("bot.dashboard.routes_mixin.storage.get_conn", side_effect=RuntimeError("dsn leak")):
+            response = await handler.api_market_data(request)
+
+        payload = json.loads(response.text)
+        self.assertEqual(response.status, 500)
+        self.assertEqual(payload.get("error"), "market_data_failed")
+        self.assertIn("error_id", payload)
+        self.assertNotIn("dsn leak", response.text)
+
     def test_billing_candidate_refs_ignore_query_tampering(self) -> None:
         handler = _DummyBilling()
         handler.dashboard_session = {"twitch_login": "owner_login", "twitch_user_id": "12345"}
@@ -283,6 +385,9 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
 
             def _build_discord_admin_login_url(self, request, *, next_path=None):
                 return "/twitch/auth/discord/login?next=%2Ftwitch%2Fadmin"
+
+            def _safe_discord_admin_login_redirect(self, raw_url):
+                return raw_url
 
             def _check_v2_auth(self, request):
                 return False

@@ -1148,8 +1148,11 @@ def ensure_schema(conn) -> None:
         conn.execute(
             "ALTER TABLE discord_invite_codes ALTER COLUMN guild_id TYPE BIGINT USING guild_id::bigint"
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug(
+            "Skipping guild_id type migration on discord_invite_codes: %s",
+            exc,
+        )
 
     conn.execute(
         """
@@ -1174,8 +1177,11 @@ def ensure_schema(conn) -> None:
         conn.execute(
             "ALTER TABLE twitch_streamer_invites ALTER COLUMN channel_id TYPE BIGINT USING channel_id::bigint"
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug(
+            "Skipping BIGINT migration on twitch_streamer_invites columns: %s",
+            exc,
+        )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_twitch_streamer_invites_guild ON twitch_streamer_invites(guild_id)"
     )

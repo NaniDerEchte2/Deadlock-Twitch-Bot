@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import html
+import os
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from .. import storage
@@ -1243,6 +1245,81 @@ class _DashboardBillingMixin:
 
 
     @staticmethod
-    def _billing_is_http_url(raw: str | None) -> bool:
-        value = str(raw or "").strip().lower()
-        return value.startswith("https://") or value.startswith("http://")
+    def _billing_parse_http_url(raw: str | None):
+        value = str(raw or "").strip()
+        if not value:
+            return None
+        try:
+            parsed = urlsplit(value)
+        except Exception:
+            return None
+        scheme = str(parsed.scheme or "").strip().lower()
+        host = str(parsed.hostname or "").strip().lower()
+        if scheme not in {"http", "https"}:
+            return None
+        if not host or not parsed.netloc:
+            return None
+        if parsed.username or parsed.password:
+            return None
+        if scheme == "http" and host not in {"127.0.0.1", "localhost", "::1"}:
+            return None
+        return parsed
+
+
+    def _billing_checkout_allowed_redirect_hosts(self) -> list[str]:
+        hosts: list[str] = []
+        seen: set[str] = set()
+
+        def _add_host(raw_host: str | None) -> None:
+            host = str(raw_host or "").strip().lower()
+            if not host or host in seen:
+                return
+            seen.add(host)
+            hosts.append(host)
+
+        for raw_url in (
+            getattr(self, "_billing_checkout_success_url", ""),
+            getattr(self, "_billing_checkout_cancel_url", ""),
+        ):
+            parsed = self._billing_parse_http_url(raw_url)
+            if parsed:
+                _add_host(parsed.hostname)
+
+        # Optional operator override (comma/space separated host patterns):
+        # - exact host: example.com
+        # - wildcard suffix: *.example.com
+        raw_allowlist = (
+            os.getenv("TWITCH_BILLING_CHECKOUT_ALLOWED_HOSTS")
+            or os.getenv("STRIPE_CHECKOUT_ALLOWED_HOSTS")
+            or ""
+        )
+        for token in str(raw_allowlist).replace(";", ",").replace(" ", ",").split(","):
+            _add_host(token)
+
+        # Keep localhost available for local/test environments.
+        for local_host in ("localhost", "127.0.0.1", "::1"):
+            _add_host(local_host)
+
+        return hosts
+
+
+    def _billing_is_http_url(self, raw: str | None) -> bool:
+        parsed = self._billing_parse_http_url(raw)
+        if not parsed:
+            return False
+        host = str(parsed.hostname or "").strip().lower()
+        if not host:
+            return False
+
+        for candidate in self._billing_checkout_allowed_redirect_hosts():
+            rule = str(candidate or "").strip().lower()
+            if not rule:
+                continue
+            if rule.startswith("*."):
+                suffix = rule[2:]
+                if host == suffix or host.endswith(f".{suffix}"):
+                    return True
+                continue
+            if host == rule:
+                return True
+        return False

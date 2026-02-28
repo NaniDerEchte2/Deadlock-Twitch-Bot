@@ -59,9 +59,8 @@ def main() -> None:
         if str(getattr(item, "url", "") or "").strip() == WEBHOOK_URL:
             same_url_count += 1
 
-    masked = endpoint_secret[:6] + "..." + endpoint_secret[-4:]
     print(f"created_webhook_endpoint_id={endpoint_id}")
-    print(f"stored_webhook_secret={masked}")
+    print("webhook_credentials_saved=true")
     print(f"webhook_url={WEBHOOK_URL}")
     print(f"same_url_endpoint_count={same_url_count}")
     if same_url_count > 1:

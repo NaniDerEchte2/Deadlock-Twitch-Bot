@@ -32,6 +32,11 @@ class _AnalyticsAudienceMixin:
     PEAK_HALF_LIFE_SESSIONS = 8.0
 
     @staticmethod
+    def _sanitize_log_value(value: Any) -> str:
+        text = "" if value is None else str(value)
+        return text.replace("\r", "\\r").replace("\n", "\\n")
+
+    @staticmethod
     def _resolve_target_timezone(timezone_name: str | None) -> tuple[Any, str]:
         tz_name = (timezone_name or "UTC").strip()
         if not tz_name:
@@ -41,7 +46,10 @@ class _AnalyticsAudienceMixin:
         try:
             return ZoneInfo(tz_name), tz_name
         except ZoneInfoNotFoundError:
-            log.debug("Unknown timezone '%s' in audience analytics; fallback to UTC", tz_name)
+            log.debug(
+                "Unknown timezone '%s' in audience analytics; fallback to UTC",
+                _AnalyticsAudienceMixin._sanitize_log_value(tz_name),
+            )
             return UTC, "UTC"
 
     @staticmethod

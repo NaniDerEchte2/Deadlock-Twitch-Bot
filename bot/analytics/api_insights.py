@@ -34,6 +34,11 @@ CHAT_HIGH = 30.0       # chatters/100 viewers – above this → positive feedba
 class _AnalyticsInsightsMixin:
     """Mixin providing insights, coaching, chat analytics, and monetization endpoints."""
 
+    @staticmethod
+    def _sanitize_log_value(value: Any) -> str:
+        text = "" if value is None else str(value)
+        return text.replace("\r", "\\r").replace("\n", "\\n")
+
     def _get_category_percentiles(
         self, conn, since_date: str, threshold: float | None = None
     ) -> dict[str, Any]:
@@ -224,7 +229,10 @@ class _AnalyticsInsightsMixin:
         try:
             return ZoneInfo(tz_name), tz_name
         except ZoneInfoNotFoundError:
-            log.debug("Unknown timezone '%s' for chat analytics; falling back to UTC", tz_name)
+            log.debug(
+                "Unknown timezone '%s' for chat analytics; falling back to UTC",
+                _AnalyticsInsightsMixin._sanitize_log_value(tz_name),
+            )
             return UTC, "UTC"
 
     @staticmethod

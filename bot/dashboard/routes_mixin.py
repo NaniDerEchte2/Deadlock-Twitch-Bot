@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import html
 import json
+import os
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 from urllib import error as _urlerror
@@ -149,6 +151,74 @@ class _DashboardRoutesMixin:
 
         return self._billing_create_checkout_session_rest(
             stripe_secret_key=stripe_secret_key,
+            session_payload=session_payload,
+            idempotency_key=idempotency_key,
+        )
+
+    @staticmethod
+    def _billing_origin_from_url(raw_url: str | None) -> str | None:
+        value = str(raw_url or "").strip()
+        if not value:
+            return None
+        try:
+            parsed = _urlparse.urlsplit(value)
+        except Exception:
+            return None
+
+        scheme = str(parsed.scheme or "").strip().lower()
+        host = str(parsed.hostname or "").strip().lower()
+        if scheme not in {"http", "https"}:
+            return None
+        if not parsed.netloc or not host:
+            return None
+        if parsed.username or parsed.password:
+            return None
+        if scheme == "http" and host not in {"127.0.0.1", "localhost", "::1"}:
+            return None
+        return _urlparse.urlunsplit((scheme, parsed.netloc, "", "", "")).rstrip("/")
+
+    def _billing_configured_public_origin(self) -> str:
+        candidates = (
+            getattr(self, "_billing_checkout_success_url", ""),
+            getattr(self, "_billing_checkout_cancel_url", ""),
+            getattr(self, "_oauth_redirect_uri", ""),
+            getattr(self, "_discord_admin_redirect_uri", ""),
+            os.getenv("TWITCH_ADMIN_PUBLIC_URL", ""),
+            os.getenv("MASTER_DASHBOARD_PUBLIC_URL", ""),
+            "https://admin.earlysalty.de",
+        )
+        for candidate in candidates:
+            origin = self._billing_origin_from_url(candidate)
+            if origin:
+                return origin
+        return "https://admin.earlysalty.de"
+
+    def _billing_base_url_for_request(self, request: web.Request) -> str:
+        checker = getattr(self, "_is_local_request", None)
+        is_local_request = False
+        if callable(checker):
+            try:
+                is_local_request = bool(checker(request))
+            except Exception:
+                is_local_request = False
+        if is_local_request:
+            secure_checker = getattr(self, "_is_secure_request", None)
+            is_secure = bool(secure_checker(request)) if callable(secure_checker) else False
+            scheme = "https" if is_secure else "http"
+            host = str(getattr(request, "host", "") or "").strip()
+            if host:
+                return f"{scheme}://{host}".rstrip("/")
+        return self._billing_configured_public_origin()
+
+    async def _billing_create_checkout_session_best_effort_async(
+        self,
+        *,
+        session_payload: dict[str, Any],
+        idempotency_key: str = "",
+    ) -> tuple[Any | None, str | None]:
+        # Stripe SDK and urllib are blocking; run them outside the event loop.
+        return await asyncio.to_thread(
+            self._billing_create_checkout_session_best_effort,
             session_payload=session_payload,
             idempotency_key=idempotency_key,
         )
@@ -805,9 +875,7 @@ class _DashboardRoutesMixin:
                 "/twitch/abbo?checkout=unavailable&reason=stripe_secret_key_missing"
             )
 
-        scheme = "https" if self._is_secure_request(request) else "http"
-        host = str(request.headers.get("Host") or request.host or "twitch.earlysalty.com").strip()
-        base_url = f"{scheme}://{host}".rstrip("/")
+        base_url = self._billing_base_url_for_request(request)
         fallback_success_url = (
             f"{base_url}/twitch/abbo?checkout=success&session_id={{CHECKOUT_SESSION_ID}}"
         )
@@ -847,7 +915,7 @@ class _DashboardRoutesMixin:
         if customer_email:
             session_payload["customer_email"] = customer_email
 
-        stripe_session, checkout_error = self._billing_create_checkout_session_best_effort(
+        stripe_session, checkout_error = await self._billing_create_checkout_session_best_effort_async(
             session_payload=session_payload
         )
         if stripe_session is None:
@@ -949,13 +1017,12 @@ class _DashboardRoutesMixin:
             raise web.HTTPFound("/twitch/abbo?cancel=error")
         stripe.api_key = stripe_secret_key
 
-        scheme = "https" if self._is_secure_request(request) else "http"
-        host = str(request.headers.get("Host") or request.host or "twitch.earlysalty.com").strip()
-        base_url = f"{scheme}://{host}".rstrip("/")
+        base_url = self._billing_base_url_for_request(request)
         portal_url = ""
         if stripe_customer_id:
             try:
-                portal_session = stripe.billing_portal.Session.create(
+                portal_session = await asyncio.to_thread(
+                    stripe.billing_portal.Session.create,
                     customer=stripe_customer_id,
                     return_url=f"{base_url}/twitch/abbo?cancel=returned",
                 )
@@ -969,7 +1036,8 @@ class _DashboardRoutesMixin:
             raise web.HTTPFound("/twitch/abbo?cancel=missing")
 
         try:
-            subscription_obj = stripe.Subscription.modify(
+            subscription_obj = await asyncio.to_thread(
+                stripe.Subscription.modify,
                 stripe_subscription_id,
                 cancel_at_period_end=True,
                 proration_behavior="none",
@@ -1008,7 +1076,11 @@ class _DashboardRoutesMixin:
         stripe.api_key = stripe_secret_key
 
         try:
-            invoice_list = stripe.Invoice.list(customer=stripe_customer_id, limit=24)
+            invoice_list = await asyncio.to_thread(
+                stripe.Invoice.list,
+                customer=stripe_customer_id,
+                limit=24,
+            )
             invoice_rows = list(self._billing_stripe_obj_get(invoice_list, "data", []) or [])
         except Exception:
             log.exception("billing invoice list failed")
@@ -1506,12 +1578,15 @@ class _DashboardRoutesMixin:
         success_url = str(body.get("success_url") or default_success_url).strip()
         cancel_url = str(body.get("cancel_url") or default_cancel_url).strip()
 
+        allowed_redirect_hosts = list(self._billing_checkout_allowed_redirect_hosts())
+
         if success_url and not self._billing_is_http_url(success_url):
             return web.json_response(
                 {
                     "error": "invalid_success_url",
                     "contract_version": "2026-02-27",
                     "field": "success_url",
+                    "allowed_hosts": allowed_redirect_hosts,
                 },
                 status=400,
             )
@@ -1521,6 +1596,7 @@ class _DashboardRoutesMixin:
                     "error": "invalid_cancel_url",
                     "contract_version": "2026-02-27",
                     "field": "cancel_url",
+                    "allowed_hosts": allowed_redirect_hosts,
                 },
                 status=400,
             )
@@ -1622,7 +1698,7 @@ class _DashboardRoutesMixin:
         if customer_email:
             session_payload["customer_email"] = customer_email
 
-        stripe_session, checkout_error = self._billing_create_checkout_session_best_effort(
+        stripe_session, checkout_error = await self._billing_create_checkout_session_best_effort_async(
             session_payload=session_payload,
             idempotency_key=idempotency_key,
         )
@@ -1873,7 +1949,7 @@ class _DashboardRoutesMixin:
 
             if product_id and not dry_run:
                 try:
-                    product_obj = stripe.Product.retrieve(product_id)
+                    product_obj = await asyncio.to_thread(stripe.Product.retrieve, product_id)
                     if bool(self._billing_stripe_obj_get(product_obj, "deleted", False)):
                         product_id = ""
                     else:
@@ -1887,7 +1963,8 @@ class _DashboardRoutesMixin:
                     operation["product"] = {"id": None, "status": "would_create"}
                 else:
                     try:
-                        product_obj = stripe.Product.create(
+                        product_obj = await asyncio.to_thread(
+                            stripe.Product.create,
                             name=plan_name,
                             description=plan_description or None,
                             metadata={
@@ -1941,7 +2018,7 @@ class _DashboardRoutesMixin:
 
                 if price_id and not dry_run:
                     try:
-                        price_obj = stripe.Price.retrieve(price_id)
+                        price_obj = await asyncio.to_thread(stripe.Price.retrieve, price_id)
                         price_status = "reused"
                         reused_prices += 1
                     except Exception:
@@ -1949,7 +2026,12 @@ class _DashboardRoutesMixin:
 
                 if not price_id and not dry_run:
                     try:
-                        price_list = stripe.Price.list(active=True, lookup_keys=[lookup_key], limit=1)
+                        price_list = await asyncio.to_thread(
+                            stripe.Price.list,
+                            active=True,
+                            lookup_keys=[lookup_key],
+                            limit=1,
+                        )
                         existing_prices = list(
                             self._billing_stripe_obj_get(price_list, "data", []) or []
                         )
@@ -1969,7 +2051,8 @@ class _DashboardRoutesMixin:
                         price_status = "would_create"
                     else:
                         try:
-                            price_obj = stripe.Price.create(
+                            price_obj = await asyncio.to_thread(
+                                stripe.Price.create,
                                 currency="eur",
                                 product=product_id,
                                 unit_amount=amount_cents,
@@ -2634,9 +2717,16 @@ class _DashboardRoutesMixin:
                 return web.json_response(
                     payload, dumps=lambda data: json.dumps(data, default=_json_default)
                 )
-        except Exception as e:
-            log.exception("Market API Error")
-            return web.json_response({"error": str(e)}, status=500)
+        except Exception:
+            error_id = uuid4().hex[:12]
+            log.exception("Market API Error id=%s", error_id)
+            return web.json_response(
+                {
+                    "error": "market_data_failed",
+                    "error_id": error_id,
+                },
+                status=500,
+            )
 
     async def reload_cog(self, request: web.Request) -> web.Response:
         """Optional reload endpoint for admin tooling compatibility."""
@@ -2692,6 +2782,8 @@ class _DashboardRoutesMixin:
                 clip_manager=clip_manager,
                 auth_checker=self._check_v2_auth,
                 auth_session_getter=self._get_dashboard_auth_session,
+                auth_level_getter=self._get_auth_level,
+                public_base_url=self._billing_configured_public_origin(),
             )
 
             # Mount social media routes
