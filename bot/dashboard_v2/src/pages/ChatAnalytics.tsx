@@ -70,6 +70,7 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
   const interactionCoverage = penetration.coverage;
   const hourlyActivity = normalizeHourlyActivity(data.hourlyActivity);
   const hasHourlySamples = hourlyActivity.some((h) => h.count > 0);
+  const hoursWithData = hourlyActivity.filter((h) => h.count > 0).length;
   const maxHourlyCount = Math.max(1, ...hourlyActivity.map((h) => h.count));
   const dataMethod = resolveQualityMethod(data.dataQuality?.method, data.totalMessages > 0);
 
@@ -113,7 +114,7 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
           value={
             chattersApiInactive
               ? data.legacyInteractionActivePerAvgViewer != null
-                ? `${(data.legacyInteractionActivePerAvgViewer * 100).toFixed(1)}%`
+                ? `${Math.min(100, data.legacyInteractionActivePerAvgViewer).toFixed(1)}%`
                 : 'N/A'
               : interactionRateReliable && interactionRate !== null
                 ? `${interactionRate.toFixed(1)}%`
@@ -204,7 +205,7 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
               percentage={
                 chattersApiInactive
                   ? data.legacyInteractionActivePerAvgViewer != null
-                    ? data.legacyInteractionActivePerAvgViewer * 100
+                    ? Math.min(100, data.legacyInteractionActivePerAvgViewer)
                     : 0
                   : interactionRateReliable && interactionRate !== null
                     ? interactionRate
@@ -275,31 +276,42 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
             </span>
           </div>
           {hasHourlySamples ? (
-            <div className="h-64 flex items-end gap-1">
-              {Array.from({ length: 24 }).map((_, hour) => {
-                const stat = hourlyActivity.find(h => h.hour === hour);
-                const count = stat?.count || 0;
-                const height = (count / maxHourlyCount) * 100;
+            <>
+              {hoursWithData < 3 && (
+                <div className="mb-3 text-xs text-text-secondary bg-background/50 rounded-lg px-3 py-2 border border-border/50">
+                  Nur {hoursWithData} Stunde{hoursWithData !== 1 ? 'n' : ''} mit Daten — zu wenig für aussagekräftige Tageszeit-Analyse.
+                </div>
+              )}
+              <div className="h-64 flex items-end gap-1">
+                {Array.from({ length: 24 }).map((_, hour) => {
+                  const stat = hourlyActivity.find(h => h.hour === hour);
+                  const count = stat?.count || 0;
+                  const height = (count / maxHourlyCount) * 100;
+                  // Minimum visible height for bars with data
+                  const minHeight = count > 0 ? Math.max(height, 4) : 0;
 
-                return (
-                  <div key={hour} className="flex-1 flex flex-col items-center group relative">
-                    <motion.div
-                      initial={{ height: 0 }}
-                      animate={{ height: `${height}%` }}
-                      transition={{ duration: 0.5, delay: hour * 0.02 }}
-                      className={`w-full bg-success/60 rounded-t-sm group-hover:bg-success transition-colors ${height === 0 ? 'min-h-[2px] bg-border' : ''}`}
-                    />
-                    {/* Tooltip */}
-                    <div className="absolute bottom-full mb-2 hidden group-hover:block bg-popover text-white text-xs p-2 rounded z-10 whitespace-nowrap border border-border">
-                      {hour}:00 Uhr: {count} Nachrichten
+                  return (
+                    <div key={hour} className="flex-1 flex flex-col items-center group relative">
+                      <motion.div
+                        initial={{ height: 0 }}
+                        animate={{ height: `${minHeight}%` }}
+                        transition={{ duration: 0.5, delay: hour * 0.02 }}
+                        className={`w-full rounded-t-sm group-hover:bg-success transition-colors ${count > 0 ? 'bg-success/60' : 'min-h-[2px] bg-border'}`}
+                      />
+                      {/* Tooltip with absolute count */}
+                      <div className="absolute bottom-full mb-2 hidden group-hover:block bg-popover text-white text-xs p-2 rounded z-10 whitespace-nowrap border border-border">
+                        <div className="font-medium">{hour}:00 Uhr</div>
+                        <div>{count.toLocaleString('de-DE')} Nachrichten</div>
+                        {count > 0 && <div className="text-text-secondary">{((count / maxHourlyCount) * 100).toFixed(0)}% vom Peak</div>}
+                      </div>
+                      {hour % 4 === 0 && (
+                        <div className="text-[10px] text-text-secondary mt-1">{hour}h</div>
+                      )}
                     </div>
-                    {hour % 4 === 0 && (
-                      <div className="text-[10px] text-text-secondary mt-1">{hour}h</div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            </>
           ) : (
             <div className="h-64 rounded-lg border border-border bg-background/50 p-4 text-sm text-text-secondary flex items-center justify-center text-center">
               Keine belastbaren Stundenmuster: zu wenig valide Chat-Timestamps.

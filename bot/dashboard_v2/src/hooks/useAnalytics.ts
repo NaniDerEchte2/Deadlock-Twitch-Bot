@@ -31,8 +31,11 @@ import {
   fetchRaidRetention,
   fetchViewerProfiles,
   fetchAudienceSharing,
+  fetchViewerDirectory,
+  fetchViewerDetail,
+  fetchViewerSegments,
 } from '@/api/client';
-import type { TimeRange } from '@/types/analytics';
+import type { TimeRange, ViewerSortField, ViewerFilterType } from '@/types/analytics';
 
 // Stale time: 5 minutes
 const STALE_TIME = 5 * 60 * 1000;
@@ -296,6 +299,44 @@ export function useAudienceSharing(streamer: string | null, days: TimeRange) {
   return useQuery({
     queryKey: ['audience-sharing', streamer, days],
     queryFn: () => fetchAudienceSharing(streamer, days),
+    staleTime: STALE_TIME,
+    enabled: !!streamer,
+  });
+}
+
+// Viewer Directory Hook
+export function useViewerDirectory(
+  streamer: string | null,
+  sort: ViewerSortField = 'sessions',
+  order: 'asc' | 'desc' = 'desc',
+  filter: ViewerFilterType = 'all',
+  search: string = '',
+  page: number = 1,
+  perPage: number = 50
+) {
+  return useQuery({
+    queryKey: ['viewer-directory', streamer, sort, order, filter, search, page, perPage],
+    queryFn: () => fetchViewerDirectory(streamer, sort, order, filter, search, page, perPage),
+    staleTime: STALE_TIME,
+    enabled: !!streamer,
+  });
+}
+
+// Viewer Detail Hook
+export function useViewerDetail(streamer: string | null, login: string | null) {
+  return useQuery({
+    queryKey: ['viewer-detail', streamer, login],
+    queryFn: () => fetchViewerDetail(streamer, login!),
+    staleTime: STALE_TIME,
+    enabled: !!streamer && !!login,
+  });
+}
+
+// Viewer Segments Hook
+export function useViewerSegments(streamer: string | null) {
+  return useQuery({
+    queryKey: ['viewer-segments', streamer],
+    queryFn: () => fetchViewerSegments(streamer),
     staleTime: STALE_TIME,
     enabled: !!streamer,
   });

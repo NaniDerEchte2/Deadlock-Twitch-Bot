@@ -473,14 +473,19 @@ class _AnalyticsInsightsMixin:
                     else 0.0
                 )
 
+                # Detect cold-rollup: if >90% have seen_before=False, fall back
+                # to session_count as the returning indicator.
+                seen_before_count = sum(1 for c in chatter_entries if c["seen_before"])
+                cold_rollup = len(chatter_entries) > 0 and (seen_before_count / len(chatter_entries)) < 0.1
+
                 first_time_chatters = 0
                 for c in chatter_entries:
                     if not c["active_flag"]:
                         continue
-                    if has_first_flag_data and c["has_first_flag"]:
+                    if cold_rollup:
+                        is_first = c.get("session_count", 1) < 2
+                    elif has_first_flag_data and c["has_first_flag"]:
                         is_first = c["first_time_flag"]
-                        # Historical lurker placeholders could store first_time_global=0.
-                        # If the chatter was not known before the window, treat as first-time.
                         if (not is_first) and c["lurker_flag"] and (not c["seen_before"]):
                             is_first = True
                     else:
@@ -784,6 +789,10 @@ class _AnalyticsInsightsMixin:
                 }
                 auto_drops: list = []
                 manual_drops: list = []
+                recovery_times: list = []
+                duration_recovery: dict[str, list] = {
+                    "30s": [], "60s": [], "90s": [], "120s_plus": []
+                }
 
                 for ad in ad_rows:
                     sid = int(ad["session_id"] or 0)
@@ -810,6 +819,19 @@ class _AnalyticsInsightsMixin:
                         continue
                     drop = (pre_avg - sum(post) / len(post)) / pre_avg * 100.0
                     drop_pcts.append(drop)
+
+                    # Recovery time: how many minutes until viewer count returns to pre-ad level
+                    recovery_min = None
+                    for m, v in sorted(tl, key=lambda x: x[0]):
+                        if m > post_start and v >= pre_avg * 0.95:
+                            recovery_min = round(m - post_start, 1)
+                            break
+                    if recovery_min is not None:
+                        recovery_times.append(recovery_min)
+                        # Also bucket by duration
+                        dur_key = "30s" if dur_s <= 35 else "60s" if dur_s <= 65 else "90s" if dur_s <= 100 else "120s_plus"
+                        duration_recovery[dur_key].append(recovery_min)
+
                     worst_ads.append(
                         {
                             "started_at": str(ad["started_at"] or "")[:16],
@@ -817,6 +839,7 @@ class _AnalyticsInsightsMixin:
                             "drop_pct": round(drop, 1),
                             "is_automatic": bool(ad["is_automatic"]),
                             "min_into_stream": round(min_into, 1),
+                            "recovery_min": recovery_min,
                         }
                     )
 
@@ -894,6 +917,49 @@ class _AnalyticsInsightsMixin:
                     )
                 else:
                     ads["best_ad_time"] = None
+
+                # Recovery time stats
+                ads["avg_recovery_min"] = round(sum(recovery_times) / len(recovery_times), 1) if recovery_times else None
+                ads["recovery_by_duration"] = {
+                    bucket: {"avg_recovery_min": round(sum(r) / len(r), 1) if r else None, "count": len(r)}
+                    for bucket, r in duration_recovery.items()
+                }
+
+                # Generate ad strategy recommendation
+                recommendations: list[str] = []
+                # Duration recommendation
+                dur_avgs = {k: sum(v) / len(v) for k, v in duration_buckets.items() if v}
+                if dur_avgs:
+                    best_dur = min(dur_avgs, key=dur_avgs.get)
+                    dur_labels = {"30s": "30s", "60s": "60s", "90s": "90s", "120s_plus": "120s+"}
+                    recommendations.append(
+                        f"{dur_labels[best_dur]}-Ads verursachen den geringsten Drop (Ø {dur_avgs[best_dur]:.1f}%)"
+                    )
+                # Auto vs manual
+                if auto_drops and manual_drops:
+                    auto_avg = sum(auto_drops) / len(auto_drops)
+                    manual_avg = sum(manual_drops) / len(manual_drops)
+                    if manual_avg < auto_avg * 0.7:
+                        recommendations.append(
+                            f"Manuelle Ads verlieren {((auto_avg - manual_avg) / auto_avg * 100):.0f}% weniger Viewer als automatische"
+                        )
+                # Timing recommendation
+                if position_avgs:
+                    best_pos = min(position_avgs, key=position_avgs.get)
+                    pos_labels = {
+                        "early_0_30m": "in den ersten 30 Min",
+                        "mid_30_60m": "zwischen Min 30-60",
+                        "late_60_90m": "zwischen Min 60-90",
+                        "endgame_90m": "nach Min 90",
+                    }
+                    recommendations.append(
+                        f"Beste Ad-Zeit: {pos_labels.get(best_pos, best_pos)} (Ø {position_avgs[best_pos]:.1f}% Drop)"
+                    )
+                # Recovery insight
+                if recovery_times:
+                    avg_rec = sum(recovery_times) / len(recovery_times)
+                    recommendations.append(f"Ø Recovery-Zeit: {avg_rec:.1f} Minuten nach Ad-Ende")
+                ads["recommendations"] = recommendations
 
                 # --- Hype Train ---
                 try:

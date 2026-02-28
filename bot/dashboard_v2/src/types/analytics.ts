@@ -770,6 +770,25 @@ export interface WorstAd {
   duration_s: number;
   drop_pct: number;
   is_automatic: boolean;
+  min_into_stream?: number;
+  recovery_min?: number | null;
+}
+
+export interface AdBucketData {
+  avg_drop: number | null;
+  count: number;
+}
+
+export interface RecoveryBucketData {
+  avg_recovery_min: number | null;
+  count: number;
+}
+
+export interface AutoVsManual {
+  auto_avg_drop: number | null;
+  manual_avg_drop: number | null;
+  auto_count: number;
+  manual_count: number;
 }
 
 export interface MonetizationStats {
@@ -781,6 +800,13 @@ export interface MonetizationStats {
     avg_duration_s: number;
     avg_viewer_drop_pct: number | null;
     worst_ads: WorstAd[];
+    duration_impact?: Record<string, AdBucketData>;
+    position_impact?: Record<string, AdBucketData>;
+    auto_vs_manual?: AutoVsManual;
+    best_ad_time?: string | null;
+    avg_recovery_min?: number | null;
+    recovery_by_duration?: Record<string, RecoveryBucketData>;
+    recommendations?: string[];
   };
   hype_train: {
     total: number;
@@ -797,4 +823,120 @@ export interface MonetizationStats {
     gifted: number;
   };
   window_days: number;
+}
+
+// ── Viewer Analytics Types ──
+
+export interface ViewerEntry {
+  login: string;
+  totalSessions: number;
+  totalMessages: number;
+  firstSeen: string;
+  lastSeen: string;
+  daysSinceLastSeen: number;
+  otherChannels: number;
+  topOtherChannels: string[];
+  category: 'dedicated' | 'regular' | 'casual' | 'lurker' | 'new';
+  avgMessagesPerSession: number;
+  isLurker: boolean;
+}
+
+export interface ViewerDirectorySummary {
+  totalViewers: number;
+  activeViewers: number;
+  lurkers: number;
+  exclusiveViewers: number;
+  sharedViewers: number;
+  avgSessionsPerViewer: number;
+  avgOtherChannels: number;
+}
+
+export interface ViewerDirectory {
+  viewers: ViewerEntry[];
+  total: number;
+  page: number;
+  perPage: number;
+  summary: ViewerDirectorySummary;
+}
+
+export type ViewerSortField = 'sessions' | 'messages' | 'last_seen' | 'other_channels' | 'first_seen';
+export type ViewerFilterType = 'all' | 'active' | 'lurker' | 'exclusive' | 'shared' | 'new' | 'churned';
+
+export interface ViewerDetailOverview {
+  totalSessions: number;
+  totalMessages: number;
+  firstSeen: string;
+  lastSeen: string;
+  category: string;
+  isLurker: boolean;
+}
+
+export interface ViewerActivityDay {
+  date: string;
+  sessions: number;
+  messages: number;
+}
+
+export interface ViewerCrossChannel {
+  streamer: string;
+  sessions: number;
+  messages: number;
+  firstSeen: string;
+  lastSeen: string;
+  overlap: 'before' | 'after' | 'unknown';
+}
+
+export interface ViewerChatPatterns {
+  peakHours: number[];
+  avgMessagesPerSession: number;
+  mostActiveDay: string;
+  messagesTrend: 'increasing' | 'decreasing' | 'stable' | 'insufficient_data';
+}
+
+export interface ViewerDetail {
+  login: string;
+  overview: ViewerDetailOverview;
+  activityTimeline: ViewerActivityDay[];
+  crossChannelPresence: ViewerCrossChannel[];
+  chatPatterns: ViewerChatPatterns;
+}
+
+export interface SegmentData {
+  count: number;
+  pct: number;
+  avgMessages: number;
+  avgSessions: number;
+}
+
+export interface AtRiskViewer {
+  login: string;
+  sessions: number;
+  messages: number;
+  daysSinceLastSeen: number;
+  category: string;
+  recentlySeenAt?: string[];
+}
+
+export interface ChurnRisk {
+  atRisk: number;
+  recentlyChurned: number;
+  atRiskViewers: AtRiskViewer[];
+}
+
+export interface SharedChannel {
+  streamer: string;
+  sharedCount: number;
+  direction: 'bidirectional' | 'outgoing' | 'incoming';
+}
+
+export interface CrossChannelStats {
+  exclusiveViewersPct: number;
+  avgOtherChannels: number;
+  topSharedChannels: SharedChannel[];
+}
+
+export interface ViewerSegments {
+  segments: Record<string, SegmentData>;
+  churnRisk: ChurnRisk;
+  crossChannelStats: CrossChannelStats;
 }

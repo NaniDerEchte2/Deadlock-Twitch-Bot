@@ -12,6 +12,7 @@ import { Schedule } from '@/pages/Schedule';
 import { Coaching } from '@/pages/Coaching';
 import { Monetization } from '@/pages/Monetization';
 import { Category } from '@/pages/Category';
+import { Viewers } from '@/pages/Viewers';
 import { useStreamerList, useAuthStatus } from '@/hooks/useAnalytics';
 import type { TimeRange } from '@/types/analytics';
 import { Shield, ShieldCheck, ShieldAlert, Wifi, AlertTriangle } from 'lucide-react';
@@ -203,6 +204,10 @@ function Dashboard() {
 
         {activeTab === 'audience' && (
           <Audience streamer={streamer || ''} days={days} />
+        )}
+
+        {activeTab === 'viewers' && (
+          <Viewers streamer={streamer} days={days} />
         )}
 
         {activeTab === 'compare' && (

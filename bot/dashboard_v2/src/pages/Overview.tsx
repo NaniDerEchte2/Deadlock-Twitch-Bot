@@ -87,7 +87,11 @@ export function Overview({ streamer, days, onSessionClick }: OverviewProps) {
               ? `+${formatNumber(summary.followersGained)} gewonnen · ${summary.followersPerHour >= 0 ? '+' : ''}${summary.followersPerHour.toFixed(2)}/h netto`
               : `${summary.followersPerHour >= 0 ? '+' : ''}${summary.followersPerHour.toFixed(2)} / Stunde`
           }
-          trend={summary.followersTrend}
+          trend={
+            summary.followersTrend != null
+              ? Math.max(-999, Math.min(999, summary.followersTrend))
+              : undefined
+          }
           icon={TrendingUp}
           color="green"
         />

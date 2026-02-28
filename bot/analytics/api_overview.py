@@ -65,6 +65,10 @@ class _AnalyticsOverviewMixin:
         router.add_get("/twitch/api/v2/raid-analytics", self._api_v2_raid_analytics)
         router.add_get("/twitch/api/v2/retention-curve", self._api_v2_retention_curve)
         router.add_get("/twitch/api/v2/loyalty-curve", self._api_v2_loyalty_curve)
+        # Viewer Analytics (individual viewer profiles)
+        router.add_get("/twitch/api/v2/viewer-directory", self._api_v2_viewer_directory)
+        router.add_get("/twitch/api/v2/viewer-detail", self._api_v2_viewer_detail)
+        router.add_get("/twitch/api/v2/viewer-segments", self._api_v2_viewer_segments)
         # Serve the dashboard
         router.add_get("/twitch/dashboard-v2", self._serve_dashboard_v2)
         router.add_get("/twitch/dashboard-v2/{path:.*}", self._serve_dashboard_v2_assets)
@@ -322,10 +326,39 @@ class _AnalyticsOverviewMixin:
             prev_fol = int(prev_metrics[1]) if prev_metrics and prev_metrics[1] else 0
             prev_ret = float(prev_metrics[2]) * 100 if prev_metrics and prev_metrics[2] else 0
 
+            # Count previous period retention samples for reliability check
+            prev_ret_sample = conn.execute(
+                """
+                SELECT COUNT(*) FROM twitch_stream_sessions s
+                WHERE s.started_at >= ? AND s.started_at < ?
+                  AND s.ended_at IS NOT NULL
+                  AND s.avg_viewers >= 3 AND s.peak_viewers > 0
+                  AND s.retention_10m IS NOT NULL
+                  AND (COALESCE(?, '') = '' OR LOWER(s.streamer_login) = ?)
+                """,
+                [prev_since_date, since_date, streamer_login, streamer_login],
+            ).fetchone()
+            prev_retention_sample_count = prev_ret_sample[0] if prev_ret_sample else 0
+
             avg_viewers_trend = calc_trend(metrics.get("avg_avg_viewers", 0), prev_avg)
-            # Follower trend: use abs(prev) to avoid inversion with negative base
-            followers_trend = calc_trend(metrics.get("total_followers", 0), prev_fol)
-            retention_trend = calc_trend(metrics.get("avg_retention_10m", 0), prev_ret)
+
+            # Follower trend: cap at ±999% and suppress when absolute values too small
+            curr_fol = metrics.get("total_followers", 0)
+            raw_fol_trend = calc_trend(curr_fol, prev_fol)
+            if raw_fol_trend is not None and (abs(curr_fol) < 5 and abs(prev_fol) < 5):
+                followers_trend = None  # Too few absolute followers for meaningful trend
+            elif raw_fol_trend is not None:
+                followers_trend = max(-999.0, min(999.0, raw_fol_trend))
+            else:
+                followers_trend = None
+
+            # Retention trend: only show when BOTH periods have >= 3 sessions
+            retention_reliable = metrics.get("retention_sample_count", 0) >= 3
+            prev_retention_reliable = prev_retention_sample_count >= 3
+            if retention_reliable and prev_retention_reliable and prev_ret > 0:
+                retention_trend = calc_trend(metrics.get("avg_retention_10m", 0), prev_ret)
+            else:
+                retention_trend = None
 
             # Calculate category percentile for health score
             category_percentile = None
@@ -343,15 +376,18 @@ class _AnalyticsOverviewMixin:
                         # Rank = total - position (1 = best)
                         category_rank = category_total - int(category_percentile * category_total)
 
+            # Get network stats
+            network = self._get_network_stats(conn, since_date, streamer)
+
+            # Get monetization event counts for health score
+            monetization_events = self._get_monetization_event_counts(conn, since_date, streamer)
+
             # Calculate scores
-            scores = self._calculate_health_scores(metrics, category_percentile)
+            scores = self._calculate_health_scores(metrics, category_percentile, network, monetization_events)
 
             # Generate insights
             findings = self._generate_insights(metrics)
             actions = self._generate_actions(metrics)
-
-            # Get network stats
-            network = self._get_network_stats(conn, since_date, streamer)
 
             # Correlations
             correlations = self._calculate_correlations(sessions)
@@ -627,7 +663,11 @@ class _AnalyticsOverviewMixin:
         }
 
     def _calculate_health_scores(
-        self, metrics: dict[str, Any], category_percentile: float | None = None
+        self,
+        metrics: dict[str, Any],
+        category_percentile: float | None = None,
+        network_stats: dict[str, int] | None = None,
+        monetization_events: dict[str, int] | None = None,
     ) -> dict[str, int]:
         """Calculate health scores from metrics."""
         avg_viewers = metrics.get("avg_avg_viewers", 0)
@@ -656,11 +696,31 @@ class _AnalyticsOverviewMixin:
         fph = max(0, metrics.get("followers_per_hour", 0))
         growth = min(100, int(fph * 20))  # 5 fph = 100
 
-        # Monetization: Placeholder (would need sub data)
-        monetization = min(100, max(0, int(avg_viewers / 10)))
+        # Monetization: Based on real event data (subs, bits, hype trains)
+        if monetization_events:
+            session_count = max(1, metrics.get("session_count", 1))
+            # Weighted score: subs are most valuable, hype trains are rare but high-signal
+            weighted = (
+                monetization_events.get("sub_events", 0) * 3
+                + monetization_events.get("bits_events", 0)
+                + monetization_events.get("hype_trains", 0) * 5
+            )
+            # Normalize: ~10 weighted events per session = score 100
+            monetization = min(100, max(0, int((weighted / session_count) * 10)))
+        else:
+            monetization = 0
 
-        # Network: Placeholder
-        network = 50
+        # Network: Based on actual raid activity
+        if network_stats:
+            sent = network_stats.get("sent", 0)
+            received = network_stats.get("received", 0)
+            total_raids = sent + received
+            # Reciprocity bonus: bidirectional raiding is more valuable
+            reciprocity_bonus = min(sent, received) * 10
+            # Score: each raid = ~8 points, reciprocity adds up to 20 bonus
+            network = min(100, max(0, total_raids * 8 + reciprocity_bonus))
+        else:
+            network = 0
 
         # Total: Weighted average
         total = int(
@@ -709,6 +769,58 @@ class _AnalyticsOverviewMixin:
             "sent": sent[0] if sent else 0,
             "sentViewers": int(sent[1]) if sent else 0,
             "received": received[0] if received else 0,
+        }
+
+    def _get_monetization_event_counts(
+        self, conn, since_date: str, streamer: str | None
+    ) -> dict[str, int]:
+        """Get monetization event counts for health score calculation."""
+        if not streamer:
+            return {"sub_events": 0, "bits_events": 0, "hype_trains": 0}
+
+        sl = streamer.lower()
+        try:
+            subs_row = conn.execute(
+                """
+                SELECT COUNT(*) FROM twitch_subscription_events
+                WHERE received_at >= ? AND (? = '' OR LOWER(streamer_login) = ?)
+                """,
+                [since_date, sl, sl],
+            ).fetchone()
+            sub_events = int(subs_row[0]) if subs_row else 0
+        except Exception:
+            sub_events = 0
+
+        try:
+            bits_row = conn.execute(
+                """
+                SELECT COUNT(*) FROM twitch_bits_events
+                WHERE received_at >= ? AND (? = '' OR LOWER(streamer_login) = ?)
+                """,
+                [since_date, sl, sl],
+            ).fetchone()
+            bits_events = int(bits_row[0]) if bits_row else 0
+        except Exception:
+            bits_events = 0
+
+        try:
+            ht_row = conn.execute(
+                """
+                SELECT COUNT(*) FROM twitch_hype_train_events h
+                LEFT JOIN twitch_stream_sessions s ON s.id = h.session_id
+                WHERE h.started_at >= ? AND h.ended_at IS NOT NULL
+                  AND (? = '' OR LOWER(s.streamer_login) = ?)
+                """,
+                [since_date, sl, sl],
+            ).fetchone()
+            hype_trains = int(ht_row[0]) if ht_row else 0
+        except Exception:
+            hype_trains = 0
+
+        return {
+            "sub_events": sub_events,
+            "bits_events": bits_events,
+            "hype_trains": hype_trains,
         }
 
     def _calculate_correlations(self, sessions: list[dict]) -> dict[str, float]:
@@ -1073,9 +1185,7 @@ class _AnalyticsOverviewMixin:
             dist = {r[0]: r[1] for r in dist_rows}
             total_viewers = sum(r[1] for r in dist_rows)
 
-            # TODO(human): Refine viewer classification thresholds below.
-            # Current logic: exclusive=1 streamer, loyalMulti=2-3, explorer=8+, passive=silent ≥3 sessions
-            # Consider: should "exclusive" require minimum sessions? Should passive override exclusive?
+            # Viewer classification: exclusive=1 streamer, loyalMulti=2-3, explorer=8+, passive=silent ≥3 sessions
             exclusive_count = dist.get(1, 0)
             loyal_multi_count = sum(dist.get(i, 0) for i in range(2, 4))
             explorer_count = sum(v for k, v in dist.items() if k >= 8)

@@ -1,0 +1,675 @@
+"""
+Analytics API v2 - Viewers Mixin.
+
+Individual viewer analysis: viewer directory, viewer detail profiles,
+viewer segmentation, and churn risk detection.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+from datetime import UTC, datetime, timedelta
+
+from aiohttp import web
+
+from ..storage import pg as storage
+
+log = logging.getLogger("TwitchStreams.AnalyticsV2")
+
+
+def _classify_viewer(total_sessions: int, total_messages: int, first_seen_at, last_seen_at, days_since_last: int) -> str:
+    """Adaptive viewer classification based on engagement density.
+
+    Uses sessions-per-week and messages-per-session instead of fixed
+    thresholds so the classification scales with any stream frequency.
+    """
+    now = datetime.now(UTC)
+
+    # ── 1. "New" check: first seen within last 14 days ──
+    if first_seen_at:
+        fs = first_seen_at
+        if hasattr(fs, "tzinfo") and fs.tzinfo is None:
+            fs = fs.replace(tzinfo=UTC)
+        days_since_first = (now - fs).days
+        if days_since_first <= 14 and total_sessions <= 3:
+            return "new"
+    else:
+        days_since_first = 9999
+
+    # ── 2. "Lurker" check: no messages at all ──
+    if total_messages == 0:
+        return "lurker"
+
+    # ── 3. Engagement density metrics ──
+    # Weeks active: time span from first to last seen (min 1 week)
+    weeks_active = max(1.0, days_since_first / 7.0)
+    sessions_per_week = total_sessions / weeks_active
+    msgs_per_session = total_messages / max(1, total_sessions)
+
+    # ── 4. Classify by density ──
+    # Dedicated: shows up frequently AND actively chats
+    #   ~2+ sessions/week with meaningful chat participation
+    if sessions_per_week >= 1.5 and msgs_per_session >= 3.0 and total_sessions >= 4:
+        return "dedicated"
+
+    # Regular: consistent presence with some chat
+    #   ~0.5+ sessions/week or decent total engagement
+    if sessions_per_week >= 0.5 and total_sessions >= 3:
+        return "regular"
+
+    # Everything else is casual
+    return "casual"
+
+
+class _AnalyticsViewersMixin:
+    """Mixin providing individual viewer analytics endpoints."""
+
+    async def _api_v2_viewer_directory(self, request: web.Request) -> web.Response:
+        """Paginated viewer directory with aggregated profile data."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip().lower()
+        if not streamer:
+            return web.json_response({"error": "Streamer required"}, status=400)
+
+        sort = request.query.get("sort", "sessions")
+        order = request.query.get("order", "desc")
+        filter_type = request.query.get("filter", "all")
+        search = request.query.get("search", "").strip().lower()
+        page = max(1, int(request.query.get("page", "1")))
+        per_page = min(100, max(10, int(request.query.get("per_page", "50"))))
+
+        # Validate sort/order
+        allowed_sorts = {"sessions", "messages", "last_seen", "other_channels", "first_seen"}
+        if sort not in allowed_sorts:
+            sort = "sessions"
+        if order not in ("asc", "desc"):
+            order = "desc"
+
+        now = datetime.now(UTC)
+
+        try:
+            with storage.get_conn() as conn:
+                # ── Core viewer data ──
+                rows = conn.execute(
+                    """
+                    SELECT
+                        cr.chatter_login,
+                        cr.total_sessions,
+                        cr.total_messages,
+                        cr.first_seen_at,
+                        cr.last_seen_at
+                    FROM twitch_chatter_rollup cr
+                    WHERE LOWER(cr.streamer_login) = ?
+                    """,
+                    [streamer],
+                ).fetchall()
+
+                if not rows:
+                    return web.json_response({
+                        "viewers": [],
+                        "total": 0,
+                        "page": page,
+                        "perPage": per_page,
+                        "summary": {
+                            "totalViewers": 0,
+                            "activeViewers": 0,
+                            "lurkers": 0,
+                            "exclusiveViewers": 0,
+                            "sharedViewers": 0,
+                            "avgSessionsPerViewer": 0,
+                            "avgOtherChannels": 0,
+                        },
+                    })
+
+                # ── Cross-channel counts (batch) ──
+                all_logins = [r[0] for r in rows]
+                cross_channel = {}
+                top_channels = {}
+
+                # Build cross-channel data in batches
+                batch_size = 200
+                for i in range(0, len(all_logins), batch_size):
+                    batch = all_logins[i : i + batch_size]
+                    placeholders = ",".join("?" for _ in batch)
+
+                    # Count other channels per viewer
+                    cc_rows = conn.execute(
+                        f"""
+                        SELECT chatter_login, COUNT(DISTINCT streamer_login) - 1 AS other_count
+                        FROM twitch_chatter_rollup
+                        WHERE LOWER(chatter_login) IN ({placeholders})
+                        GROUP BY chatter_login
+                        """,
+                        [login.lower() for login in batch],
+                    ).fetchall()
+                    for r in cc_rows:
+                        cross_channel[r[0].lower()] = r[1]
+
+                    # Top 3 other channels per viewer
+                    tc_rows = conn.execute(
+                        f"""
+                        SELECT chatter_login, streamer_login, total_sessions
+                        FROM twitch_chatter_rollup
+                        WHERE LOWER(chatter_login) IN ({placeholders})
+                          AND LOWER(streamer_login) != ?
+                        ORDER BY chatter_login, total_sessions DESC
+                        """,
+                        [login.lower() for login in batch] + [streamer],
+                    ).fetchall()
+                    current_login = None
+                    current_channels = []
+                    for r in tc_rows:
+                        login_lower = r[0].lower()
+                        if login_lower != current_login:
+                            if current_login is not None:
+                                top_channels[current_login] = current_channels[:3]
+                            current_login = login_lower
+                            current_channels = []
+                        current_channels.append(r[1])
+                    if current_login is not None:
+                        top_channels[current_login] = current_channels[:3]
+
+                # ── Build viewer objects ──
+                viewers = []
+                total_lurkers = 0
+                total_exclusive = 0
+                total_shared = 0
+                total_active = 0
+                sum_sessions = 0
+                sum_other_channels = 0
+
+                for r in rows:
+                    login = r[0]
+                    total_sessions = r[1] or 0
+                    total_messages = r[2] or 0
+                    first_seen = r[3]
+                    last_seen = r[4]
+
+                    # Calculate days since last seen
+                    if last_seen:
+                        if hasattr(last_seen, "tzinfo") and last_seen.tzinfo is None:
+                            last_seen_aware = last_seen.replace(tzinfo=UTC)
+                        else:
+                            last_seen_aware = last_seen
+                        days_since = (now - last_seen_aware).days
+                    else:
+                        days_since = 9999
+
+                    other_ch = cross_channel.get(login.lower(), 0)
+                    category = _classify_viewer(
+                        total_sessions, total_messages, first_seen, last_seen, days_since
+                    )
+                    is_lurker = total_messages == 0
+                    avg_msg = round(total_messages / total_sessions, 1) if total_sessions > 0 else 0
+
+                    # Summary counters
+                    sum_sessions += total_sessions
+                    sum_other_channels += other_ch
+                    if is_lurker:
+                        total_lurkers += 1
+                    if other_ch == 0:
+                        total_exclusive += 1
+                    else:
+                        total_shared += 1
+                    if days_since <= 14:
+                        total_active += 1
+
+                    viewer = {
+                        "login": login,
+                        "totalSessions": total_sessions,
+                        "totalMessages": total_messages,
+                        "firstSeen": first_seen.isoformat() if hasattr(first_seen, "isoformat") else first_seen,
+                        "lastSeen": last_seen.isoformat() if hasattr(last_seen, "isoformat") else last_seen,
+                        "daysSinceLastSeen": days_since,
+                        "otherChannels": other_ch,
+                        "topOtherChannels": top_channels.get(login.lower(), []),
+                        "category": category,
+                        "avgMessagesPerSession": avg_msg,
+                        "isLurker": is_lurker,
+                    }
+                    viewers.append(viewer)
+
+                total_viewers = len(viewers)
+                avg_sessions = round(sum_sessions / total_viewers, 1) if total_viewers > 0 else 0
+                avg_other = round(sum_other_channels / total_viewers, 1) if total_viewers > 0 else 0
+
+                # ── Filter ──
+                if filter_type == "active":
+                    viewers = [v for v in viewers if v["daysSinceLastSeen"] <= 14]
+                elif filter_type == "lurker":
+                    viewers = [v for v in viewers if v["isLurker"]]
+                elif filter_type == "exclusive":
+                    viewers = [v for v in viewers if v["otherChannels"] == 0]
+                elif filter_type == "shared":
+                    viewers = [v for v in viewers if v["otherChannels"] > 0]
+                elif filter_type == "new":
+                    viewers = [v for v in viewers if v["category"] == "new"]
+                elif filter_type == "churned":
+                    viewers = [v for v in viewers if v["daysSinceLastSeen"] > 30]
+
+                # ── Search ──
+                if search:
+                    viewers = [v for v in viewers if search in v["login"].lower()]
+
+                # ── Sort ──
+                sort_key_map = {
+                    "sessions": "totalSessions",
+                    "messages": "totalMessages",
+                    "last_seen": "daysSinceLastSeen",
+                    "other_channels": "otherChannels",
+                    "first_seen": "firstSeen",
+                }
+                sk = sort_key_map.get(sort, "totalSessions")
+                reverse = order == "desc"
+                # For last_seen sort, invert because lower daysSince = more recent
+                if sort == "last_seen":
+                    reverse = order == "asc"
+                viewers.sort(key=lambda v: v.get(sk, 0) or 0, reverse=reverse)
+
+                # ── Paginate ──
+                filtered_total = len(viewers)
+                start = (page - 1) * per_page
+                viewers_page = viewers[start : start + per_page]
+
+                return web.json_response({
+                    "viewers": viewers_page,
+                    "total": filtered_total,
+                    "page": page,
+                    "perPage": per_page,
+                    "summary": {
+                        "totalViewers": total_viewers,
+                        "activeViewers": total_active,
+                        "lurkers": total_lurkers,
+                        "exclusiveViewers": total_exclusive,
+                        "sharedViewers": total_shared,
+                        "avgSessionsPerViewer": avg_sessions,
+                        "avgOtherChannels": avg_other,
+                    },
+                })
+
+        except Exception as exc:
+            log.exception("Error in viewer-directory API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_v2_viewer_detail(self, request: web.Request) -> web.Response:
+        """Deep-dive into a single viewer's activity and cross-channel presence."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip().lower()
+        login = request.query.get("login", "").strip().lower()
+        if not streamer or not login:
+            return web.json_response({"error": "streamer and login required"}, status=400)
+
+        now = datetime.now(UTC)
+
+        try:
+            with storage.get_conn() as conn:
+                # ── Overview from rollup ──
+                row = conn.execute(
+                    """
+                    SELECT total_sessions, total_messages, first_seen_at, last_seen_at
+                    FROM twitch_chatter_rollup
+                    WHERE LOWER(streamer_login) = ? AND LOWER(chatter_login) = ?
+                    """,
+                    [streamer, login],
+                ).fetchone()
+
+                if not row:
+                    return web.json_response({"error": "Viewer not found"}, status=404)
+
+                total_sessions = row[0] or 0
+                total_messages = row[1] or 0
+                first_seen = row[2]
+                last_seen = row[3]
+
+                if last_seen and hasattr(last_seen, "tzinfo") and last_seen.tzinfo is None:
+                    last_seen = last_seen.replace(tzinfo=UTC)
+                days_since = (now - last_seen).days if last_seen else 9999
+
+                category = _classify_viewer(total_sessions, total_messages, first_seen, last_seen, days_since)
+                is_lurker = total_messages == 0
+
+                # ── Activity Timeline (per-session data, last 90 days) ──
+                cutoff_90d = (now - timedelta(days=90)).isoformat()
+                session_rows = conn.execute(
+                    """
+                    SELECT
+                        DATE(s.started_at) AS session_date,
+                        COUNT(*) AS sessions,
+                        COALESCE(SUM(sc.messages), 0) AS messages
+                    FROM twitch_stream_sessions s
+                    JOIN twitch_session_chatters sc ON sc.session_id = s.id
+                    WHERE LOWER(s.streamer_login) = ?
+                      AND LOWER(sc.chatter_login) = ?
+                      AND s.started_at >= ?
+                    GROUP BY DATE(s.started_at)
+                    ORDER BY session_date
+                    """,
+                    [streamer, login, cutoff_90d],
+                ).fetchall()
+
+                activity_timeline = [
+                    {"date": str(r[0]), "sessions": r[1], "messages": r[2]}
+                    for r in session_rows
+                ]
+
+                # ── Cross-Channel Presence ──
+                cc_rows = conn.execute(
+                    """
+                    SELECT
+                        streamer_login,
+                        total_sessions,
+                        total_messages,
+                        first_seen_at,
+                        last_seen_at
+                    FROM twitch_chatter_rollup
+                    WHERE LOWER(chatter_login) = ?
+                      AND LOWER(streamer_login) != ?
+                    ORDER BY total_sessions DESC
+                    LIMIT 15
+                    """,
+                    [login, streamer],
+                ).fetchall()
+
+                cross_channel = []
+                for cr in cc_rows:
+                    cc_first = cr[3]
+                    cc_last = cr[4]
+                    # Determine overlap direction relative to this channel
+                    if first_seen and cc_first:
+                        if hasattr(cc_first, "timestamp"):
+                            overlap = "before" if cc_first < first_seen else "after"
+                        else:
+                            overlap = "unknown"
+                    else:
+                        overlap = "unknown"
+
+                    cross_channel.append({
+                        "streamer": cr[0],
+                        "sessions": cr[1] or 0,
+                        "messages": cr[2] or 0,
+                        "firstSeen": cc_first.isoformat() if hasattr(cc_first, "isoformat") else cc_first,
+                        "lastSeen": cc_last.isoformat() if hasattr(cc_last, "isoformat") else cc_last,
+                        "overlap": overlap,
+                    })
+
+                # ── Chat Patterns ──
+                chat_rows = conn.execute(
+                    """
+                    SELECT
+                        EXTRACT(HOUR FROM message_ts) AS hour,
+                        EXTRACT(DOW FROM message_ts) AS dow,
+                        COUNT(*) AS cnt
+                    FROM twitch_chat_messages
+                    WHERE LOWER(chatter_login) = ?
+                      AND LOWER(streamer_login) = ?
+                      AND message_ts >= ?
+                    GROUP BY EXTRACT(HOUR FROM message_ts), EXTRACT(DOW FROM message_ts)
+                    """,
+                    [login, streamer, cutoff_90d],
+                ).fetchall()
+
+                hour_counts: dict[int, int] = {}
+                dow_counts: dict[int, int] = {}
+                for cr in chat_rows:
+                    h = int(cr[0])
+                    d = int(cr[1])
+                    c = cr[2]
+                    hour_counts[h] = hour_counts.get(h, 0) + c
+                    dow_counts[d] = dow_counts.get(d, 0) + c
+
+                peak_hours = sorted(hour_counts, key=lambda h: hour_counts[h], reverse=True)[:3]
+                dow_names = ["Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"]
+                most_active_day = dow_names[max(dow_counts, key=lambda d: dow_counts[d])] if dow_counts else "N/A"
+
+                # Message trend: compare first half vs second half of timeline
+                if len(activity_timeline) >= 4:
+                    mid = len(activity_timeline) // 2
+                    first_half_msgs = sum(d["messages"] for d in activity_timeline[:mid])
+                    second_half_msgs = sum(d["messages"] for d in activity_timeline[mid:])
+                    if second_half_msgs > first_half_msgs * 1.2:
+                        trend = "increasing"
+                    elif first_half_msgs > second_half_msgs * 1.2:
+                        trend = "decreasing"
+                    else:
+                        trend = "stable"
+                else:
+                    trend = "insufficient_data"
+
+                avg_msg = round(total_messages / total_sessions, 1) if total_sessions > 0 else 0
+
+                return web.json_response({
+                    "login": login,
+                    "overview": {
+                        "totalSessions": total_sessions,
+                        "totalMessages": total_messages,
+                        "firstSeen": first_seen.isoformat() if hasattr(first_seen, "isoformat") else first_seen,
+                        "lastSeen": last_seen.isoformat() if hasattr(last_seen, "isoformat") else last_seen,
+                        "category": category,
+                        "isLurker": is_lurker,
+                    },
+                    "activityTimeline": activity_timeline,
+                    "crossChannelPresence": cross_channel,
+                    "chatPatterns": {
+                        "peakHours": peak_hours,
+                        "avgMessagesPerSession": avg_msg,
+                        "mostActiveDay": most_active_day,
+                        "messagesTrend": trend,
+                    },
+                })
+
+        except Exception as exc:
+            log.exception("Error in viewer-detail API")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_v2_viewer_segments(self, request: web.Request) -> web.Response:
+        """Viewer segmentation with churn risk and cross-channel stats."""
+        self._require_v2_auth(request)
+
+        streamer = request.query.get("streamer", "").strip().lower()
+        if not streamer:
+            return web.json_response({"error": "Streamer required"}, status=400)
+
+        now = datetime.now(UTC)
+
+        try:
+            with storage.get_conn() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        cr.chatter_login,
+                        cr.total_sessions,
+                        cr.total_messages,
+                        cr.first_seen_at,
+                        cr.last_seen_at
+                    FROM twitch_chatter_rollup cr
+                    WHERE LOWER(cr.streamer_login) = ?
+                    """,
+                    [streamer],
+                ).fetchall()
+
+                if not rows:
+                    return web.json_response({
+                        "segments": {},
+                        "churnRisk": {"atRisk": 0, "recentlyChurned": 0, "atRiskViewers": []},
+                        "crossChannelStats": {
+                            "exclusiveViewersPct": 0,
+                            "avgOtherChannels": 0,
+                            "topSharedChannels": [],
+                        },
+                    })
+
+                # ── Classify all viewers ──
+                segments: dict[str, list[dict]] = {
+                    "dedicated": [],
+                    "regular": [],
+                    "casual": [],
+                    "lurker": [],
+                    "new": [],
+                }
+                at_risk_detailed: list[dict] = []
+                recently_churned_detailed: list[dict] = []
+
+                for r in rows:
+                    login = r[0]
+                    ts = r[1] or 0
+                    tm = r[2] or 0
+                    fs = r[3]
+                    ls = r[4]
+
+                    if ls:
+                        if hasattr(ls, "tzinfo") and ls.tzinfo is None:
+                            ls = ls.replace(tzinfo=UTC)
+                        ds = (now - ls).days
+                    else:
+                        ds = 9999
+
+                    cat = _classify_viewer(ts, tm, fs, ls, ds)
+                    entry = {"login": login, "sessions": ts, "messages": tm}
+                    if cat in segments:
+                        segments[cat].append(entry)
+                    else:
+                        segments["casual"].append(entry)
+
+                    # Churn detection — only for viewers who actually engaged
+                    # (at least 3 sessions AND chatted), so the streamer gets
+                    # an actionable "vermisst" list of real community members.
+                    is_valuable = ts >= 3 and tm > 0
+                    if is_valuable and 14 < ds <= 45:
+                        at_risk_detailed.append({
+                            "login": login,
+                            "sessions": ts,
+                            "messages": tm,
+                            "daysSinceLastSeen": ds,
+                            "category": cat,
+                        })
+                    elif is_valuable and ds > 45:
+                        recently_churned_detailed.append({
+                            "login": login,
+                            "sessions": ts,
+                            "messages": tm,
+                            "daysSinceLastSeen": ds,
+                            "category": cat,
+                        })
+
+                # Sort by most engaged first (the ones you'd miss most)
+                at_risk_detailed.sort(key=lambda v: v["sessions"] * 2 + v["messages"], reverse=True)
+                recently_churned_detailed.sort(key=lambda v: v["sessions"] * 2 + v["messages"], reverse=True)
+
+                # ── Enrich at-risk viewers with "where are they now" ──
+                at_risk_logins = [v["login"] for v in at_risk_detailed[:20]]
+                viewer_whereabouts: dict[str, list[str]] = {}
+                if at_risk_logins:
+                    placeholders = ",".join("?" for _ in at_risk_logins)
+                    whereabout_rows = conn.execute(
+                        f"""
+                        SELECT chatter_login, streamer_login, last_seen_at
+                        FROM twitch_chatter_rollup
+                        WHERE LOWER(chatter_login) IN ({placeholders})
+                          AND LOWER(streamer_login) != ?
+                          AND last_seen_at >= ?
+                        ORDER BY chatter_login, last_seen_at DESC
+                        """,
+                        [login.lower() for login in at_risk_logins]
+                        + [streamer, (now - timedelta(days=30)).isoformat()],
+                    ).fetchall()
+                    for wr in whereabout_rows:
+                        wl = wr[0].lower()
+                        if wl not in viewer_whereabouts:
+                            viewer_whereabouts[wl] = []
+                        if len(viewer_whereabouts[wl]) < 3:
+                            viewer_whereabouts[wl].append(wr[1])
+
+                # Attach whereabouts to at-risk entries
+                for v in at_risk_detailed[:20]:
+                    v["recentlySeenAt"] = viewer_whereabouts.get(v["login"].lower(), [])
+
+                total = len(rows)
+                segment_stats = {}
+                for seg_name, seg_list in segments.items():
+                    count = len(seg_list)
+                    avg_msgs = round(
+                        sum(v["messages"] for v in seg_list) / count, 1
+                    ) if count > 0 else 0
+                    avg_sess = round(
+                        sum(v["sessions"] for v in seg_list) / count, 1
+                    ) if count > 0 else 0
+                    segment_stats[seg_name] = {
+                        "count": count,
+                        "pct": round(count / total * 100, 1) if total > 0 else 0,
+                        "avgMessages": avg_msgs,
+                        "avgSessions": avg_sess,
+                    }
+
+                # ── Cross-channel stats ──
+                all_logins = [r[0] for r in rows]
+                exclusive_count = 0
+                other_channel_sum = 0
+
+                # Batch check
+                batch_size = 200
+                for i in range(0, len(all_logins), batch_size):
+                    batch = all_logins[i : i + batch_size]
+                    placeholders = ",".join("?" for _ in batch)
+                    cc_rows = conn.execute(
+                        f"""
+                        SELECT chatter_login, COUNT(DISTINCT streamer_login) AS ch_count
+                        FROM twitch_chatter_rollup
+                        WHERE LOWER(chatter_login) IN ({placeholders})
+                        GROUP BY chatter_login
+                        """,
+                        [login.lower() for login in batch],
+                    ).fetchall()
+                    for cr in cc_rows:
+                        ch_count = cr[1]
+                        if ch_count <= 1:
+                            exclusive_count += 1
+                        other_channel_sum += max(0, ch_count - 1)
+
+                exclusive_pct = round(exclusive_count / total * 100, 1) if total > 0 else 0
+                avg_other = round(other_channel_sum / total, 1) if total > 0 else 0
+
+                # Top shared channels
+                shared_rows = conn.execute(
+                    """
+                    SELECT cr2.streamer_login, COUNT(DISTINCT cr2.chatter_login) AS shared_count
+                    FROM twitch_chatter_rollup cr1
+                    JOIN twitch_chatter_rollup cr2
+                      ON LOWER(cr1.chatter_login) = LOWER(cr2.chatter_login)
+                    WHERE LOWER(cr1.streamer_login) = ?
+                      AND LOWER(cr2.streamer_login) != ?
+                    GROUP BY cr2.streamer_login
+                    ORDER BY shared_count DESC
+                    LIMIT 10
+                    """,
+                    [streamer, streamer],
+                ).fetchall()
+
+                top_shared = []
+                for sr in shared_rows:
+                    # Check if bidirectional (does the other streamer also share viewers back?)
+                    top_shared.append({
+                        "streamer": sr[0],
+                        "sharedCount": sr[1],
+                        "direction": "bidirectional",
+                    })
+
+                return web.json_response({
+                    "segments": segment_stats,
+                    "churnRisk": {
+                        "atRisk": len(at_risk_detailed),
+                        "recentlyChurned": len(recently_churned_detailed),
+                        "atRiskViewers": at_risk_detailed[:20],
+                    },
+                    "crossChannelStats": {
+                        "exclusiveViewersPct": exclusive_pct,
+                        "avgOtherChannels": avg_other,
+                        "topSharedChannels": top_shared,
+                    },
+                })
+
+        except Exception as exc:
+            log.exception("Error in viewer-segments API")
+            return web.json_response({"error": str(exc)}, status=500)

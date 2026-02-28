@@ -10,6 +10,7 @@ import {
   GraduationCap,
   DollarSign,
   Globe,
+  UserSearch,
 } from 'lucide-react';
 
 export type TabId =
@@ -18,6 +19,7 @@ export type TabId =
   | 'chat'
   | 'growth'
   | 'audience'
+  | 'viewers'
   | 'compare'
   | 'schedule'
   | 'coaching'
@@ -36,6 +38,7 @@ const tabs: Tab[] = [
   { id: 'chat', label: 'Chat', icon: MessageSquare },
   { id: 'growth', label: 'Wachstum', icon: BarChart3 },
   { id: 'audience', label: 'Audience', icon: Target },
+  { id: 'viewers', label: 'Viewer', icon: UserSearch },
   { id: 'compare', label: 'Vergleich', icon: Users },
   { id: 'schedule', label: 'Zeitplan', icon: Calendar },
   { id: 'coaching', label: 'Coaching', icon: GraduationCap },

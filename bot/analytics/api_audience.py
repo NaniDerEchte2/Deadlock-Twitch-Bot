@@ -1188,27 +1188,73 @@ class _AnalyticsAudienceMixin:
                 casual = 0
                 new_viewers = 0
 
+                # Detect cold-rollup: if >90% have seen_before=False, the rollup
+                # was recently built and first_seen_at is unreliable.  Fall back to
+                # within-window session_count as the returning indicator.
+                seen_before_count = sum(1 for v in viewer_entries if v["seen_before"])
+                cold_rollup = total_viewers > 0 and (seen_before_count / total_viewers) < 0.1
+
                 for v in viewer_entries:
-                    if has_first_flag_data and v["has_first_flag"]:
+                    if cold_rollup:
+                        # Fallback: use session_count within the current window
+                        is_returning = v["session_count"] >= 2
+                    elif has_first_flag_data and v["has_first_flag"]:
                         is_first = v["first_flag"]
                         if (not is_first) and v["lurker"] and (not v["seen_before"]):
                             is_first = True
+                        is_returning = not is_first
                     else:
-                        # Fallback: treat as returning if we have historical rollup for this login
-                        is_first = not v["seen_before"] if v["chatter_login"] else True
+                        is_returning = v["seen_before"] if v["chatter_login"] else False
 
-                    if is_first:
+                    if is_returning:
+                        returning_viewers += 1
+                        if v["active"] and v["session_count"] >= 3:
+                            dedicated += 1
+                        elif v["active"]:
+                            # Regular = returning + active but fewer sessions
+                            casual += 1  # counted below via regular
+                    else:
                         first_time_viewers += 1
                         if v["active"]:
                             casual += 1
                         else:
                             new_viewers += 1
-                    else:
-                        returning_viewers += 1
-                        if v["active"]:
-                            dedicated += 1
 
-                regular = max(0, returning_viewers - dedicated)
+                # Clean classification with 5 categories including Silent Regulars
+                dedicated = 0
+                regular = 0
+                casual = 0
+                silent_regular = 0
+                new_viewers = 0
+                first_time_viewers = 0
+                returning_viewers = 0
+
+                for v in viewer_entries:
+                    if cold_rollup:
+                        is_returning = v["session_count"] >= 2
+                    elif has_first_flag_data and v["has_first_flag"]:
+                        is_first = v["first_flag"]
+                        if (not is_first) and v["lurker"] and (not v["seen_before"]):
+                            is_first = True
+                        is_returning = not is_first
+                    else:
+                        is_returning = v["seen_before"] if v["chatter_login"] else False
+
+                    if is_returning:
+                        returning_viewers += 1
+                        if v["active"] and v["session_count"] >= 3:
+                            dedicated += 1
+                        elif v["active"]:
+                            regular += 1
+                        elif v["lurker"] or v["seen_flag"]:
+                            # Returning + lurker (seen via chatters API, no messages)
+                            silent_regular += 1
+                    else:
+                        first_time_viewers += 1
+                        if v["active"]:
+                            casual += 1
+                        else:
+                            new_viewers += 1
 
                 def _pct(part: int, whole: int) -> float:
                     return round((part / whole) * 100, 1) if whole > 0 else 0.0
@@ -1267,6 +1313,7 @@ class _AnalyticsAudienceMixin:
                 viewer_type = [
                     {"label": "Dedicated Fans", "percentage": _pct(dedicated, total_viewers)},
                     {"label": "Regular Viewers", "percentage": _pct(regular, total_viewers)},
+                    {"label": "Silent Regulars", "percentage": _pct(silent_regular, total_viewers)},
                     {"label": "Casual Viewers", "percentage": _pct(casual, total_viewers)},
                     {"label": "New Visitors", "percentage": _pct(new_viewers, total_viewers)},
                 ]

@@ -28,6 +28,11 @@ import type {
   RaidRetention,
   ViewerProfiles,
   AudienceSharing,
+  ViewerDirectory,
+  ViewerDetail,
+  ViewerSegments,
+  ViewerSortField,
+  ViewerFilterType,
 } from '@/types/analytics';
 
 const API_BASE = '/twitch/api/v2';
@@ -434,6 +439,47 @@ export async function fetchAudienceSharing(
   return fetchApi<AudienceSharing>('/audience-sharing', {
     streamer: streamer || '',
     days,
+  });
+}
+
+// Viewer Directory (paginated, filtered, sorted)
+export async function fetchViewerDirectory(
+  streamer: string | null,
+  sort: ViewerSortField = 'sessions',
+  order: 'asc' | 'desc' = 'desc',
+  filter: ViewerFilterType = 'all',
+  search: string = '',
+  page: number = 1,
+  perPage: number = 50
+): Promise<ViewerDirectory> {
+  return fetchApi<ViewerDirectory>('/viewer-directory', {
+    streamer: streamer || '',
+    sort,
+    order,
+    filter,
+    ...(search && { search }),
+    page,
+    per_page: perPage,
+  });
+}
+
+// Viewer Detail (single viewer deep-dive)
+export async function fetchViewerDetail(
+  streamer: string | null,
+  login: string
+): Promise<ViewerDetail> {
+  return fetchApi<ViewerDetail>('/viewer-detail', {
+    streamer: streamer || '',
+    login,
+  });
+}
+
+// Viewer Segments (segmentation + churn risk)
+export async function fetchViewerSegments(
+  streamer: string | null
+): Promise<ViewerSegments> {
+  return fetchApi<ViewerSegments>('/viewer-segments', {
+    streamer: streamer || '',
   });
 }
 
