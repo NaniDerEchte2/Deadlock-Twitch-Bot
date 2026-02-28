@@ -18,6 +18,11 @@ log = logging.getLogger("TwitchStreams.RaidCommands")
 class RaidCommandsMixin:
     """Discord-Commands für Twitch-Bot-Verwaltung durch Streamer."""
 
+    @commands.hybrid_command(name="check-scopes", aliases=["check_scopes", "checkscopes"])
+    async def cmd_check_scopes(self, ctx: commands.Context):
+        """Alias für den OAuth-Scopes-Check."""
+        await RaidCommandsMixin.cmd_check_auth.callback(self, ctx)
+
     @commands.hybrid_command(name="check-auth", aliases=["check_auth", "checkauth"])
     async def cmd_check_auth(self, ctx: commands.Context):
         """Prüfe, ob dein Twitch-OAuth alle benötigten Scopes enthält."""
