@@ -11,6 +11,7 @@ from urllib.parse import urlencode, urlsplit
 
 from aiohttp import web
 
+from ..core.chat_bots import build_known_chat_bot_not_in_clause
 from .api_audience import _AnalyticsAudienceMixin
 from .api_insights import _AnalyticsInsightsMixin
 from .api_overview import _AnalyticsOverviewMixin
@@ -442,6 +443,62 @@ class AnalyticsV2Mixin(
                 if not row:
                     return web.json_response({"error": "Session not found"}, status=404)
 
+                session_bot_clause, session_bot_params = build_known_chat_bot_not_in_clause(
+                    column_expr="sc.chatter_login"
+                )
+
+                chatter_presence = conn.execute(
+                    """
+                    SELECT 1
+                    FROM twitch_session_chatters
+                    WHERE session_id = ?
+                    LIMIT 1
+                    """,
+                    [session_id],
+                ).fetchone()
+
+                chatter_stats = conn.execute(
+                    f"""
+                    SELECT
+                        COUNT(
+                            DISTINCT CASE
+                                WHEN sc.messages > 0
+                                THEN COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)
+                                ELSE NULL
+                            END
+                        ) AS unique_chatters,
+                        COUNT(
+                            DISTINCT CASE
+                                WHEN sc.messages > 0
+                                     AND LOWER(COALESCE(CAST(sc.is_first_time_streamer AS TEXT), '0')) IN ('1', 't', 'true')
+                                THEN COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)
+                                ELSE NULL
+                            END
+                        ) AS first_time_chatters,
+                        COUNT(
+                            DISTINCT CASE
+                                WHEN sc.messages > 0
+                                     AND LOWER(COALESCE(CAST(sc.is_first_time_streamer AS TEXT), '0')) NOT IN ('1', 't', 'true')
+                                THEN COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)
+                                ELSE NULL
+                            END
+                        ) AS returning_chatters
+                    FROM twitch_session_chatters sc
+                    WHERE sc.session_id = ?
+                      AND {session_bot_clause}
+                    """,
+                    [session_id, *session_bot_params],
+                ).fetchone()
+
+                if chatter_presence:
+                    unique_chatters = int(chatter_stats[0]) if chatter_stats else 0
+                    first_time_chatters = int(chatter_stats[1]) if chatter_stats else 0
+                    returning_chatters = int(chatter_stats[2]) if chatter_stats else 0
+                else:
+                    unique_chatters = int(row[13] or 0)
+                    first_time_chatters = int(row[14] or 0)
+                    returning_chatters = int(row[15] or 0)
+
                 # Timeline
                 timeline = conn.execute(
                     """
@@ -455,14 +512,15 @@ class AnalyticsV2Mixin(
 
                 # Top chatters
                 chatters = conn.execute(
-                    """
+                    f"""
                     SELECT chatter_login, messages
-                    FROM twitch_session_chatters
-                    WHERE session_id = ?
+                    FROM twitch_session_chatters sc
+                    WHERE sc.session_id = ?
+                      AND {session_bot_clause}
                     ORDER BY messages DESC
                     LIMIT 20
                 """,
-                    [session_id],
+                    [session_id, *session_bot_params],
                 ).fetchall()
 
                 return web.json_response(
@@ -480,9 +538,9 @@ class AnalyticsV2Mixin(
                         "retention10m": float(row[10]) * 100 if row[10] else 0,
                         "retention20m": float(row[11]) * 100 if row[11] else 0,
                         "dropoffPct": float(row[12]) * 100 if row[12] else 0,
-                        "uniqueChatters": row[13] or 0,
-                        "firstTimeChatters": row[14] or 0,
-                        "returningChatters": row[15] or 0,
+                        "uniqueChatters": unique_chatters,
+                        "firstTimeChatters": first_time_chatters,
+                        "returningChatters": returning_chatters,
                         "title": row[16] or "",
                         "timeline": [{"minute": t[0], "viewers": t[1]} for t in timeline],
                         "chatters": [{"login": c[0], "messages": c[1]} for c in chatters],

@@ -14,6 +14,7 @@ import logging
 import re
 from datetime import UTC, datetime
 
+from ..core.chat_bots import is_known_chat_bot
 from ..storage import get_conn
 
 log = logging.getLogger("TwitchStreams.IRCLurkerTracker")
@@ -290,8 +291,12 @@ class IRCLurkerTracker:
 
                 to_insert = []
                 to_update = []
+                filtered_bots = 0
 
                 for nick in nicks_lower:
+                    if is_known_chat_bot(nick):
+                        filtered_bots += 1
+                        continue
                     if nick in existing:
                         to_update.append((now_iso, session_id, nick))
                     else:
@@ -317,10 +322,11 @@ class IRCLurkerTracker:
                     )
 
                 log.info(
-                    "IRC: DB updated for #%s: %d inserts, %d updates",
+                    "IRC: DB updated for #%s: %d inserts, %d updates (%d bots filtered)",
                     channel,
                     len(to_insert),
                     len(to_update),
+                    filtered_bots,
                 )
 
         except Exception:
@@ -328,6 +334,8 @@ class IRCLurkerTracker:
 
     async def _update_chatter_seen(self, channel: str, nick: str):
         """Update last_seen timestamp for a chatter."""
+        if is_known_chat_bot(nick):
+            return
         now_iso = datetime.now(UTC).isoformat(timespec="seconds")
 
         try:

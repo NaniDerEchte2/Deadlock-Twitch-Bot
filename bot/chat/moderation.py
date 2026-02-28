@@ -3,6 +3,7 @@ import re
 import time
 from datetime import UTC, datetime
 
+from ..core.chat_bots import is_known_chat_bot
 from ..storage import get_conn
 from .constants import (
     _INVITE_QUESTION_CHANNEL_COOLDOWN_SEC,
@@ -1170,6 +1171,8 @@ class ModerationMixin:
         author = getattr(message, "author", None)
         chatter_login = (getattr(author, "name", "") or "").lower()
         if not chatter_login:
+            return
+        if is_known_chat_bot(chatter_login):
             return
         chatter_id = str(getattr(author, "id", "") or "") or None
         content = message.content or ""

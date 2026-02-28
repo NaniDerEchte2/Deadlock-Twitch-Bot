@@ -12,6 +12,8 @@ from typing import Any
 
 from aiohttp import web
 
+from ..core.chat_bots import build_known_chat_bot_not_in_clause
+from .raid_metrics import recalculate_raid_chat_metrics
 from ..storage import pg as storage
 
 log = logging.getLogger("TwitchStreams.AnalyticsV2")
@@ -19,6 +21,9 @@ log = logging.getLogger("TwitchStreams.AnalyticsV2")
 
 class _AnalyticsRaidsMixin:
     """Mixin providing raid analytics endpoints."""
+
+    RAID_RETENTION_SAMPLE_LIMIT = 50
+    RAID_METRIC_BATCH_SIZE = 500
 
     async def _api_v2_raid_analytics(self, request: web.Request) -> web.Response:
         """Raid analytics: per-source performance, retention curves, follow attribution."""
@@ -34,30 +39,25 @@ class _AnalyticsRaidsMixin:
 
         try:
             with storage.get_conn() as c:
-                # --- 1. Per-source-channel performance ---
-                # Joins twitch_raid_retention + twitch_raid_history to get
-                # per-source stats: avg viewers sent, new chatters, retention at 30m, etc.
-                source_rows = c.execute(
+                follower_bot_clause, follower_bot_params = build_known_chat_bot_not_in_clause(
+                    column_expr="fe.follower_login"
+                )
+
+                base_raids_full_rows = c.execute(
                     """
                     SELECT
+                        rr.raid_id,
                         rh.from_broadcaster_login,
-                        COUNT(*) AS raids_received,
-                        AVG(rh.viewer_count) AS avg_viewers_sent,
-                        AVG(rr.new_chatters) AS avg_new_chatters,
-                        AVG(CASE WHEN rr.viewer_count_sent > 0
-                            THEN CAST(rr.chatters_at_plus30m AS REAL) / rr.viewer_count_sent
-                            ELSE NULL END) AS avg_retention_30m,
-                        AVG(CASE WHEN rr.viewer_count_sent > 0
-                            THEN CAST(rr.known_from_raider AS REAL) / rr.viewer_count_sent
-                            ELSE NULL END) AS known_audience_overlap
+                        rr.viewer_count_sent,
+                        rr.executed_at,
+                        rr.target_session_id,
+                        rr.to_broadcaster_login
                     FROM twitch_raid_retention rr
                     JOIN twitch_raid_history rh ON rh.id = rr.raid_id
                     JOIN twitch_stream_sessions ss ON ss.id = rr.target_session_id
                     WHERE LOWER(ss.streamer_login) = ?
                       AND ss.started_at >= ?
-                    GROUP BY rh.from_broadcaster_login
-                    ORDER BY raids_received DESC
-                    LIMIT 20
+                    ORDER BY ss.started_at DESC
                     """,
                     [streamer, cutoff],
                 ).fetchall()
@@ -67,7 +67,7 @@ class _AnalyticsRaidsMixin:
                 #   - follower appeared in the session AFTER the raid timestamp
                 #   - follower was NOT known before this session (first_seen_at >= session start)
                 follow_rows = c.execute(
-                    """
+                    f"""
                     SELECT
                         fe.follower_login,
                         CASE
@@ -93,56 +93,134 @@ class _AnalyticsRaidsMixin:
                        AND cr_before.first_seen_at < ss.started_at
                     WHERE LOWER(fe.streamer_login) = ?
                       AND fe.followed_at >= ?
+                      AND {follower_bot_clause}
                     """,
-                    [streamer, cutoff],
+                    [streamer, cutoff, *follower_bot_params],
                 ).fetchall()
 
-                # --- 3. Raid retention curves ---
-                curve_rows = c.execute(
-                    """
-                    SELECT
-                        rr.raid_id,
-                        rh.from_broadcaster_login,
-                        rr.viewer_count_sent,
-                        rr.new_chatters,
-                        rr.chatters_at_plus5m,
-                        rr.chatters_at_plus15m,
-                        rr.chatters_at_plus30m,
-                        ss.started_at AS session_start
-                    FROM twitch_raid_retention rr
-                    JOIN twitch_raid_history rh ON rh.id = rr.raid_id
-                    JOIN twitch_stream_sessions ss ON ss.id = rr.target_session_id
-                    WHERE LOWER(ss.streamer_login) = ?
-                      AND ss.started_at >= ?
-                    ORDER BY ss.started_at DESC
-                    LIMIT 50
-                    """,
-                    [streamer, cutoff],
-                ).fetchall()
-
-                # --- Build response ---
-
-                # Per-source summary
-                per_source = []
-                for r in source_rows:
-                    # Count follows attributed to this source
-                    src_login = (r["from_broadcaster_login"] or "").lower()
-                    follows_attributed = sum(
-                        1 for f in follow_rows
-                        if f["follow_source"] == "raid"
-                        and (f["raid_source"] or "").lower() == src_login
+                base_raids_full: list[dict[str, Any]] = []
+                base_raids_sample: list[dict[str, Any]] = []
+                for raid in base_raids_full_rows:
+                    try:
+                        raid_id = int(raid["raid_id"])
+                        target_session_id = int(raid["target_session_id"])
+                    except Exception:
+                        continue
+                    base_raids_full.append(
+                        {
+                            "raid_id": raid_id,
+                            "from": raid["from_broadcaster_login"] or "unknown",
+                            "from_login": str(raid["from_broadcaster_login"] or "").lower(),
+                            "to_login": str(raid["to_broadcaster_login"] or streamer).lower(),
+                            "viewers_sent": int(raid["viewer_count_sent"] or 0),
+                            "executed_at": raid["executed_at"],
+                            "target_session_id": target_session_id,
+                        }
                     )
-                    avg_viewers = float(r["avg_viewers_sent"] or 0)
-                    per_source.append({
-                        "from_channel": r["from_broadcaster_login"] or "unknown",
-                        "raids_received": int(r["raids_received"] or 0),
-                        "avg_viewers_sent": round(avg_viewers, 1),
-                        "avg_new_chatters": round(float(r["avg_new_chatters"] or 0), 1),
-                        "avg_retention_30m": round(float(r["avg_retention_30m"] or 0), 3) if r["avg_retention_30m"] is not None else None,
-                        "follows_attributed": follows_attributed,
-                        "conversion_rate": round(follows_attributed / avg_viewers, 3) if avg_viewers > 0 else None,
-                        "known_audience_overlap": round(float(r["known_audience_overlap"] or 0), 3) if r["known_audience_overlap"] is not None else None,
-                    })
+                    if len(base_raids_sample) < self.RAID_RETENTION_SAMPLE_LIMIT:
+                        base_raids_sample.append(base_raids_full[-1])
+
+                sample_raid_ids = {int(raid["raid_id"]) for raid in base_raids_sample}
+
+                grouped_source: dict[str, dict[str, Any]] = {}
+                sample_metrics: dict[int, dict[str, int]] = {}
+                for start in range(0, len(base_raids_full), self.RAID_METRIC_BATCH_SIZE):
+                    raid_batch = base_raids_full[start : start + self.RAID_METRIC_BATCH_SIZE]
+                    batch_metrics = recalculate_raid_chat_metrics(
+                        c,
+                        raid_batch,
+                    )
+                    for raid in raid_batch:
+                        raid_id = int(raid["raid_id"])
+                        src_key = str(raid["from"] or "unknown").lower()
+                        sent = int(raid["viewers_sent"] or 0)
+                        metric = batch_metrics.get(raid_id, {})
+                        new_chatters = int(metric.get("new_chatters", 0) or 0)
+                        plus30m = int(metric.get("plus30m", 0) or 0)
+                        known_from_raider = int(metric.get("known_from_raider", 0) or 0)
+
+                        source_bucket = grouped_source.setdefault(
+                            src_key,
+                            {
+                                "from_channel": raid["from"] or "unknown",
+                                "raids_received": 0,
+                                "total_viewers_sent": 0.0,
+                                "total_new_chatters": 0.0,
+                                "retention_ratio_sum": 0.0,
+                                "retention_ratio_count": 0,
+                                "overlap_ratio_sum": 0.0,
+                                "overlap_ratio_count": 0,
+                            },
+                        )
+                        source_bucket["raids_received"] += 1
+                        source_bucket["total_viewers_sent"] += float(sent)
+                        source_bucket["total_new_chatters"] += float(new_chatters)
+                        if sent > 0:
+                            source_bucket["retention_ratio_sum"] += float(plus30m) / float(sent)
+                            source_bucket["retention_ratio_count"] += 1
+                            source_bucket["overlap_ratio_sum"] += float(known_from_raider) / float(sent)
+                            source_bucket["overlap_ratio_count"] += 1
+
+                        if raid_id in sample_raid_ids:
+                            sample_metrics[raid_id] = {
+                                "plus5m": int(metric.get("plus5m", 0) or 0),
+                                "plus15m": int(metric.get("plus15m", 0) or 0),
+                                "plus30m": plus30m,
+                                "new_chatters": new_chatters,
+                            }
+
+                follows_by_source: dict[str, int] = {}
+                for follow in follow_rows:
+                    if follow["follow_source"] != "raid":
+                        continue
+                    src_key = str(follow["raid_source"] or "").lower()
+                    follows_by_source[src_key] = follows_by_source.get(src_key, 0) + 1
+
+                per_source = []
+                for src_key, source_bucket in grouped_source.items():
+                    total_viewers_sent = float(source_bucket["total_viewers_sent"] or 0.0)
+                    raids_received = int(source_bucket["raids_received"] or 0)
+                    avg_viewers = (total_viewers_sent / raids_received) if raids_received > 0 else 0.0
+                    avg_new_chatters = (
+                        float(source_bucket["total_new_chatters"] or 0.0) / raids_received
+                        if raids_received > 0
+                        else 0.0
+                    )
+                    retention_count = int(source_bucket["retention_ratio_count"] or 0)
+                    overlap_count = int(source_bucket["overlap_ratio_count"] or 0)
+                    avg_retention_30m = (
+                        float(source_bucket["retention_ratio_sum"] or 0.0) / retention_count
+                        if retention_count > 0
+                        else None
+                    )
+                    avg_known_overlap = (
+                        float(source_bucket["overlap_ratio_sum"] or 0.0) / overlap_count
+                        if overlap_count > 0
+                        else None
+                    )
+                    follows_attributed = int(follows_by_source.get(src_key, 0))
+                    per_source.append(
+                        {
+                            "from_channel": source_bucket["from_channel"] or "unknown",
+                            "raids_received": raids_received,
+                            "avg_viewers_sent": round(avg_viewers, 1),
+                            "avg_new_chatters": round(avg_new_chatters, 1),
+                            "avg_retention_30m": (
+                                round(avg_retention_30m, 3) if avg_retention_30m is not None else None
+                            ),
+                            "follows_attributed": follows_attributed,
+                            "conversion_rate": (
+                                round(follows_attributed / total_viewers_sent, 3)
+                                if total_viewers_sent > 0
+                                else None
+                            ),
+                            "known_audience_overlap": (
+                                round(avg_known_overlap, 3) if avg_known_overlap is not None else None
+                            ),
+                        }
+                    )
+                per_source.sort(key=lambda item: item["raids_received"], reverse=True)
+                per_source = per_source[:20]
 
                 # Follow attribution summary
                 raid_follows = sum(1 for f in follow_rows if f["follow_source"] == "raid")
@@ -158,27 +236,41 @@ class _AnalyticsRaidsMixin:
 
                 # Retention curves per raid
                 retention_curves = []
-                for r in curve_rows:
-                    sent = int(r["viewer_count_sent"] or 0)
-                    if sent <= 0:
-                        continue
-                    retention_curves.append({
-                        "raid_id": int(r["raid_id"]),
-                        "from": r["from_broadcaster_login"] or "unknown",
-                        "viewers_sent": sent,
-                        "new_chatters": int(r["new_chatters"] or 0),
-                        "retention_curve": {
-                            "plus5m": round(int(r["chatters_at_plus5m"] or 0) / sent, 3),
-                            "plus15m": round(int(r["chatters_at_plus15m"] or 0) / sent, 3),
-                            "plus30m": round(int(r["chatters_at_plus30m"] or 0) / sent, 3),
-                        },
-                    })
+                for raid in base_raids_sample:
+                    raid_id = int(raid["raid_id"])
+                    sent = int(raid["viewers_sent"] or 0)
+                    metric = sample_metrics.get(raid_id, {})
+                    plus5m = int(metric.get("plus5m", 0) or 0)
+                    plus15m = int(metric.get("plus15m", 0) or 0)
+                    plus30m = int(metric.get("plus30m", 0) or 0)
+                    plus5m_ratio = round(plus5m / sent, 3) if sent > 0 else 0.0
+                    plus15m_ratio = round(plus15m / sent, 3) if sent > 0 else 0.0
+                    plus30m_ratio = round(plus30m / sent, 3) if sent > 0 else 0.0
+                    retention_curves.append(
+                        {
+                            "raid_id": raid_id,
+                            "from": raid["from"] or "unknown",
+                            "viewers_sent": sent,
+                            "new_chatters": int(metric.get("new_chatters", 0) or 0),
+                            "retention_curve": {
+                                "plus5m": plus5m_ratio,
+                                "plus15m": plus15m_ratio,
+                                "plus30m": plus30m_ratio,
+                            },
+                        }
+                    )
 
                 return web.json_response({
                     "per_source": per_source,
                     "follow_attribution": follow_attribution,
                     "retention_curves": retention_curves,
                     "window_days": days,
+                    "dataQuality": {
+                        "botFilterApplied": True,
+                        "retentionCurveSampleSize": len(base_raids_sample),
+                        "perSourceUsesFullWindow": True,
+                        "raidMetricBatchSize": self.RAID_METRIC_BATCH_SIZE,
+                    },
                 })
 
         except Exception as exc:

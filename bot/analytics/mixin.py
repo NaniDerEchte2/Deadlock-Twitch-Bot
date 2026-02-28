@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 from discord.ext import tasks
 
+from ..core.chat_bots import build_known_chat_bot_not_in_clause, is_known_chat_bot
 from .. import storage as storage_oauth  # SQLite — OAuth tokens & raid auth state
 from ..storage import pg as storage  # PostgreSQL — analytics data
 
@@ -374,11 +375,14 @@ class TwitchAnalyticsMixin:
                 for session_id, login, chatters in payloads:
                     # Build normalized chatter list from API response
                     chatter_entries: list[tuple[str, str | None]] = []
+                    excluded_bots = 0
                     for chatter in chatters:
                         c_login = (chatter.get("user_login") or "").lower().strip()
                         c_id = (chatter.get("user_id") or "").strip() or None
-                        if c_login:
+                        if c_login and not is_known_chat_bot(c_login):
                             chatter_entries.append((c_login, c_id))
+                        elif c_login:
+                            excluded_bots += 1
 
                     if not chatter_entries:
                         continue
@@ -435,9 +439,10 @@ class TwitchAnalyticsMixin:
                         )
 
                     log.debug(
-                        "Chatters-Poller: %d Chatter für %s (session %s) gespeichert (%d erstmalig)",
+                        "Chatters-Poller: %d Chatter für %s (session %s) gespeichert (%d erstmalig, %d Bots gefiltert)",
                         len(chatter_entries), login, session_id,
                         sum(1 for c_login, _ in chatter_entries if c_login not in known_globally),
+                        excluded_bots,
                     )
         except Exception:
             log.exception("Chatters-Poller: Batch-DB-Fehler")
@@ -862,6 +867,15 @@ class TwitchAnalyticsMixin:
         if not raids:
             return
 
+        session_bot_clause, session_bot_params = build_known_chat_bot_not_in_clause(
+            column_expr="sc.chatter_login",
+            placeholder="%s",
+        )
+        rollup_bot_clause, rollup_bot_params = build_known_chat_bot_not_in_clause(
+            column_expr="chatter_login",
+            placeholder="%s",
+        )
+
         processed = 0
         for raid in raids:
             raid_id = raid[0]
@@ -906,14 +920,23 @@ class TwitchAnalyticsMixin:
 
                     def _count_chatters(offset_min: int) -> int:
                         row = pg.execute(
-                            """
-                            SELECT COUNT(DISTINCT chatter_login) AS cnt
-                            FROM twitch_session_chatters
-                            WHERE session_id = %s
-                              AND last_seen_at >= %s
-                              AND last_seen_at <= (%s + (%s || ' minutes')::INTERVAL)
+                            f"""
+                            SELECT COUNT(
+                                DISTINCT COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)
+                            ) AS cnt
+                            FROM twitch_session_chatters sc
+                            WHERE sc.session_id = %s
+                              AND sc.last_seen_at >= %s
+                              AND sc.last_seen_at <= (%s + (%s || ' minutes')::INTERVAL)
+                              AND {session_bot_clause}
                             """,
-                            (target_session_id, executed_at, executed_at, str(offset_min)),
+                            (
+                                target_session_id,
+                                executed_at,
+                                executed_at,
+                                str(offset_min),
+                                *session_bot_params,
+                            ),
                         ).fetchone()
                         return row["cnt"] if row else 0
 
@@ -922,50 +945,88 @@ class TwitchAnalyticsMixin:
                     c30 = _count_chatters(30)
 
                     known_row = pg.execute(
-                        """
+                        f"""
                         SELECT COUNT(DISTINCT sc.chatter_login) AS known
                         FROM twitch_session_chatters sc
                         WHERE sc.session_id = %s
                           AND sc.last_seen_at >= %s
+                          AND {session_bot_clause}
                           AND sc.chatter_login IN (
                               SELECT chatter_login FROM twitch_chatter_rollup
                               WHERE LOWER(streamer_login) = %s
+                                AND {rollup_bot_clause}
                           )
                         """,
-                        (target_session_id, executed_at, from_login),
+                        (
+                            target_session_id,
+                            executed_at,
+                            *session_bot_params,
+                            from_login,
+                            *rollup_bot_params,
+                        ),
                     ).fetchone()
                     known_from_raider = known_row["known"] if known_row else 0
 
                     new_row = pg.execute(
-                        """
-                        SELECT COUNT(DISTINCT sc.chatter_login) AS new_viewers
+                        f"""
+                        SELECT COUNT(
+                            DISTINCT COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)
+                        ) AS new_viewers
                         FROM twitch_session_chatters sc
                         WHERE sc.session_id = %s
                           AND sc.last_seen_at >= %s
-                          AND sc.chatter_login NOT IN (
-                              SELECT chatter_login FROM twitch_chatter_rollup
-                              WHERE LOWER(streamer_login) = %s
-                                AND first_seen_at < %s
+                          AND {session_bot_clause}
+                          AND (
+                              sc.chatter_login IS NULL
+                              OR sc.chatter_login = ''
+                              OR sc.chatter_login NOT IN (
+                                  SELECT chatter_login FROM twitch_chatter_rollup
+                                  WHERE LOWER(streamer_login) = %s
+                                    AND first_seen_at < %s
+                                    AND {rollup_bot_clause}
+                              )
                           )
                         """,
-                        (target_session_id, executed_at, to_login, executed_at),
+                        (
+                            target_session_id,
+                            executed_at,
+                            *session_bot_params,
+                            to_login,
+                            executed_at,
+                            *rollup_bot_params,
+                        ),
                     ).fetchone()
                     new_to_target = new_row["new_viewers"] if new_row else 0
 
                     new_chat_row = pg.execute(
-                        """
-                        SELECT COUNT(DISTINCT sc.chatter_login) AS new_chatters
+                        f"""
+                        SELECT COUNT(
+                            DISTINCT COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)
+                        ) AS new_chatters
                         FROM twitch_session_chatters sc
                         WHERE sc.session_id = %s
                           AND sc.first_message_at >= %s
                           AND sc.messages > 0
-                          AND sc.chatter_login NOT IN (
-                              SELECT chatter_login FROM twitch_chatter_rollup
-                              WHERE LOWER(streamer_login) = %s
-                                AND first_seen_at < %s
+                          AND {session_bot_clause}
+                          AND (
+                              sc.chatter_login IS NULL
+                              OR sc.chatter_login = ''
+                              OR sc.chatter_login NOT IN (
+                                  SELECT chatter_login FROM twitch_chatter_rollup
+                                  WHERE LOWER(streamer_login) = %s
+                                    AND first_seen_at < %s
+                                    AND {rollup_bot_clause}
+                              )
                           )
                         """,
-                        (target_session_id, executed_at, to_login, executed_at),
+                        (
+                            target_session_id,
+                            executed_at,
+                            *session_bot_params,
+                            to_login,
+                            executed_at,
+                            *rollup_bot_params,
+                        ),
                     ).fetchone()
                     new_chatters = new_chat_row["new_chatters"] if new_chat_row else 0
 

@@ -1,6 +1,8 @@
 import logging
 import re
 
+from ..core.chat_bots import KNOWN_CHAT_BOTS
+
 # ---------------------------------------------------------------------------
 # Optional twitchio dependency
 # ---------------------------------------------------------------------------
@@ -29,16 +31,7 @@ except ImportError:
 CHAT_JOIN_OFFLINE: bool = True
 
 # Whitelist für bekannte legitime Bots (keine Spam-Prüfung)
-WHITELISTED_BOTS = {
-    "streamelements",
-    "nightbot",
-    "streamlabs",
-    "moobot",
-    "fossabot",
-    "wizebot",
-    "pretzelrocks",
-    "soundalerts",
-}
+WHITELISTED_BOTS = set(KNOWN_CHAT_BOTS)
 
 SPAM_PHRASES = (
     "Best viewers streamboo.com",

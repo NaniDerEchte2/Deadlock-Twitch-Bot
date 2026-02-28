@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import web
 
+from ..core.chat_bots import build_known_chat_bot_not_in_clause
 from ..storage import pg as storage
 from .engagement_metrics import EngagementInputs, calculate_engagement
 
@@ -132,16 +133,21 @@ class _AnalyticsAudienceMixin:
         total_samples = 0
 
         session_ids_json = json.dumps(session_ids)
+        msg_bot_clause, msg_bot_params = build_known_chat_bot_not_in_clause(
+            column_expr="cm.chatter_login",
+            placeholder="%s",
+        )
         rows = conn.execute(
-            """
+            f"""
             SELECT cm.session_id, cm.message_ts
             FROM twitch_chat_messages cm
             WHERE cm.session_id IN (
                 SELECT CAST(value AS BIGINT)
                 FROM json_array_elements_text(%s) AS t(value)
             )
+              AND {msg_bot_clause}
             """,
-            (session_ids_json,),
+            (session_ids_json, *msg_bot_params),
         ).fetchall()
         for row in rows:
             sid = int(row[0]) if row and row[0] is not None else None
@@ -190,8 +196,12 @@ class _AnalyticsAudienceMixin:
             return 0
 
         session_ids_json = json.dumps(normalized_ids)
+        msg_bot_clause, msg_bot_params = build_known_chat_bot_not_in_clause(
+            column_expr="cm.chatter_login",
+            placeholder="%s",
+        )
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 cm.session_id,
                 LOWER(NULLIF(cm.chatter_login, '')) AS chatter_login,
@@ -202,9 +212,10 @@ class _AnalyticsAudienceMixin:
                 SELECT CAST(value AS BIGINT)
                 FROM json_array_elements_text(%s) AS t(value)
             )
+              AND {msg_bot_clause}
             GROUP BY cm.session_id, LOWER(NULLIF(cm.chatter_login, '')), cm.chatter_id
             """,
-            (session_ids_json,),
+            (session_ids_json, *msg_bot_params),
         ).fetchall()
 
         updates_by_login = []
@@ -286,8 +297,12 @@ class _AnalyticsAudienceMixin:
         if conn is not None and session_ids:
             if session_ids:
                 session_ids_json = json.dumps([int(sid) for sid in session_ids])
+                session_bot_clause, session_bot_params = build_known_chat_bot_not_in_clause(
+                    column_expr="chatter_login",
+                    placeholder="%s",
+                )
                 base_row = conn.execute(
-                    """
+                    f"""
                     SELECT COUNT(
                         DISTINCT COALESCE(NULLIF(chatter_login, ''), chatter_id)
                     ) AS viewer_base_count
@@ -297,13 +312,14 @@ class _AnalyticsAudienceMixin:
                         FROM json_array_elements_text(%s) AS t(value)
                     )
                       AND COALESCE(NULLIF(chatter_login, ''), chatter_id) IS NOT NULL
+                      AND {session_bot_clause}
                     """,
-                    (session_ids_json,),
+                    (session_ids_json, *session_bot_params),
                 ).fetchone()
                 viewer_base_count = int(base_row[0] or 0) if base_row else 0
 
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT
                         ROUND(
                             GREATEST(
@@ -318,8 +334,9 @@ class _AnalyticsAudienceMixin:
                         FROM json_array_elements_text(%s) AS t(value)
                     )
                       AND last_seen_at IS NOT NULL
+                      AND {session_bot_clause}
                     """,
-                    (session_ids_json,),
+                    (session_ids_json, *session_bot_params),
                 ).fetchall()
                 real_minutes = [float(r[0]) for r in rows if r[0] is not None and r[0] >= 0]
                 sample_count = len(real_minutes)
@@ -491,6 +508,7 @@ class _AnalyticsAudienceMixin:
                                 dq.get("required_min_coverage", self.WATCH_TIME_MIN_COVERAGE)
                                 or self.WATCH_TIME_MIN_COVERAGE
                             ),
+                            "botFilterApplied": True,
                         },
                     }
                 )
@@ -512,6 +530,9 @@ class _AnalyticsAudienceMixin:
             with storage.get_conn() as conn:
                 since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
                 streamer_login = streamer.lower()
+                session_bot_clause, session_bot_params = build_known_chat_bot_not_in_clause(
+                    column_expr="sc.chatter_login"
+                )
 
                 # Base session and follower stats.
                 stats = conn.execute(
@@ -574,12 +595,12 @@ class _AnalyticsAudienceMixin:
 
                 # Distinct chatter cohorts in selected period (less inflation than SUM per session).
                 chatter_stats = conn.execute(
-                    """
+                    f"""
                     SELECT
                         COUNT(DISTINCT COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)) as unique_chatters,
                         COUNT(
                             DISTINCT CASE
-                                WHEN COALESCE(sc.is_first_time_streamer, FALSE) IS FALSE
+                                WHEN LOWER(COALESCE(CAST(sc.is_first_time_streamer AS TEXT), '0')) NOT IN ('1', 't', 'true')
                                 THEN COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)
                             END
                         ) as returning_chatters,
@@ -589,8 +610,9 @@ class _AnalyticsAudienceMixin:
                     WHERE s.started_at >= ?
                       AND LOWER(s.streamer_login) = ?
                       AND s.ended_at IS NOT NULL
+                      AND {session_bot_clause}
                     """,
-                    [since_date, streamer_login],
+                    [since_date, streamer_login, *session_bot_params],
                 ).fetchone()
                 unique_chatters = int(chatter_stats[0]) if chatter_stats and chatter_stats[0] else 0
                 returning_chatters = (
@@ -695,6 +717,7 @@ class _AnalyticsAudienceMixin:
                             "followerValidSamples": follower_valid_samples,
                             "raidEvents": raid_count,
                             "uniqueViewersMethod": unique_viewers_method,
+                            "botFilterApplied": True,
                         },
                     }
                 )
@@ -715,8 +738,17 @@ class _AnalyticsAudienceMixin:
         try:
             with storage.get_conn() as conn:
                 base = streamer.lower()
+                rollup_bot_clause_c1, rollup_bot_params_c1 = build_known_chat_bot_not_in_clause(
+                    column_expr="c1.chatter_login"
+                )
+                rollup_bot_clause_c2, rollup_bot_params_c2 = build_known_chat_bot_not_in_clause(
+                    column_expr="c2.chatter_login"
+                )
+                rollup_bot_clause, rollup_bot_params = build_known_chat_bot_not_in_clause(
+                    column_expr="chatter_login"
+                )
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT
                         c2.streamer_login as other_streamer,
                         COUNT(DISTINCT c1.chatter_login) as shared_chatters
@@ -724,22 +756,31 @@ class _AnalyticsAudienceMixin:
                     JOIN twitch_chatter_rollup c2 ON c1.chatter_login = c2.chatter_login
                     WHERE LOWER(c1.streamer_login) = ?
                       AND LOWER(c2.streamer_login) != ?
+                      AND {rollup_bot_clause_c1}
+                      AND {rollup_bot_clause_c2}
                     GROUP BY c2.streamer_login
                     ORDER BY shared_chatters DESC
                     LIMIT ?
                 """,
-                    [base, base, limit],
+                    [
+                        base,
+                        base,
+                        *rollup_bot_params_c1,
+                        *rollup_bot_params_c2,
+                        limit,
+                    ],
                 ).fetchall()
 
                 # Totals for A and B
                 total_a = (
                     conn.execute(
-                        """
+                        f"""
                         SELECT COUNT(DISTINCT chatter_login)
                         FROM twitch_chatter_rollup
                         WHERE LOWER(streamer_login) = ?
+                          AND {rollup_bot_clause}
                     """,
-                        [base],
+                        [base, *rollup_bot_params],
                     ).fetchone()[0]
                     or 1
                 )
@@ -747,12 +788,13 @@ class _AnalyticsAudienceMixin:
                 totals_b = {
                     r[0].lower(): (
                         conn.execute(
-                            """
+                            f"""
                         SELECT COUNT(DISTINCT chatter_login)
                         FROM twitch_chatter_rollup
                         WHERE LOWER(streamer_login) = ?
+                          AND {rollup_bot_clause}
                         """,
-                            [r[0].lower()],
+                            [r[0].lower(), *rollup_bot_params],
                         ).fetchone()[0]
                         or 1
                     )
@@ -822,6 +864,12 @@ class _AnalyticsAudienceMixin:
             with storage.get_conn() as conn:
                 since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
                 prev_since = (datetime.now(UTC) - timedelta(days=days * 2)).isoformat()
+                session_bot_clause, session_bot_params = build_known_chat_bot_not_in_clause(
+                    column_expr="sc.chatter_login"
+                )
+                rollup_bot_clause, rollup_bot_params = build_known_chat_bot_not_in_clause(
+                    column_expr="cr.chatter_login"
+                )
 
                 # Retention trend from session aggregates
                 retention_row = conn.execute(
@@ -855,7 +903,8 @@ class _AnalyticsAudienceMixin:
                     # Params order: period_start [period_end] streamer  streamer period_start
                     q_params = (
                         [period_start] + ([period_end] if period_end else []) + [streamer.lower()]
-                        + [streamer.lower(), period_start]
+                        + [*session_bot_params]
+                        + [streamer.lower(), *rollup_bot_params, period_start]
                     )
 
                     row = conn.execute(
@@ -871,6 +920,7 @@ class _AnalyticsAudienceMixin:
                               AND LOWER(s.streamer_login) = ?
                               AND s.ended_at IS NOT NULL
                               AND COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id) IS NOT NULL
+                              AND {session_bot_clause}
                         )
                         SELECT
                             COUNT(DISTINCT pv.viewer_key) AS total_viewers,
@@ -881,6 +931,7 @@ class _AnalyticsAudienceMixin:
                         LEFT JOIN twitch_chatter_rollup cr
                             ON cr.chatter_login = pv.chatter_login
                            AND LOWER(cr.streamer_login) = ?
+                           AND {rollup_bot_clause}
                            AND cr.first_seen_at < ?
                         """,
                         q_params,
@@ -911,7 +962,10 @@ class _AnalyticsAudienceMixin:
                             "viewerReturnChange": calc_trend(return_rate, prev_return_rate),
                             "distinctViewers": curr_total,
                             "returnRateMethod": "distinct_rollup",
-                        }
+                        },
+                        "dataQuality": {
+                            "botFilterApplied": True,
+                        },
                     }
                 )
         except Exception as exc:
@@ -933,6 +987,15 @@ class _AnalyticsAudienceMixin:
         try:
             with storage.get_conn() as conn:
                 since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+                msg_bot_clause, msg_bot_params = build_known_chat_bot_not_in_clause(
+                    column_expr="cm.chatter_login"
+                )
+                session_bot_clause, session_bot_params = build_known_chat_bot_not_in_clause(
+                    column_expr="sc.chatter_login"
+                )
+                rollup_bot_clause, rollup_bot_params = build_known_chat_bot_not_in_clause(
+                    column_expr="chatter_login"
+                )
 
                 # Language mix (avoid hard-coded German defaults)
                 language_rows = conn.execute(
@@ -1118,7 +1181,7 @@ class _AnalyticsAudienceMixin:
 
                 # Distinct viewer cohorts with fallback when is_first_time_streamer is missing
                 viewer_rows = conn.execute(
-                    """
+                    f"""
                     WITH per_user AS (
                         SELECT
                             COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id) AS user_id,
@@ -1126,13 +1189,20 @@ class _AnalyticsAudienceMixin:
                             COUNT(DISTINCT sc.session_id) AS session_count,
                             MAX(CASE WHEN sc.messages > 0 THEN 1 ELSE 0 END) AS active_flag,
                             MAX(CASE WHEN sc.messages = 0 AND sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) AS lurker_flag,
-                            MAX(CASE WHEN sc.is_first_time_streamer IS TRUE THEN 1 ELSE 0 END) AS first_time_flag,
+                            MAX(
+                                CASE
+                                    WHEN LOWER(COALESCE(CAST(sc.is_first_time_streamer AS TEXT), '0')) IN ('1', 't', 'true')
+                                    THEN 1
+                                    ELSE 0
+                                END
+                            ) AS first_time_flag,
                             MAX(CASE WHEN sc.is_first_time_streamer IS NOT NULL THEN 1 ELSE 0 END) AS has_first_flag,
                             MAX(CASE WHEN sc.seen_via_chatters_api IS TRUE THEN 1 ELSE 0 END) AS seen_flag
                         FROM twitch_session_chatters sc
                         JOIN twitch_stream_sessions s ON s.id = sc.session_id
                         WHERE s.started_at >= ? AND LOWER(s.streamer_login) = ? AND s.ended_at IS NOT NULL
                           AND COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id) IS NOT NULL
+                          AND {session_bot_clause}
                         GROUP BY user_id, chatter_login
                     ),
                     rollup AS (
@@ -1142,6 +1212,7 @@ class _AnalyticsAudienceMixin:
                             first_seen_at
                         FROM twitch_chatter_rollup
                         WHERE LOWER(streamer_login) = ?
+                          AND {rollup_bot_clause}
                     )
                     SELECT
                         pu.user_id,
@@ -1159,7 +1230,14 @@ class _AnalyticsAudienceMixin:
                     FROM per_user pu
                     LEFT JOIN rollup r ON r.chatter_login = LOWER(pu.chatter_login)
                 """,
-                    [since_date, streamer.lower(), streamer.lower(), since_date],
+                    [
+                        since_date,
+                        streamer.lower(),
+                        *session_bot_params,
+                        streamer.lower(),
+                        *rollup_bot_params,
+                        since_date,
+                    ],
                 ).fetchall()
 
                 viewer_entries = []
@@ -1262,26 +1340,28 @@ class _AnalyticsAudienceMixin:
                 active_viewers = sum(1 for v in viewer_entries if v["active"])
                 seen_via_chatters_viewers = sum(1 for v in viewer_entries if v["seen_flag"])
                 total_messages_row = conn.execute(
-                    """
+                    f"""
                     SELECT COUNT(*)
                     FROM twitch_chat_messages cm
                     WHERE cm.message_ts >= ? AND LOWER(cm.streamer_login) = ?
+                      AND {msg_bot_clause}
                     """,
-                    [since_date, streamer.lower()],
+                    [since_date, streamer.lower(), *msg_bot_params],
                 ).fetchone()
                 total_messages = (
                     int(total_messages_row[0]) if total_messages_row and total_messages_row[0] else 0
                 )
                 sessions_with_chat_row = conn.execute(
-                    """
+                    f"""
                     SELECT COUNT(DISTINCT sc.session_id)
                     FROM twitch_session_chatters sc
                     JOIN twitch_stream_sessions s ON s.id = sc.session_id
                     WHERE s.started_at >= ?
                       AND LOWER(s.streamer_login) = ?
                       AND s.ended_at IS NOT NULL
+                      AND {session_bot_clause}
                     """,
-                    [since_date, streamer.lower()],
+                    [since_date, streamer.lower(), *session_bot_params],
                 ).fetchone()
                 sessions_with_chat = (
                     int(sessions_with_chat_row[0])
@@ -1417,6 +1497,7 @@ class _AnalyticsAudienceMixin:
                             ),
                             "sessionsWithChat": sessions_with_chat,
                             "chatSessionCoverage": round(engagement.chat_session_coverage * 100.0, 1),
+                            "botFilterApplied": True,
                         },
                     }
                 )
@@ -1434,15 +1515,19 @@ class _AnalyticsAudienceMixin:
 
         try:
             with storage.get_conn() as conn:
+                rollup_bot_clause, rollup_bot_params = build_known_chat_bot_not_in_clause(
+                    column_expr="chatter_login"
+                )
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT total_sessions, COUNT(DISTINCT chatter_login) AS chatter_count
                     FROM twitch_chatter_rollup
                     WHERE LOWER(streamer_login) = ?
+                      AND {rollup_bot_clause}
                     GROUP BY total_sessions
                     ORDER BY total_sessions
                     """,
-                    [streamer],
+                    [streamer, *rollup_bot_params],
                 ).fetchall()
 
                 if not rows:
@@ -1469,4 +1554,3 @@ class _AnalyticsAudienceMixin:
         except Exception as exc:
             log.exception("Error in loyalty curve API")
             return web.json_response({"error": str(exc)}, status=500)
-

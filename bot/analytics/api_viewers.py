@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 from aiohttp import web
 
+from ..core.chat_bots import build_known_chat_bot_not_in_clause, is_known_chat_bot
 from ..storage import pg as storage
 
 log = logging.getLogger("TwitchStreams.AnalyticsV2")
@@ -91,9 +92,15 @@ class _AnalyticsViewersMixin:
 
         try:
             with storage.get_conn() as conn:
+                rollup_bot_clause_cr, rollup_bot_params_cr = build_known_chat_bot_not_in_clause(
+                    column_expr="cr.chatter_login"
+                )
+                rollup_bot_clause, rollup_bot_params = build_known_chat_bot_not_in_clause(
+                    column_expr="chatter_login"
+                )
                 # ── Core viewer data ──
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT
                         cr.chatter_login,
                         cr.total_sessions,
@@ -102,8 +109,9 @@ class _AnalyticsViewersMixin:
                         cr.last_seen_at
                     FROM twitch_chatter_rollup cr
                     WHERE LOWER(cr.streamer_login) = ?
+                      AND {rollup_bot_clause_cr}
                     """,
-                    [streamer],
+                    [streamer, *rollup_bot_params_cr],
                 ).fetchall()
 
                 if not rows:
@@ -140,9 +148,10 @@ class _AnalyticsViewersMixin:
                         SELECT chatter_login, COUNT(DISTINCT streamer_login) - 1 AS other_count
                         FROM twitch_chatter_rollup
                         WHERE LOWER(chatter_login) IN ({placeholders})
+                          AND {rollup_bot_clause}
                         GROUP BY chatter_login
                         """,
-                        [login.lower() for login in batch],
+                        [login.lower() for login in batch] + [*rollup_bot_params],
                     ).fetchall()
                     for r in cc_rows:
                         cross_channel[r[0].lower()] = r[1]
@@ -153,10 +162,11 @@ class _AnalyticsViewersMixin:
                         SELECT chatter_login, streamer_login, total_sessions
                         FROM twitch_chatter_rollup
                         WHERE LOWER(chatter_login) IN ({placeholders})
+                          AND {rollup_bot_clause}
                           AND LOWER(streamer_login) != ?
                         ORDER BY chatter_login, total_sessions DESC
                         """,
-                        [login.lower() for login in batch] + [streamer],
+                        [login.lower() for login in batch] + [*rollup_bot_params, streamer],
                     ).fetchall()
                     current_login = None
                     current_channels = []
@@ -301,6 +311,8 @@ class _AnalyticsViewersMixin:
         login = request.query.get("login", "").strip().lower()
         if not streamer or not login:
             return web.json_response({"error": "streamer and login required"}, status=400)
+        if is_known_chat_bot(login):
+            return web.json_response({"error": "Viewer not found"}, status=404)
 
         now = datetime.now(UTC)
 
@@ -476,8 +488,14 @@ class _AnalyticsViewersMixin:
 
         try:
             with storage.get_conn() as conn:
+                rollup_bot_clause_cr, rollup_bot_params_cr = build_known_chat_bot_not_in_clause(
+                    column_expr="cr.chatter_login"
+                )
+                rollup_bot_clause, rollup_bot_params = build_known_chat_bot_not_in_clause(
+                    column_expr="chatter_login"
+                )
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT
                         cr.chatter_login,
                         cr.total_sessions,
@@ -486,8 +504,9 @@ class _AnalyticsViewersMixin:
                         cr.last_seen_at
                     FROM twitch_chatter_rollup cr
                     WHERE LOWER(cr.streamer_login) = ?
+                      AND {rollup_bot_clause_cr}
                     """,
-                    [streamer],
+                    [streamer, *rollup_bot_params_cr],
                 ).fetchall()
 
                 if not rows:
@@ -618,9 +637,10 @@ class _AnalyticsViewersMixin:
                         SELECT chatter_login, COUNT(DISTINCT streamer_login) AS ch_count
                         FROM twitch_chatter_rollup
                         WHERE LOWER(chatter_login) IN ({placeholders})
+                          AND {rollup_bot_clause}
                         GROUP BY chatter_login
                         """,
-                        [login.lower() for login in batch],
+                        [login.lower() for login in batch] + [*rollup_bot_params],
                     ).fetchall()
                     for cr in cc_rows:
                         ch_count = cr[1]
@@ -632,19 +652,23 @@ class _AnalyticsViewersMixin:
                 avg_other = round(other_channel_sum / total, 1) if total > 0 else 0
 
                 # Top shared channels
+                rollup_bot_clause_cr1, rollup_bot_params_cr1 = build_known_chat_bot_not_in_clause(
+                    column_expr="cr1.chatter_login"
+                )
                 shared_rows = conn.execute(
-                    """
+                    f"""
                     SELECT cr2.streamer_login, COUNT(DISTINCT cr2.chatter_login) AS shared_count
                     FROM twitch_chatter_rollup cr1
                     JOIN twitch_chatter_rollup cr2
                       ON LOWER(cr1.chatter_login) = LOWER(cr2.chatter_login)
                     WHERE LOWER(cr1.streamer_login) = ?
                       AND LOWER(cr2.streamer_login) != ?
+                      AND {rollup_bot_clause_cr1}
                     GROUP BY cr2.streamer_login
                     ORDER BY shared_count DESC
                     LIMIT 10
                     """,
-                    [streamer, streamer],
+                    [streamer, streamer, *rollup_bot_params_cr1],
                 ).fetchall()
 
                 top_shared = []
