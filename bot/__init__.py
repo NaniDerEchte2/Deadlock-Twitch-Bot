@@ -3,12 +3,61 @@
 # =========================================
 """Package entry point for the Twitch stream monitor cog."""
 
+import asyncio
 import logging
+import os
 from typing import Optional
 
+import discord
 from discord.ext import commands
 
 log = logging.getLogger("TwitchStreams")
+
+
+def _parse_sync_guild_ids(raw: str) -> list[int]:
+    """Parse a comma/space separated guild-id list from env."""
+    ids: list[int] = []
+    for part in raw.replace(",", " ").split():
+        value = part.strip()
+        if not value or not value.isdigit():
+            continue
+        guild_id = int(value)
+        if guild_id > 0 and guild_id not in ids:
+            ids.append(guild_id)
+    return ids
+
+
+async def _sync_app_commands_after_ready(bot: commands.Bot) -> None:
+    """Ensure hybrid/app commands are synced after extension (re)load."""
+    try:
+        await bot.wait_until_ready()
+    except Exception:
+        log.debug("wait_until_ready failed while syncing app commands", exc_info=True)
+        return
+
+    guild_ids = _parse_sync_guild_ids(os.getenv("TWITCH_COMMAND_SYNC_GUILD_IDS", ""))
+    if not guild_ids:
+        main_guild_id = (os.getenv("MAIN_GUILD_ID") or "").strip()
+        if main_guild_id.isdigit():
+            guild_ids = [int(main_guild_id)]
+    if not guild_ids:
+        guild_ids = [int(g.id) for g in getattr(bot, "guilds", []) if getattr(g, "id", 0)]
+
+    for guild_id in guild_ids:
+        guild = discord.Object(id=guild_id)
+        try:
+            # Fast path: guild sync appears immediately in Discord clients.
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+            log.info("Synced %d app command(s) to guild %s", len(synced), guild_id)
+        except Exception:
+            log.exception("Guild app-command sync failed for guild %s", guild_id)
+
+    try:
+        synced_global = await bot.tree.sync()
+        log.info("Synced %d global app command(s)", len(synced_global))
+    except Exception:
+        log.exception("Global app-command sync failed")
 
 
 async def setup(bot: commands.Bot):
@@ -72,6 +121,9 @@ async def setup(bot: commands.Bot):
     bot.add_command(prefix_command)
     cog.set_prefix_command(prefix_command)
     log.debug("Registered !twl prefix command via setup hook")
+
+    # Hybrid/App-Commands nach jedem (Re)Load synchronisieren.
+    asyncio.create_task(_sync_app_commands_after_ready(bot), name="twitch.sync_app_commands")
 
 
 async def teardown(bot: commands.Bot):
