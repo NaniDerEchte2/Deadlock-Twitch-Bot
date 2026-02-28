@@ -223,6 +223,14 @@ class _AnalyticsOverviewMixin:
 
     async def _serve_dashboard_v2_assets(self, request: web.Request) -> web.Response:
         """Serve static assets for the dashboard."""
+        if not self._check_v2_auth(request):
+            should_use_discord = getattr(self, "_should_use_discord_admin_login", None)
+            if callable(should_use_discord) and bool(should_use_discord(request)):
+                login_url = DASHBOARD_V2_DISCORD_LOGIN_URL
+            else:
+                login_url = DASHBOARD_V2_LOGIN_URL
+            raise web.HTTPFound(login_url)
+
         import pathlib
 
         raw_path = request.match_info.get("path", "")

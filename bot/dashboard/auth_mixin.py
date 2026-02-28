@@ -508,8 +508,13 @@ class _DashboardAuthMixin:
         return data if isinstance(data, dict) else None
 
     async def _check_discord_admin_membership(self, user_id: int) -> tuple[bool, str]:
-        if user_id == self._discord_admin_owner_user_id:
-            return True, "owner_override"
+        owner_override_user_id = getattr(self, "_discord_admin_owner_user_id", None)
+        if isinstance(owner_override_user_id, int) and owner_override_user_id > 0:
+            if user_id == owner_override_user_id:
+                return True, "owner_override"
+
+        if not user_id:
+            return False, "invalid_user_id"
 
         discord_bot = None
         raid_bot = getattr(self, "_raid_bot", None)

@@ -288,18 +288,16 @@ class AnalyticsV2Mixin(
         admin_token = getattr(self, "_token", None)
 
         partner_header = request.headers.get("X-Partner-Token")
-        partner_query = request.query.get("partner_token")
         admin_header = request.headers.get("X-Admin-Token")
-        admin_query = request.query.get("token")
 
         # Partner token check
         if partner_token:
-            if partner_header == partner_token or partner_query == partner_token:
+            if partner_header == partner_token:
                 return True
 
         # Admin token check (admin can access everything)
         if admin_token:
-            if admin_header == admin_token or admin_query == admin_token:
+            if admin_header == admin_token:
                 return True
 
         return False
@@ -378,16 +376,14 @@ class AnalyticsV2Mixin(
         partner_token = getattr(self, "_partner_token", None)
 
         admin_header = request.headers.get("X-Admin-Token")
-        admin_query = request.query.get("token")
         partner_header = request.headers.get("X-Partner-Token")
-        partner_query = request.query.get("partner_token")
 
         # Admin token = full access
-        if admin_token and (admin_header == admin_token or admin_query == admin_token):
+        if admin_token and admin_header == admin_token:
             return "admin"
 
         # Partner token
-        if partner_token and (partner_header == partner_token or partner_query == partner_token):
+        if partner_token and partner_header == partner_token:
             return "partner"
 
         return "none"

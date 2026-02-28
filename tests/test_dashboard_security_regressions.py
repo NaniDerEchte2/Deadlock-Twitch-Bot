@@ -5,9 +5,12 @@ from unittest.mock import patch
 
 from aiohttp import web
 
+from bot.analytics.api_overview import _AnalyticsOverviewMixin
 from bot.analytics.api_v2 import AnalyticsV2Mixin
 from bot.dashboard.billing_mixin import _DashboardBillingMixin
 from bot.dashboard.routes_mixin import _DashboardRoutesMixin
+from bot.social_media.clip_manager import ClipManager
+from bot.social_media.dashboard import SocialMediaDashboard
 
 
 class _DummyBilling(_DashboardBillingMixin):
@@ -49,6 +52,21 @@ class _DummyRoutesApi(_DashboardRoutesMixin, AnalyticsV2Mixin):
 
     def _get_auth_level(self, request):
         return "partner"
+
+
+class _DummyV2HeaderOnlyAuth(AnalyticsV2Mixin):
+    def __init__(self) -> None:
+        self._noauth = False
+        self._token = "admin-secret"
+        self._partner_token = "partner-secret"
+
+
+class _DummyOverviewAssetsAuth(_AnalyticsOverviewMixin):
+    def _check_v2_auth(self, request):
+        return False
+
+    def _should_use_discord_admin_login(self, request):
+        return False
 
 
 class _WebhookConn:
@@ -200,6 +218,60 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(response.text)
         self.assertEqual(payload.get("status"), "duplicate")
         self.assertEqual(handler.apply_calls, 0)
+
+    def test_api_v2_auth_ignores_query_tokens(self) -> None:
+        handler = _DummyV2HeaderOnlyAuth()
+        request_query_only = SimpleNamespace(
+            headers={"Host": "dashboard.example"},
+            query={"token": "admin-secret", "partner_token": "partner-secret"},
+            host="dashboard.example",
+            remote="203.0.113.10",
+            transport=None,
+        )
+        request_partner_header = SimpleNamespace(
+            headers={"Host": "dashboard.example", "X-Partner-Token": "partner-secret"},
+            query={},
+            host="dashboard.example",
+            remote="203.0.113.10",
+            transport=None,
+        )
+        request_admin_header = SimpleNamespace(
+            headers={"Host": "dashboard.example", "X-Admin-Token": "admin-secret"},
+            query={},
+            host="dashboard.example",
+            remote="203.0.113.10",
+            transport=None,
+        )
+
+        self.assertFalse(handler._check_v2_auth(request_query_only))
+        self.assertEqual(handler._get_auth_level(request_query_only), "none")
+        self.assertTrue(handler._check_v2_auth(request_partner_header))
+        self.assertEqual(handler._get_auth_level(request_partner_header), "partner")
+        self.assertTrue(handler._check_v2_auth(request_admin_header))
+        self.assertEqual(handler._get_auth_level(request_admin_header), "admin")
+
+    async def test_dashboard_v2_assets_redirect_when_unauthenticated(self) -> None:
+        handler = _DummyOverviewAssetsAuth()
+        request = SimpleNamespace(match_info={"path": "index.html"})
+
+        with self.assertRaises(web.HTTPFound) as ctx:
+            await handler._serve_dashboard_v2_assets(request)
+        self.assertEqual(ctx.exception.location, "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2")
+
+    async def test_social_media_fetch_clips_without_twitch_api_returns_503(self) -> None:
+        handler = SocialMediaDashboard(clip_manager=ClipManager(), auth_checker=lambda _req: True)
+
+        class _Request:
+            query = {}
+
+            async def json(self):
+                return {"streamer": "streamer_a", "limit": 5, "days": 3}
+
+        response = await handler.api_fetch_clips(_Request())
+        payload = json.loads(response.text)
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(payload.get("error"), "twitch_api_unavailable")
 
 
 if __name__ == "__main__":

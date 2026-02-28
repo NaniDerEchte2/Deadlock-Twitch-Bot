@@ -80,13 +80,9 @@ class DashboardLiveMixin:
             if not bool(st.get("manual_partner_opt_out")) and not bool(st.get("archived_at"))
         )
         raid_bot_available = bool(getattr(self, "_raid_bot", None))
-        token_value = ""
-        if not self._noauth and self._token:
-            token_value = self._token
-        token_query = f"&token={quote_plus(token_value)}" if token_value else ""
 
         def raid_auth_link(login: str) -> str:
-            return f"/twitch/raid/auth?login={quote_plus(login)}{token_query}"
+            return f"/twitch/raid/auth?login={quote_plus(login)}"
 
         now = datetime.now(UTC)
 
@@ -356,7 +352,7 @@ class DashboardLiveMixin:
                     raid_cell_parts.append("<div class='status-meta'>OAuth fehlt</div>")
                     raid_link = html.escape(raid_auth_link(login), quote=True)
                     requirements_link = html.escape(
-                        f"/twitch/raid/requirements?login={escaped_login}{token_query}",
+                        f"/twitch/raid/requirements?login={escaped_login}",
                         quote=True,
                     )
                     raid_cell_parts.append(
@@ -675,11 +671,6 @@ class DashboardLiveMixin:
         login_options_html = "".join(
             f"<option value='{html.escape(login, quote=True)}'></option>" for login in unique_logins
         )
-        token_input = ""
-        if token_value:
-            token_input = (
-                f"<input type='hidden' name='token' value='{html.escape(token_value, quote=True)}'>"
-            )
         missing_unique = sorted({login for login in raid_missing_logins if login})
         missing_preview = missing_unique[:6]
         missing_count = max(0, total_count - raid_authorized_count)
@@ -724,7 +715,6 @@ class DashboardLiveMixin:
             "    <label>Streamer Login"
             f"      <input type='text' name='login' list='raid-login-list' placeholder='earlysalty' required{raid_form_disabled_attr}>"
             "    </label>"
-            f"    {token_input}"
             f"    <button class='btn'{raid_form_disabled_attr}>OAuth Link erzeugen</button>"
             "  </form>"
             f"  {raid_form_note}"
@@ -852,24 +842,15 @@ class DashboardLiveMixin:
         raid_history_link = ""
         if raid_bot_available:
             history_href = "/twitch/raid/history"
-            if token_value:
-                history_href = history_href + "?token=" + quote_plus(token_value)
             raid_history_link = (
                 "<a class='btn btn-secondary' href='"
                 + html.escape(history_href, quote=True)
                 + "' target='_blank' rel='noopener'>Raid History</a>"
             )
 
-        reload_token_input = ""
-        if token_value:
-            reload_token_input = (
-                f"<input type='hidden' name='token' value='{html.escape(token_value, quote=True)}'>"
-            )
-
         hero_actions = (
             (raid_history_link + " " if raid_history_link else "")
             + "<form method='post' action='/twitch/reload'>"
-            + reload_token_input
             + "<button class='btn btn-warn'>Reload Twitch Cog</button>"
             + "</form>"
         )

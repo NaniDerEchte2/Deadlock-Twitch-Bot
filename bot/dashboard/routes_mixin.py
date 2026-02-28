@@ -2387,7 +2387,7 @@ class _DashboardRoutesMixin:
 
     async def api_market_data(self, request: web.Request) -> web.Response:
         """API providing aggregated data for market research including Meta & Sentiment."""
-        admin_token = request.headers.get("X-Admin-Token") or request.query.get("token")
+        admin_token = request.headers.get("X-Admin-Token")
         if not (
             self._is_local_request(request)
             or self._is_discord_admin_request(request)
@@ -2635,8 +2635,16 @@ class _DashboardRoutesMixin:
 
     async def reload_cog(self, request: web.Request) -> web.Response:
         """Optional reload endpoint for admin tooling compatibility."""
-        token = (await request.post()).get("token", "")
-        if not self._check_admin_token(token):
+        post_data = await request.post()
+        body_token = post_data.get("token", "")
+        header_token = request.headers.get("X-Admin-Token")
+        is_authorized = (
+            self._is_local_request(request)
+            or self._is_discord_admin_request(request)
+            or self._check_admin_token(header_token)
+            or self._check_admin_token(body_token)
+        )
+        if not is_authorized:
             log.warning(
                 "AUDIT dashboard reload_cog: unauthorized attempt from peer=%s",
                 self._sanitize_log_value(self._peer_host(request)),
@@ -2661,8 +2669,18 @@ class _DashboardRoutesMixin:
         try:
             from ..social_media import ClipManager, create_social_media_app
 
-            # Create clip manager (no Twitch API dependency yet)
-            clip_manager = ClipManager()
+            # Reuse the primary Twitch API instance so manual clip fetch works.
+            twitch_api = None
+            raid_bot = getattr(self, "_raid_bot", None)
+            cog = getattr(raid_bot, "_cog", None) if raid_bot is not None else None
+            if cog is not None:
+                twitch_api = getattr(cog, "api", None)
+            clip_manager = ClipManager(twitch_api=twitch_api)
+            if twitch_api is None:
+                log.warning(
+                    "Social Media Dashboard registered without Twitch API instance. "
+                    "Manual clip fetching will return 503 until API is available."
+                )
 
             # Create social media dashboard with auth checker
             social_app = create_social_media_app(

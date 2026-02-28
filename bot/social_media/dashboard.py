@@ -1672,6 +1672,15 @@ anfordern.</p>
 
         except web.HTTPException:
             raise
+        except ValueError as exc:
+            log.warning("Manual clip fetch unavailable: %s", exc)
+            return web.json_response(
+                {
+                    "error": "twitch_api_unavailable",
+                    "message": "Clip-Fetch ist derzeit nicht verfügbar.",
+                },
+                status=503,
+            )
         except Exception:
             log.exception("Failed to fetch clips")
             return web.json_response({"error": "fetch_clips_failed"}, status=500)

@@ -34,7 +34,6 @@ TWITCH_ADMIN_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fad
 TWITCH_DASHBOARDS_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboards"
 LOGIN_RE = re.compile(r"^[A-Za-z0-9_]{3,25}$")
 DEFAULT_DASHBOARD_MODERATOR_ROLE_ID = 1337518124647579661
-DEFAULT_DASHBOARD_OWNER_USER_ID = 662995601738170389
 KEYRING_SERVICE_NAME = "DeadlockBot"
 TWITCH_ADMIN_PUBLIC_URL = (
     os.getenv("TWITCH_ADMIN_PUBLIC_URL")
@@ -158,7 +157,17 @@ class DashboardV2Server(
         ).strip()
         self._discord_admin_redirect_uri = TWITCH_ADMIN_DISCORD_REDIRECT_URI
         self._discord_admin_enabled = True
-        self._discord_admin_owner_user_id = DEFAULT_DASHBOARD_OWNER_USER_ID
+        owner_user_id_raw = self._load_secret_value(
+            "TWITCH_ADMIN_OWNER_USER_ID",
+            "DISCORD_ADMIN_OWNER_USER_ID",
+        )
+        self._discord_admin_owner_user_id = self._parse_optional_int(owner_user_id_raw)
+        if self._discord_admin_owner_user_id:
+            log.warning(
+                "Discord admin owner override enabled for user_id=%s. "
+                "Use only for explicit recovery scenarios.",
+                self._discord_admin_owner_user_id,
+            )
         self._discord_admin_moderator_role_id = DEFAULT_DASHBOARD_MODERATOR_ROLE_ID
         self._discord_admin_guild_ids: tuple[int, ...] = ()
         self._discord_admin_cookie_name = "twitch_admin_session"
@@ -251,6 +260,17 @@ class DashboardV2Server(
             return False
         return True
 
+    @staticmethod
+    def _parse_optional_int(value: Any) -> int | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
     def _check_admin_token(self, token: str | None) -> bool:
         if self._noauth:
             return True
@@ -306,11 +326,20 @@ class DashboardV2Server(
     def _effective_client_host(self, request: web.Request, peer_host: str) -> str:
         normalized_peer = self._host_without_port(peer_host)
         if self._is_loopback_host(normalized_peer):
+            forwarded_for = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+            normalized_forwarded = self._host_without_port(forwarded_for)
+            if normalized_forwarded:
+                return normalized_forwarded
             real_ip = (request.headers.get("X-Real-IP") or "").split(",")[0].strip()
             normalized_real = self._host_without_port(real_ip)
             if normalized_real:
                 return normalized_real
         return normalized_peer
+
+    def _rate_limit_key(self, request: web.Request) -> str:
+        peer = self._peer_host(request)
+        resolved = self._effective_client_host(request, peer)
+        return resolved or self._host_without_port(peer) or "unknown"
 
     def _is_local_request(self, request: web.Request) -> bool:
         host_header = request.headers.get("Host") or request.host or ""
@@ -445,7 +474,7 @@ class DashboardV2Server(
             "/twitch/market",
         )
         if request.path.startswith(admin_only_prefixes):
-            token = request.headers.get("X-Admin-Token") or request.query.get("token")
+            token = request.headers.get("X-Admin-Token")
             if self._is_local_request(request):
                 return
             if self._is_discord_admin_request(request):
@@ -464,7 +493,7 @@ class DashboardV2Server(
 
         if self._check_v2_auth(request):
             return
-        token = request.headers.get("X-Admin-Token") or request.query.get("token")
+        token = request.headers.get("X-Admin-Token")
         if self._check_admin_token(token):
             return
         raise web.HTTPUnauthorized(text="missing or invalid token")
@@ -475,14 +504,12 @@ class DashboardV2Server(
         if self._noauth:
             return
         partner_header = request.headers.get("X-Partner-Token")
-        partner_query = request.query.get("partner_token")
         admin_header = request.headers.get("X-Admin-Token")
-        admin_query = request.query.get("token")
 
         if self._partner_token:
-            if partner_header == self._partner_token or partner_query == self._partner_token:
+            if partner_header == self._partner_token:
                 return
-            if admin_header == self._token or admin_query == self._token:
+            if admin_header == self._token:
                 return
             raise web.HTTPUnauthorized(text="missing or invalid partner token")
         raise web.HTTPUnauthorized(text="missing or invalid partner token")
@@ -547,16 +574,16 @@ class DashboardV2Server(
         max_requests: int = 10,
         window_seconds: float = 60.0,
     ) -> bool:
-        """Sliding-window rate limiter per peer IP.  Returns True if allowed."""
-        peer = self._peer_host(request)
+        """Sliding-window rate limiter per client IP (proxy-aware). Returns True if allowed."""
+        key = self._rate_limit_key(request)
         now = time.time()
-        hits = self._rate_limits.get(peer, [])
+        hits = self._rate_limits.get(key, [])
         hits = [t for t in hits if now - t < window_seconds]
         if len(hits) >= max_requests:
-            self._rate_limits[peer] = hits
+            self._rate_limits[key] = hits
             return False
         hits.append(now)
-        self._rate_limits[peer] = hits
+        self._rate_limits[key] = hits
         # Prevent unbounded growth – clear when tracking too many distinct IPs
         if len(self._rate_limits) > 1000:
             self._rate_limits.clear()

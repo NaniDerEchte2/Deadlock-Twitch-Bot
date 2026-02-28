@@ -3,7 +3,10 @@ name = "twitch-cog"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "aiohttp>=3.9",
+    "discord.py>=2.3",
     "keyring>=24",
+    "psycopg[binary]>=3.1",
     "stripe>=11",
 ]
 
