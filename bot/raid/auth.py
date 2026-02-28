@@ -669,6 +669,7 @@ class RaidAuthManager:
                        manual_verified_until = NULL,
                        manual_verified_at = COALESCE(manual_verified_at, CURRENT_TIMESTAMP),
                        manual_partner_opt_out = 0,
+                       archived_at = NULL,
                        is_monitored_only = 0,
                        is_on_discord = CASE
                            WHEN COALESCE(discord_user_id, '') <> '' THEN 1
@@ -685,7 +686,7 @@ class RaidAuthManager:
                     (twitch_login, twitch_user_id, raid_bot_enabled, manual_verified_permanent,
                      manual_verified_until, manual_verified_at, manual_partner_opt_out)
                 VALUES (?, ?, 1, 1, NULL, CURRENT_TIMESTAMP, 0)
-                ON CONFLICT (twitch_login) DO NOTHING
+                ON CONFLICT DO NOTHING
                 """,
                 (twitch_login, twitch_user_id),
             )

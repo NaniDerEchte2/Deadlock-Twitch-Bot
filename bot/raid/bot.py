@@ -480,7 +480,7 @@ class RaidBot:
                      is_on_discord, manual_verified_permanent, manual_verified_until,
                      manual_verified_at, manual_partner_opt_out, raid_bot_enabled)
                 VALUES (?, ?, ?, ?, ?, 1, NULL, CURRENT_TIMESTAMP, 0, 1)
-                ON CONFLICT (twitch_login) DO NOTHING
+                ON CONFLICT DO NOTHING
                 """,
                 (
                     twitch_login,
@@ -502,6 +502,7 @@ class RaidBot:
                        manual_verified_until = NULL,
                        manual_verified_at = COALESCE(manual_verified_at, CURRENT_TIMESTAMP),
                        manual_partner_opt_out = 0,
+                       archived_at = NULL,
                        is_monitored_only = 0,
                        raid_bot_enabled = 1
                  WHERE twitch_user_id = ?

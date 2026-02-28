@@ -291,7 +291,7 @@ class _DashboardAuthMixin:
                 """
                 SELECT twitch_login, twitch_user_id
                 FROM twitch_streamers_partner_state
-                WHERE is_partner_active = 1
+                WHERE is_partner = 1
                   AND (
                       LOWER(twitch_login) = LOWER(?)
                       OR (? != '' AND twitch_user_id = ?)

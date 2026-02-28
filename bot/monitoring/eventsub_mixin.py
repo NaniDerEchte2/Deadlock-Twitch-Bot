@@ -468,7 +468,6 @@ class _EventSubMixin:
                      WHERE raid_bot_enabled = 1
                        AND twitch_user_id IS NOT NULL
                        AND twitch_login IS NOT NULL
-                       AND archived_at IS NULL
                     """
                 ).fetchall()
             return [
@@ -491,7 +490,7 @@ class _EventSubMixin:
                     SELECT s.twitch_user_id, s.twitch_login, a.scopes
                       FROM twitch_streamers_partner_state s
                       JOIN twitch_raid_auth a ON s.twitch_user_id = a.twitch_user_id
-                     WHERE s.is_partner_active = 1
+                     WHERE s.is_partner = 1
                        AND s.twitch_user_id IS NOT NULL
                        AND s.twitch_login IS NOT NULL
                     """
@@ -524,7 +523,7 @@ class _EventSubMixin:
         try:
             with storage.get_conn() as c:
                 rows = c.execute(
-                    "SELECT twitch_login FROM twitch_streamers WHERE twitch_login IS NOT NULL AND archived_at IS NULL"
+                    "SELECT twitch_login FROM twitch_streamers WHERE twitch_login IS NOT NULL"
                 ).fetchall()
             return [str(r["twitch_login"] if hasattr(r, "keys") else r[0]).lower() for r in rows]
         except Exception:

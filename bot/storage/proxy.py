@@ -107,6 +107,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
 
     # 1b) Zentrale Partner-Flags (Single Source of Truth)
+    conn.execute("DROP VIEW IF EXISTS twitch_streamers_partner_state")
     conn.execute(
         """
         CREATE VIEW IF NOT EXISTS twitch_streamers_partner_state AS
@@ -122,7 +123,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
                 WHEN base.is_verified = 1
                      AND COALESCE(base.manual_partner_opt_out, 0) = 0
                      AND COALESCE(base.is_monitored_only, 0) = 0
-                     AND base.archived_at IS NULL
                 THEN 1 ELSE 0
             END AS is_partner_active
         FROM (

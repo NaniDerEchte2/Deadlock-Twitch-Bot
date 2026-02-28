@@ -186,7 +186,7 @@ class TwitchRaidMixin:
         with get_conn() as conn:
             partners = conn.execute(
                 """
-                SELECT DISTINCT s.twitch_login, s.twitch_user_id, s.archived_at,
+                SELECT DISTINCT s.twitch_login, s.twitch_user_id,
                        r.raid_enabled, r.authorized_at
                   FROM twitch_streamers_partner_state s
                   LEFT JOIN twitch_raid_auth r ON s.twitch_user_id = r.twitch_user_id
@@ -201,12 +201,9 @@ class TwitchRaidMixin:
         for (
             partner_login,
             partner_user_id,
-            archived_at,
             raid_enabled,
             raid_authorized_at,
         ) in partners:
-            if archived_at:
-                continue
             if not raid_enabled and not raid_authorized_at:
                 continue
             partner_login_lower = partner_login.lower()
