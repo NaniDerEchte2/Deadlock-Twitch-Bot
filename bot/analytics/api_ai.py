@@ -98,9 +98,8 @@ class _AnalyticsAIMixin:
             return await self._api_v2_ai_analysis_inner(request)
         except Exception as exc:
             log.exception("Unhandled exception in _api_v2_ai_analysis")
-            return web.Response(
-                body=json.dumps({"error": f"Interner Fehler: {type(exc).__name__}: {str(exc)[:300]}"}),
-                content_type="application/json",
+            return web.json_response(
+                {"error": f"Interner Fehler: {type(exc).__name__}: {str(exc)[:300]}"},
                 status=500,
             )
 
@@ -172,9 +171,9 @@ class _AnalyticsAIMixin:
         except Exception:
             log.warning("Failed to persist AI analysis to DB", exc_info=True)
 
-        # Build response body explicitly to catch any serialization error
+        # Build response body
         try:
-            body = json.dumps({
+            return web.json_response({
                 "id": record_id,
                 "streamer": streamer,
                 "days": days,
@@ -184,13 +183,10 @@ class _AnalyticsAIMixin:
             })
         except Exception as exc:
             log.exception("JSON serialization error in _api_v2_ai_analysis")
-            return web.Response(
-                body=json.dumps({"error": f"Serialisierungsfehler: {type(exc).__name__}: {str(exc)[:200]}"}),
-                content_type="application/json",
+            return web.json_response(
+                {"error": f"Serialisierungsfehler: {type(exc).__name__}: {str(exc)[:200]}"},
                 status=500,
             )
-
-        return web.Response(body=body, content_type="application/json")
 
     def _collect_ai_context(self, streamer: str, days: int, since: str) -> dict:
         """Collect comprehensive analytics data for Opus context."""
