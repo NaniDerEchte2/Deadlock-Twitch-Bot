@@ -15,10 +15,13 @@ import {
   Shield,
   Zap,
   Target,
+  History,
+  RotateCcw,
 } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
 import { useAuthStatus } from '@/hooks/useAnalytics';
-import { fetchAIAnalysis } from '@/api/client';
-import type { AIAnalysisResult, AIAnalysisPoint, TimeRange } from '@/types/analytics';
+import { fetchAIAnalysis, fetchAIHistory } from '@/api/client';
+import type { AIAnalysisResult, AIAnalysisPoint, AIHistoryEntry, TimeRange } from '@/types/analytics';
 
 interface AIAnalysisProps {
   streamer: string | null;
@@ -68,6 +71,13 @@ export function AIAnalysis({ streamer, days }: AIAnalysisProps) {
 
   const isAdmin = authStatus?.isAdmin || authStatus?.isLocalhost;
 
+  const { data: history = [], refetch: refetchHistory } = useQuery<AIHistoryEntry[]>({
+    queryKey: ['ai-history', streamer],
+    queryFn: () => fetchAIHistory(streamer!, 20),
+    enabled: isAdmin && !!streamer,
+    staleTime: 0,
+  });
+
   if (loadingAuth) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -106,8 +116,8 @@ export function AIAnalysis({ streamer, days }: AIAnalysisProps) {
     try {
       const data = await fetchAIAnalysis(streamer, days);
       setResult(data);
-      // Auto-expand first point
       setExpandedPoint(1);
+      refetchHistory();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Analyse fehlgeschlagen');
     } finally {
@@ -271,6 +281,19 @@ export function AIAnalysis({ streamer, days }: AIAnalysisProps) {
           </div>
         </motion.div>
       )}
+
+      {/* History Panel */}
+      {history.length > 0 && (
+        <HistoryPanel
+          history={history}
+          activeId={result?.id ?? null}
+          onRestore={(entry) => {
+            setResult(entry);
+            setExpandedPoint(1);
+            setError(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -429,6 +452,123 @@ function DetailSection({ label, content, className = 'text-white' }: DetailSecti
         {label}
       </div>
       <p className={`text-sm leading-relaxed ${className}`}>{content}</p>
+    </div>
+  );
+}
+
+// ── History Panel ──────────────────────────────────────────────────────
+
+interface HistoryPanelProps {
+  history: AIHistoryEntry[];
+  activeId: number | null | undefined;
+  onRestore: (entry: AIHistoryEntry) => void;
+}
+
+function HistoryPanel({ history, activeId, onRestore }: HistoryPanelProps) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="panel-card rounded-2xl overflow-hidden">
+      {/* Header toggle */}
+      <button
+        className="w-full flex items-center justify-between p-4 hover:bg-background/30 transition-colors"
+        onClick={() => setOpen(o => !o)}
+      >
+        <div className="flex items-center gap-2 text-sm font-semibold text-text-secondary">
+          <History className="w-4 h-4" />
+          Vergangene Analysen
+          <span className="px-1.5 py-0.5 text-[10px] bg-background rounded-full border border-border">
+            {history.length}
+          </span>
+        </div>
+        {open ? (
+          <ChevronUp className="w-4 h-4 text-text-secondary" />
+        ) : (
+          <ChevronDown className="w-4 h-4 text-text-secondary" />
+        )}
+      </button>
+
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="border-t border-border"
+          >
+            <div className="divide-y divide-border">
+              {history.map((entry) => {
+                const isActive = entry.id === activeId;
+                const date = new Date(entry.generatedAt).toLocaleString('de-DE', {
+                  day: '2-digit',
+                  month: '2-digit',
+                  year: 'numeric',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                });
+                return (
+                  <div
+                    key={entry.id}
+                    className={`flex items-center justify-between p-3 gap-3 transition-colors ${
+                      isActive ? 'bg-primary/5' : 'hover:bg-background/30'
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs text-white font-medium">{date}</span>
+                        <span className="text-[10px] text-text-secondary px-1.5 py-0.5 rounded-full border border-border">
+                          {entry.days}d
+                        </span>
+                        {isActive && (
+                          <span className="text-[10px] text-primary px-1.5 py-0.5 rounded-full bg-primary/10 border border-primary/30">
+                            aktiv
+                          </span>
+                        )}
+                      </div>
+                      {/* Priority distribution */}
+                      <div className="flex items-center gap-2 mt-1">
+                        {entry.kritischCount > 0 && (
+                          <span className="flex items-center gap-1 text-[10px] text-error">
+                            <span className="w-1.5 h-1.5 rounded-full bg-error" />
+                            {entry.kritischCount}k
+                          </span>
+                        )}
+                        {entry.hochCount > 0 && (
+                          <span className="flex items-center gap-1 text-[10px] text-warning">
+                            <span className="w-1.5 h-1.5 rounded-full bg-warning" />
+                            {entry.hochCount}h
+                          </span>
+                        )}
+                        {entry.mittelCount > 0 && (
+                          <span className="flex items-center gap-1 text-[10px] text-primary">
+                            <span className="w-1.5 h-1.5 rounded-full bg-primary" />
+                            {entry.mittelCount}m
+                          </span>
+                        )}
+                        <span className="text-[10px] text-text-secondary">
+                          Ø {Math.round(entry.dataSnapshot.avgViewers)} Viewer
+                        </span>
+                      </div>
+                    </div>
+
+                    {!isActive && (
+                      <button
+                        onClick={() => onRestore(entry)}
+                        className="flex-shrink-0 flex items-center gap-1 px-2.5 py-1.5 text-xs text-text-secondary hover:text-white border border-border hover:border-primary/40 rounded-lg transition-colors"
+                        title="Diese Analyse laden"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        Laden
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

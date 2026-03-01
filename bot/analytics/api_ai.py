@@ -20,6 +20,30 @@ log = logging.getLogger("TwitchStreams.AnalyticsV2.AI")
 
 _anthropic_client = None
 _DOW_NAMES = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"]
+_ai_table_ready = False
+
+
+def _ensure_ai_table(conn) -> None:
+    """Create ai_analyses table if it doesn't exist (runs once per process)."""
+    global _ai_table_ready
+    if _ai_table_ready:
+        return
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ai_analyses (
+            id          BIGSERIAL PRIMARY KEY,
+            streamer    TEXT        NOT NULL,
+            days        INTEGER     NOT NULL,
+            model       TEXT        NOT NULL,
+            generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            data_snapshot JSONB     NOT NULL,
+            points      JSONB       NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ai_analyses_streamer_ts
+        ON ai_analyses (streamer, generated_at DESC)
+    """)
+    _ai_table_ready = True
 
 
 def _get_async_client():
@@ -105,10 +129,37 @@ class _AnalyticsAIMixin:
                 {"error": f"KI-Analyse fehlgeschlagen: {exc}"}, status=500
             )
 
+        generated_at = datetime.now(UTC)
+
+        # Step 3: persist to DB (best-effort, never blocks the response)
+        record_id: int | None = None
+        try:
+            with storage.get_conn() as conn:
+                _ensure_ai_table(conn)
+                row = conn.execute(
+                    """
+                    INSERT INTO ai_analyses (streamer, days, model, generated_at, data_snapshot, points)
+                    VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                    RETURNING id
+                    """,
+                    (
+                        streamer,
+                        days,
+                        "claude-opus-4-6",
+                        generated_at,
+                        json.dumps(ctx.get("summary", {})),
+                        json.dumps(points),
+                    ),
+                ).fetchone()
+                record_id = int(row[0]) if row else None
+        except Exception:
+            log.warning("Failed to persist AI analysis to DB", exc_info=True)
+
         return web.json_response({
+            "id": record_id,
             "streamer": streamer,
             "days": days,
-            "generatedAt": datetime.now(UTC).isoformat(),
+            "generatedAt": generated_at.isoformat(),
             "points": points,
             "dataSnapshot": ctx.get("summary", {}),
         })
@@ -425,3 +476,64 @@ Punkte 1-3: kritisch | Punkte 4-7: hoch | Punkte 8-10: mittel"""
             ]
 
         return []
+
+    # ------------------------------------------------------------------
+    #  GET /twitch/api/v2/ai/history
+    #  Parameter: streamer (required), limit (optional, default 20)
+    #  Auth: admin / localhost (same as analysis endpoint)
+    # ------------------------------------------------------------------
+
+    async def _api_v2_ai_history(self, request: web.Request) -> web.Response:
+        """Return past AI analyses for a streamer (newest first)."""
+        err = self._require_v2_admin_api(request)
+        if err is not None:
+            return err
+
+        streamer = request.query.get("streamer", "").strip().lower() or None
+        if not streamer:
+            return web.json_response({"error": "streamer parameter required"}, status=400)
+
+        try:
+            limit = min(max(int(request.query.get("limit", "20")), 1), 50)
+        except (ValueError, TypeError):
+            limit = 20
+
+        try:
+            with storage.get_conn() as conn:
+                _ensure_ai_table(conn)
+                rows = conn.execute(
+                    """
+                    SELECT id, streamer, days, model, generated_at, data_snapshot, points
+                    FROM ai_analyses
+                    WHERE streamer = %s
+                    ORDER BY generated_at DESC
+                    LIMIT %s
+                    """,
+                    (streamer, limit),
+                ).fetchall()
+
+            def _count(pts: list, priority: str) -> int:
+                return sum(1 for p in pts if p.get("priority") == priority)
+
+            result = []
+            for row in rows:
+                pts = row[6] if isinstance(row[6], list) else json.loads(row[6] or "[]")
+                snap = row[5] if isinstance(row[5], dict) else json.loads(row[5] or "{}")
+                generated_at = row[4]
+                result.append({
+                    "id": int(row[0]),
+                    "streamer": str(row[1]),
+                    "days": int(row[2]),
+                    "model": str(row[3]),
+                    "generatedAt": generated_at.isoformat() if hasattr(generated_at, "isoformat") else str(generated_at),
+                    "dataSnapshot": snap,
+                    "points": pts,
+                    "kritischCount": _count(pts, "kritisch"),
+                    "hochCount": _count(pts, "hoch"),
+                    "mittelCount": _count(pts, "mittel"),
+                })
+
+            return web.json_response(result)
+        except Exception as exc:
+            log.exception("Error in ai_history API")
+            return web.json_response({"error": str(exc)}, status=500)

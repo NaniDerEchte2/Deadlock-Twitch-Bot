@@ -1,6 +1,7 @@
 // API Client for Twitch Analytics Dashboard
 
 import type {
+  AIHistoryEntry,
   MonetizationStats,
   CategoryTimings,
   CategoryActivitySeries,
@@ -578,4 +579,11 @@ export async function fetchAIAnalysis(
   days: number
 ): Promise<AIAnalysisResult> {
   return fetchApi<AIAnalysisResult>('/ai/analysis', { streamer, days });
+}
+
+export async function fetchAIHistory(
+  streamer: string,
+  limit = 20
+): Promise<AIHistoryEntry[]> {
+  return fetchApi<AIHistoryEntry[]>('/ai/history', { streamer, limit });
 }

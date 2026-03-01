@@ -1114,6 +1114,7 @@ export interface AIAnalysisPoint {
 }
 
 export interface AIAnalysisResult {
+  id?: number | null;
   streamer: string;
   days: number;
   generatedAt: string;
@@ -1128,4 +1129,12 @@ export interface AIAnalysisResult {
     avgDropoffPct: number;
     avgChatters: number;
   };
+}
+
+export interface AIHistoryEntry extends AIAnalysisResult {
+  id: number;
+  model: string;
+  kritischCount: number;
+  hochCount: number;
+  mittelCount: number;
 }

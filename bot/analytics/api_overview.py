@@ -82,6 +82,7 @@ class _AnalyticsOverviewMixin:
         router.add_get("/twitch/api/v2/exp/growth-curves", self._api_v2_exp_growth_curves)
         # KI Analyse – Claude Opus deep analysis (admin only)
         router.add_get("/twitch/api/v2/ai/analysis", self._api_v2_ai_analysis)
+        router.add_get("/twitch/api/v2/ai/history", self._api_v2_ai_history)
         # Serve the dashboard
         router.add_get("/twitch/dashboard-v2", self._serve_dashboard_v2)
         router.add_get("/twitch/dashboard-v2/{path:.*}", self._serve_dashboard_v2_assets)
