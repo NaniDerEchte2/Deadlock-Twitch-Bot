@@ -1617,3 +1617,24 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_oauth_state_expires ON oauth_state_tokens(expires_at)"
     )
+
+    # 17) Streamer-Pläne / Abonnements (zukünftiges Feature, noch inaktiv)
+    # Verwaltet kostenpflichtige Bot-Pläne pro Streamer. Prüfung erfolgt nur wenn
+    # SUBSCRIPTION_PLANS_ENABLED=True gesetzt wird. Bis dahin hat diese Tabelle
+    # keinen Einfluss auf das Bot-Verhalten.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS streamer_plans (
+            twitch_user_id  TEXT PRIMARY KEY,
+            twitch_login    TEXT,
+            plan_name       TEXT NOT NULL DEFAULT 'free',
+            promo_disabled  INTEGER NOT NULL DEFAULT 0,
+            activated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at      TEXT,
+            notes           TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_streamer_plans_login ON streamer_plans(twitch_login)"
+    )

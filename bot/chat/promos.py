@@ -32,6 +32,7 @@ from .constants import (
     PROMO_VIEWER_SPIKE_MIN_STATS_SAMPLES,
     PROMO_VIEWER_SPIKE_SESSION_SAMPLE_LIMIT,
     PROMO_VIEWER_SPIKE_STATS_SAMPLE_LIMIT,
+    SUBSCRIPTION_PLANS_ENABLED,
 )
 
 log = logging.getLogger("TwitchStreams.ChatBot")
@@ -555,16 +556,30 @@ class PromoMixin:
         try:
             # Uses storage.get_conn() so twitch_* schema is ensured before querying.
             with get_conn():
-                rows = _pg_query_all(
-                    """
-                    SELECT s.twitch_login, s.twitch_user_id
-                      FROM twitch_streamers s
-                      JOIN twitch_live_state l ON s.twitch_user_id = l.twitch_user_id
-                     WHERE l.is_live = 1
-                       AND LOWER(COALESCE(l.last_game, '')) = ?
-                    """,
-                    (target_game_lower,),
-                )
+                if SUBSCRIPTION_PLANS_ENABLED:
+                    rows = _pg_query_all(
+                        """
+                        SELECT s.twitch_login, s.twitch_user_id
+                          FROM twitch_streamers s
+                          JOIN twitch_live_state l ON s.twitch_user_id = l.twitch_user_id
+                          LEFT JOIN streamer_plans p ON s.twitch_user_id = p.twitch_user_id
+                         WHERE l.is_live = 1
+                           AND LOWER(COALESCE(l.last_game, '')) = ?
+                           AND COALESCE(p.promo_disabled, 0) = 0
+                        """,
+                        (target_game_lower,),
+                    )
+                else:
+                    rows = _pg_query_all(
+                        """
+                        SELECT s.twitch_login, s.twitch_user_id
+                          FROM twitch_streamers s
+                          JOIN twitch_live_state l ON s.twitch_user_id = l.twitch_user_id
+                         WHERE l.is_live = 1
+                           AND LOWER(COALESCE(l.last_game, '')) = ?
+                        """,
+                        (target_game_lower,),
+                    )
         except Exception:
             log.debug("_get_live_channels_for_promo: DB-Query fehlgeschlagen", exc_info=True)
             return []

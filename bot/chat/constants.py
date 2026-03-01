@@ -200,3 +200,14 @@ INVITE_GAME_CONTEXT_RE = re.compile(
     r"\b(game|spiel)\b",
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Streamer-Pläne / Abonnements (zukünftiges Feature, noch inaktiv)
+# ---------------------------------------------------------------------------
+# Globaler Schalter: Auf True setzen, sobald Pläne offiziell angeboten werden.
+# Solange False: kein Einfluss auf den Bot – die streamer_plans-Tabelle in der
+# DB existiert bereits und kann manuell befüllt werden.
+#
+# Verfügbare Plan-Features (werden nur geprüft wenn SUBSCRIPTION_PLANS_ENABLED=True):
+#   promo_disabled  – Chat-Promos werden für diesen Streamer nicht gesendet
+SUBSCRIPTION_PLANS_ENABLED: bool = False
