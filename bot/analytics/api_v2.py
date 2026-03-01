@@ -24,6 +24,9 @@ from .api_viewers import _AnalyticsViewersMixin
 
 log = logging.getLogger("TwitchStreams.AnalyticsV2")
 DASHBOARD_V2_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
+
+# Twitch logins that receive admin-level access (same as Discord admin / localhost)
+_TWITCH_ADMIN_LOGINS: frozenset[str] = frozenset({"earlysalty"})
 DASHBOARD_V2_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard-v2"
 
 
@@ -373,6 +376,9 @@ class AnalyticsV2Mixin(
         if dashboard_session:
             auth_type = str(dashboard_session.get("auth_type") or "").strip().lower()
             if auth_type == "discord_admin":
+                return "admin"
+            twitch_login = str(dashboard_session.get("twitch_login") or "").strip().lower()
+            if twitch_login in _TWITCH_ADMIN_LOGINS:
                 return "admin"
             return "partner"
 

@@ -65,7 +65,7 @@ class _AnalyticsAIMixin:
     # ------------------------------------------------------------------
     #  GET /twitch/api/v2/ai/analysis
     #  Parameter: streamer (required), days (optional, default 30)
-    #  Auth: admin or localhost only
+    #  Auth: admin / localhost (earlysalty gets admin via _TWITCH_ADMIN_LOGINS)
     # ------------------------------------------------------------------
 
     async def _api_v2_ai_analysis(self, request: web.Request) -> web.Response:
