@@ -106,8 +106,8 @@ async function fetchApi<T>(endpoint: string, params: Record<string, string | num
   }
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-    throw new Error(error.error || `HTTP ${response.status}`);
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.error || `Server-Fehler (HTTP ${response.status})`);
   }
 
   return response.json();

@@ -21,6 +21,7 @@ log = logging.getLogger("TwitchStreams.AnalyticsV2.AI")
 _anthropic_client = None
 _DOW_NAMES = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"]
 _ai_table_ready = False
+_in_progress_analyses: set[str] = set()  # streamer logins currently being analysed
 
 
 def _extract_json_array(text: str) -> str | None:
@@ -111,7 +112,7 @@ def _get_async_client():
             "(service=DeadlockBot, key=ANTHROPIC_API_KEY) oder als Umgebungsvariable."
         )
 
-    _anthropic_client = _lib.AsyncAnthropic(api_key=api_key, timeout=120.0)
+    _anthropic_client = _lib.AsyncAnthropic(api_key=api_key, timeout=240.0)
     return _anthropic_client
 
 
@@ -144,6 +145,12 @@ class _AnalyticsAIMixin:
         if not streamer:
             return web.json_response({"error": "streamer parameter required"}, status=400)
 
+        if streamer in _in_progress_analyses:
+            return web.json_response(
+                {"error": "Analyse läuft bereits für diesen Streamer. Bitte warte bis sie abgeschlossen ist."},
+                status=409,
+            )
+
         try:
             days = min(max(int(request.query.get("days", "30")), 7), 365)
         except (ValueError, TypeError):
@@ -155,6 +162,15 @@ class _AnalyticsAIMixin:
 
         since = (datetime.now(UTC) - timedelta(days=days)).isoformat()
 
+        _in_progress_analyses.add(streamer)
+        try:
+            return await self._run_ai_analysis(streamer, days, since, game_filter)
+        finally:
+            _in_progress_analyses.discard(streamer)
+
+    async def _run_ai_analysis(
+        self, streamer: str, days: int, since: str, game_filter: str
+    ) -> web.Response:
         # Step 1: collect analytics context from DB
         try:
             ctx = self._collect_ai_context(streamer, days, since, game_filter)
@@ -613,7 +629,7 @@ Vollständige Viewer-Metriken nur für Einträge ohne diesen Hinweis verwenden."
         client = _get_async_client()
         msg = await client.messages.create(
             model="claude-opus-4-6",
-            max_tokens=20000,
+            max_tokens=60000,
             messages=[{"role": "user", "content": prompt}],
         )
 

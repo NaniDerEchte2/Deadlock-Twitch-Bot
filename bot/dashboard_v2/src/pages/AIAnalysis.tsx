@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Brain,
@@ -73,6 +73,7 @@ export function AIAnalysis({ streamer, days }: AIAnalysisProps) {
   const [gameFilter, setGameFilter] = useState<GameFilter>('all');
 
   const isAdmin = authStatus?.isAdmin || authStatus?.isLocalhost;
+  const analysisInProgress = useRef(false);
 
   const { data: history = [], refetch: refetchHistory } = useQuery<AIHistoryEntry[]>({
     queryKey: ['ai-history', streamer],
@@ -111,7 +112,8 @@ export function AIAnalysis({ streamer, days }: AIAnalysisProps) {
   }
 
   const handleAnalyze = async () => {
-    if (!streamer) return;
+    if (!streamer || analysisInProgress.current) return;
+    analysisInProgress.current = true;
     setIsLoading(true);
     setError(null);
     setResult(null);
@@ -132,6 +134,7 @@ export function AIAnalysis({ streamer, days }: AIAnalysisProps) {
       );
       refetchHistory(); // backend may have saved result despite connection drop
     } finally {
+      analysisInProgress.current = false;
       setIsLoading(false);
     }
   };
@@ -550,6 +553,7 @@ function HistoryPanel({ history, activeId, onRestore }: HistoryPanelProps) {
                   year: 'numeric',
                   hour: '2-digit',
                   minute: '2-digit',
+                  second: '2-digit',
                 });
                 return (
                   <div
