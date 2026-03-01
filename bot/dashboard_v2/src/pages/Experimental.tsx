@@ -55,7 +55,8 @@ const HASH_PALETTE = [
   '#c2410c', '#0369a1', '#15803d', '#b45309',
 ];
 
-function hashGameColor(name: string): string {
+function hashGameColor(name: string | null | undefined): string {
+  if (!name) return HASH_PALETTE[0];
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
   return HASH_PALETTE[h % HASH_PALETTE.length];
@@ -151,8 +152,9 @@ function ExpGameBreakdownChart({ data }: { data: ExpGameBreakdown[] }) {
         </div>
       </div>
 
+      {/* key={sortKey} forces full remount on sort change → no Recharts 3.x animation-interpolation crash */}
       <ResponsiveContainer width="100%" height={280}>
-        <BarChart data={chartData} margin={{ top: 5, right: 20, left: 0, bottom: 60 }}>
+        <BarChart key={sortKey} data={chartData} margin={{ top: 5, right: 20, left: 0, bottom: 60 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
           <XAxis
             dataKey="shortGame"
@@ -169,17 +171,17 @@ function ExpGameBreakdownChart({ data }: { data: ExpGameBreakdown[] }) {
               borderRadius: 8,
               color: '#fff',
             }}
-            formatter={((value: number, _name: string, props: any) => {
-              const medal = props.payload?.medal ?? '';
+            formatter={((value: number | undefined, _name: string, props: any) => {
+              const medal = props?.payload?.medal ?? '';
               const label = sortKey === 'avgViewers'
                 ? 'Ø Viewer'
                 : sortKey === 'sessions'
                   ? 'Sessions'
                   : 'Peak Viewer';
-              return [`${formatNumber(value, 1)} ${medal}`, label];
+              return [`${formatNumber(value, 1)} ${medal}`.trim(), label];
             }) as any}
           />
-          <Bar dataKey={sortKey} name="Wert" radius={[4, 4, 0, 0]}>
+          <Bar dataKey={sortKey} name="Wert" radius={[4, 4, 0, 0]} isAnimationActive={false}>
             {chartData.map((entry, i) => (
               <Cell key={i} fill={entry.fill} fillOpacity={entry.isSpecial ? 1 : 0.85} />
             ))}
@@ -191,7 +193,11 @@ function ExpGameBreakdownChart({ data }: { data: ExpGameBreakdown[] }) {
 }
 
 function ExpGrowthCurvesChart({ data }: { data: ExpGrowthCurve[] }) {
-  const games = useMemo(() => [...new Set(data.map(d => d.game))].slice(0, 6), [data]);
+  // Filter out null/undefined/empty game names to prevent Recharts 3.x toString crash
+  const games = useMemo(
+    () => [...new Set(data.map(d => d.game).filter((g): g is string => !!g))].slice(0, 6),
+    [data],
+  );
 
   const pivoted = useMemo(() => {
     const byMinute: Record<number, Record<string, number>> = {};
@@ -239,11 +245,13 @@ function ExpGrowthCurvesChart({ data }: { data: ExpGrowthCurve[] }) {
             key={game}
             type="monotone"
             dataKey={game}
-            name={game.length > 20 ? game.slice(0, 18) + '…' : game}
+            name={game && game.length > 20 ? game.slice(0, 18) + '…' : (game ?? '')}
             stroke={hashGameColor(game)}
             strokeWidth={2}
             dot={false}
             activeDot={{ r: 4 }}
+            isAnimationActive={false}
+            connectNulls={false}
           />
         ))}
       </LineChart>
