@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import quote_plus
 
 from aiohttp import web
@@ -61,6 +62,10 @@ _CRITICAL_SCOPES: set[str] = {
     "channel:read:subscriptions",  # Sub Events
 }
 
+_DASHBOARD_OWNER_DISCORD_ID = "662995601738170389"
+_CHAT_ACTION_MODES = {"message", "action", "announcement"}
+_CHAT_ANNOUNCEMENT_COLORS = {"blue", "green", "orange", "purple", "primary"}
+
 
 class DashboardLiveMixin:
     async def _read_post_with_csrf(
@@ -77,12 +82,144 @@ class DashboardLiveMixin:
         )
         raise web.HTTPFound(location=location)
 
+    def _get_discord_admin_user_id(self, request: web.Request) -> str:
+        getter = getattr(self, "_get_discord_admin_session", None)
+        if not callable(getter):
+            return ""
+        try:
+            session = getter(request) or {}
+        except Exception:
+            log.debug("Could not resolve discord admin session for live action", exc_info=True)
+            return ""
+        return str(session.get("user_id") or "").strip()
+
+    def _resolve_dashboard_chat_bot(self) -> Any | None:
+        raid_bot = getattr(self, "_raid_bot", None)
+        if raid_bot is None:
+            return None
+
+        chat_bot = getattr(raid_bot, "chat_bot", None)
+        if chat_bot is not None:
+            return chat_bot
+
+        cog = getattr(raid_bot, "_cog", None)
+        if cog is None:
+            return None
+        return getattr(cog, "_twitch_chat_bot", None)
+
+    @staticmethod
+    def _build_dashboard_chat_channel(chat_bot: Any, login: str, channel_id: str) -> Any:
+        make_channel = getattr(chat_bot, "_make_promo_channel", None)
+        if callable(make_channel):
+            return make_channel(login, channel_id)
+
+        class _Channel:
+            __slots__ = ("name", "id")
+
+            def __init__(self, name: str, cid: str):
+                self.name = name
+                self.id = cid
+
+        return _Channel(login, channel_id)
+
+    @staticmethod
+    def _coerce_twitch_user_id(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, dict):
+            for key in ("twitch_user_id", "user_id", "id"):
+                resolved = DashboardLiveMixin._coerce_twitch_user_id(value.get(key))
+                if resolved:
+                    return resolved
+            data = value.get("data")
+            return DashboardLiveMixin._coerce_twitch_user_id(data)
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                resolved = DashboardLiveMixin._coerce_twitch_user_id(item)
+                if resolved:
+                    return resolved
+            return ""
+        for attr in ("twitch_user_id", "user_id", "id"):
+            resolved = str(getattr(value, attr, "") or "").strip()
+            if resolved.isdigit():
+                return resolved
+        candidate = str(value or "").strip()
+        return candidate if candidate.isdigit() else ""
+
+    def _resolve_streamer_user_id_from_db(self, login: str) -> str:
+        try:
+            with _storage.get_conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT COALESCE(NULLIF(TRIM(s.twitch_user_id), ''), NULLIF(TRIM(a.twitch_user_id), ''))
+                      FROM twitch_streamers s
+                      LEFT JOIN twitch_raid_auth a
+                        ON (
+                             s.twitch_user_id IS NOT NULL
+                             AND s.twitch_user_id = a.twitch_user_id
+                           )
+                        OR (
+                             s.twitch_user_id IS NULL
+                             AND LOWER(s.twitch_login) = LOWER(a.twitch_login)
+                           )
+                     WHERE LOWER(s.twitch_login) = LOWER(?)
+                     LIMIT 1
+                    """,
+                    (login,),
+                ).fetchone()
+            if not row:
+                return ""
+            if hasattr(row, "keys"):
+                keys = list(row.keys())
+                raw = row[keys[0]] if keys else ""
+            else:
+                raw = row[0]
+            return self._coerce_twitch_user_id(raw)
+        except Exception:
+            log.debug("Could not resolve twitch_user_id from DB for %s", login, exc_info=True)
+            return ""
+
+    async def _resolve_streamer_user_id_from_twitch(self, chat_bot: Any, login: str) -> str:
+        fetch_user = getattr(chat_bot, "fetch_user", None)
+        if not callable(fetch_user):
+            return ""
+
+        try:
+            try:
+                user = await fetch_user(login=login)
+            except TypeError:
+                user = await fetch_user(login)
+        except Exception:
+            log.debug("Could not resolve twitch_user_id via Twitch API for %s", login, exc_info=True)
+            return ""
+
+        return self._coerce_twitch_user_id(user)
+
+    def _persist_streamer_user_id(self, login: str, user_id: str) -> None:
+        if not login or not user_id:
+            return
+        try:
+            with _storage.get_conn() as conn:
+                conn.execute(
+                    """
+                    UPDATE twitch_streamers
+                       SET twitch_user_id = ?
+                     WHERE LOWER(twitch_login) = LOWER(?)
+                       AND (twitch_user_id IS NULL OR TRIM(twitch_user_id) = '')
+                    """,
+                    (user_id, login),
+                )
+        except Exception:
+            log.debug("Could not persist twitch_user_id for %s", login, exc_info=True)
+
     async def index(self, request: web.Request):
         self._require_token(request)
         items = await self._list()
 
         msg = request.query.get("ok", "")
         err = request.query.get("err", "")
+        discord_admin_user_id = self._get_discord_admin_user_id(request)
+        can_use_owner_chat_actions = discord_admin_user_id == _DASHBOARD_OWNER_DISCORD_ID
         csrf_token = self._csrf_generate_token(request)
         csrf_input_html = (
             f"<input type='hidden' name='csrf_token' value='{html.escape(csrf_token, quote=True)}'>"
@@ -758,6 +895,52 @@ class DashboardLiveMixin:
             "</div>"
         )
 
+        chat_action_disabled_attr = "" if can_use_owner_chat_actions else " disabled"
+        chat_action_notice = (
+            "<div class='status-meta'>Nur der freigeschaltete Discord-Owner kann diese Aktion nutzen.</div>"
+            if not can_use_owner_chat_actions
+            else "<div class='status-meta'>Nur Partner-Streamer sind erlaubt (nicht archiviert, nicht als Kein Partner markiert).</div>"
+        )
+        chat_action_card_html = (
+            "<div class='card raid-auth-card'>"
+            "  <div class='card-header'>"
+            "    <div>"
+            "      <p class='eyebrow'>Owner Feature</p>"
+            "      <h2>Partner Chat Aktion</h2>"
+            "      <p class='lead'>Manuelle Nachricht, /me Action oder Announcement direkt aus dem Admin-Dashboard.</p>"
+            "    </div>"
+            "  </div>"
+            "  <form class='raid-form' method='post' action='/twitch/admin/chat_action'>"
+            f"    {csrf_input_html}"
+            "    <label>Partner Login"
+            f"      <input type='text' name='login' list='chat-action-login-list' placeholder='earlysalty' required{chat_action_disabled_attr}>"
+            "    </label>"
+            "    <label>Modus"
+            f"      <select name='mode'{chat_action_disabled_attr}>"
+            "        <option value='message'>Nachricht</option>"
+            "        <option value='action'>/me Action</option>"
+            "        <option value='announcement'>Announcement</option>"
+            "      </select>"
+            "    </label>"
+            "    <label>Announcement Farbe"
+            f"      <select name='color'{chat_action_disabled_attr}>"
+            "        <option value='purple'>Purple</option>"
+            "        <option value='blue'>Blue</option>"
+            "        <option value='green'>Green</option>"
+            "        <option value='orange'>Orange</option>"
+            "        <option value='primary'>Primary</option>"
+            "      </select>"
+            "    </label>"
+            "    <label>Text"
+            f"      <textarea name='message' rows='3' maxlength='450' placeholder='Nachricht für den Twitch-Chat' required{chat_action_disabled_attr}></textarea>"
+            "    </label>"
+            f"    <button class='btn'{chat_action_disabled_attr}>Senden</button>"
+            "  </form>"
+            f"  <datalist id='chat-action-login-list'>{login_options_html}</datalist>"
+            f"  {chat_action_notice}"
+            "</div>"
+        )
+
         # --- Scope Status Card ---
         scope_rows: list[str] = []
         scope_headers_html = "".join(
@@ -918,6 +1101,7 @@ class DashboardLiveMixin:
 <div class="panel-grid">
   {add_streamer_card_html}
   {raid_auth_card_html}
+  {chat_action_card_html}
   {filter_card_html}
 </div>
 
@@ -1025,6 +1209,159 @@ class DashboardLiveMixin:
         messages = [m for m in (add_message, profile_message) if m]
         ok_message = " – ".join(dict.fromkeys(messages)) if messages else "Gespeichert"
         location = self._redirect_location(request, ok=ok_message)
+        raise web.HTTPFound(location=location)
+
+    async def admin_partner_chat_action(self, request: web.Request):
+        self._require_token(request)
+        data = await self._read_post_with_csrf(request, fallback_path="/twitch/admin")
+
+        discord_user_id = self._get_discord_admin_user_id(request)
+        if discord_user_id != _DASHBOARD_OWNER_DISCORD_ID:
+            log.warning(
+                "AUDIT dashboard chat action denied: discord_user_id=%s path=%s",
+                discord_user_id or "none",
+                request.path,
+            )
+            location = self._redirect_location(
+                request,
+                err="Nur der freigeschaltete Discord-Owner darf diese Chat-Aktion nutzen",
+                default_path="/twitch/admin",
+            )
+            raise web.HTTPFound(location=location)
+
+        raw_login = str(data.get("login") or data.get("streamer") or "").strip()
+        normalize_login = getattr(self, "_normalize_login", None)
+        if callable(normalize_login):
+            login = str(normalize_login(raw_login) or "").strip().lower()
+        else:
+            login = raw_login.strip().lstrip("@#").lower()
+        if not login:
+            location = self._redirect_location(
+                request,
+                err="Bitte einen Partner-Login angeben",
+                default_path="/twitch/admin",
+            )
+            raise web.HTTPFound(location=location)
+
+        mode = str(data.get("mode") or "message").strip().lower()
+        if mode not in _CHAT_ACTION_MODES:
+            mode = "message"
+        color = str(data.get("color") or "purple").strip().lower()
+        if color not in _CHAT_ANNOUNCEMENT_COLORS:
+            color = "purple"
+
+        message = str(data.get("message") or "").strip()
+        if not message:
+            location = self._redirect_location(
+                request,
+                err="Bitte eine Nachricht eingeben",
+                default_path="/twitch/admin",
+            )
+            raise web.HTTPFound(location=location)
+        if len(message) > 450:
+            location = self._redirect_location(
+                request,
+                err="Nachricht ist zu lang (max. 450 Zeichen)",
+                default_path="/twitch/admin",
+            )
+            raise web.HTTPFound(location=location)
+
+        items = await self._list()
+        target = next(
+            (
+                row
+                for row in items
+                if str(row.get("twitch_login") or "").strip().lower() == login
+            ),
+            None,
+        )
+        if target is None:
+            location = self._redirect_location(
+                request,
+                err=f"Streamer {login} nicht gefunden",
+                default_path="/twitch/admin",
+            )
+            raise web.HTTPFound(location=location)
+
+        if bool(target.get("manual_partner_opt_out")) or bool(target.get("archived_at")):
+            location = self._redirect_location(
+                request,
+                err="Chat-Aktion ist nur für aktive Partner-Streamer erlaubt",
+                default_path="/twitch/admin",
+            )
+            raise web.HTTPFound(location=location)
+
+        chat_bot = self._resolve_dashboard_chat_bot()
+        if chat_bot is None:
+            location = self._redirect_location(
+                request,
+                err="Twitch Chat Bot ist aktuell nicht verfügbar",
+                default_path="/twitch/admin",
+            )
+            raise web.HTTPFound(location=location)
+
+        channel_id = self._coerce_twitch_user_id(target.get("twitch_user_id"))
+        if not channel_id:
+            channel_id = self._resolve_streamer_user_id_from_db(login)
+        if not channel_id:
+            channel_id = await self._resolve_streamer_user_id_from_twitch(chat_bot, login)
+        if channel_id:
+            target["twitch_user_id"] = channel_id
+            self._persist_streamer_user_id(login, channel_id)
+        else:
+            location = self._redirect_location(
+                request,
+                err=f"Für {login} fehlt die Twitch User-ID",
+                default_path="/twitch/admin",
+            )
+            raise web.HTTPFound(location=location)
+
+        channel = self._build_dashboard_chat_channel(chat_bot, login, channel_id)
+        send_text = message if mode != "action" else f"/me {message}"
+
+        ok = False
+        try:
+            if mode == "announcement":
+                send_announcement = getattr(chat_bot, "_send_announcement", None)
+                if callable(send_announcement):
+                    ok = bool(
+                        await send_announcement(
+                            channel,
+                            send_text,
+                            color=color,
+                            source="admin_dashboard_manual",
+                        )
+                    )
+                else:
+                    send_chat = getattr(chat_bot, "_send_chat_message", None)
+                    if callable(send_chat):
+                        ok = bool(
+                            await send_chat(channel, send_text, source="admin_dashboard_manual")
+                        )
+            else:
+                send_chat = getattr(chat_bot, "_send_chat_message", None)
+                if callable(send_chat):
+                    ok = bool(await send_chat(channel, send_text, source="admin_dashboard_manual"))
+        except Exception as exc:
+            log.exception("dashboard chat action failed for %s: %s", login, exc)
+            ok = False
+
+        if not ok:
+            location = self._redirect_location(
+                request,
+                err=f"Chat-Aktion für {login} konnte nicht gesendet werden",
+                default_path="/twitch/admin",
+            )
+            raise web.HTTPFound(location=location)
+
+        action_label = (
+            "Announcement" if mode == "announcement" else ("Action" if mode == "action" else "Nachricht")
+        )
+        location = self._redirect_location(
+            request,
+            ok=f"{action_label} an {login} gesendet",
+            default_path="/twitch/admin",
+        )
         raise web.HTTPFound(location=location)
 
     async def discord_flag(self, request: web.Request):

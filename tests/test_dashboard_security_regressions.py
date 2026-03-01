@@ -93,6 +93,103 @@ class _DummyLiveActions(DashboardLiveMixin):
         return raw or "added"
 
 
+class _DummyDashboardChatBot:
+    def __init__(self, lookup_user_id: str | None = None) -> None:
+        self.chat_calls: list[dict[str, str]] = []
+        self.announcement_calls: list[dict[str, str]] = []
+        self.lookup_user_id = lookup_user_id
+
+    @staticmethod
+    def _make_promo_channel(login: str, channel_id: str):
+        return SimpleNamespace(name=login, id=channel_id)
+
+    async def _send_chat_message(self, channel, text: str, source: str | None = None) -> bool:
+        self.chat_calls.append(
+            {
+                "login": str(getattr(channel, "name", "") or ""),
+                "channel_id": str(getattr(channel, "id", "") or ""),
+                "text": text,
+                "source": str(source or ""),
+            }
+        )
+        return True
+
+    async def _send_announcement(
+        self,
+        channel,
+        text: str,
+        color: str = "purple",
+        source: str | None = None,
+    ) -> bool:
+        self.announcement_calls.append(
+            {
+                "login": str(getattr(channel, "name", "") or ""),
+                "channel_id": str(getattr(channel, "id", "") or ""),
+                "text": text,
+                "color": color,
+                "source": str(source or ""),
+            }
+        )
+        return True
+
+    async def fetch_user(self, login: str):
+        if not self.lookup_user_id:
+            return None
+        return SimpleNamespace(id=self.lookup_user_id, login=login)
+
+
+class _DummyLiveOwnerChatAction(DashboardLiveMixin):
+    def __init__(
+        self,
+        user_id: str = "662995601738170389",
+        *,
+        is_partner: bool = True,
+        missing_channel_id: bool = False,
+        db_user_id: str = "",
+        api_user_id: str | None = None,
+    ) -> None:
+        self.chat_bot = _DummyDashboardChatBot(lookup_user_id=api_user_id)
+        self._raid_bot = SimpleNamespace(chat_bot=self.chat_bot)
+        self.discord_admin_session = {"user_id": user_id}
+        self._is_partner = is_partner
+        self._missing_channel_id = missing_channel_id
+        self._db_user_id = db_user_id
+        self.persisted_user_ids: list[tuple[str, str]] = []
+
+    def _require_token(self, request):
+        return None
+
+    def _get_discord_admin_session(self, request):
+        return self.discord_admin_session
+
+    def _csrf_verify_token(self, request, provided_token: str) -> bool:
+        return provided_token == "valid-csrf"
+
+    def _redirect_location(self, request, *, ok=None, err=None, default_path="/twitch/stats"):
+        if err:
+            return "/twitch/admin?err=1"
+        if ok:
+            return "/twitch/admin?ok=1"
+        return default_path
+
+    def _resolve_streamer_user_id_from_db(self, login: str) -> str:
+        del login
+        return self._db_user_id
+
+    def _persist_streamer_user_id(self, login: str, user_id: str) -> None:
+        self.persisted_user_ids.append((login, user_id))
+
+    async def _list(self) -> list[dict]:
+        return [
+            {
+                "twitch_login": "partner_one",
+                "twitch_user_id": None if self._missing_channel_id else "1001",
+                "manual_partner_opt_out": 0 if self._is_partner else 1,
+                "archived_at": None,
+            }
+        ]
+
+
 class _WebhookConn:
     def execute(self, sql, params=None):
         if "INSERT INTO twitch_billing_events" in sql:
@@ -432,7 +529,12 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
         )
         handler.attach(app)
 
-        for path in ("/twitch/add_any", "/twitch/add_url", "/twitch/add_login/{login}"):
+        for path in (
+            "/twitch/add_any",
+            "/twitch/add_url",
+            "/twitch/add_login/{login}",
+            "/twitch/admin/chat_action",
+        ):
             methods = {route.method for route in app.router.routes() if route.resource.canonical == path}
             self.assertEqual(methods, {"POST"})
 
@@ -482,6 +584,104 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
             await handler.add_any(_GoodRequest())
         self.assertEqual(good_ctx.exception.location, "/twitch?ok=streamer_a")
         self.assertEqual(handler.add_calls, ["streamer_a"])
+
+    async def test_owner_chat_action_rejects_non_owner_discord_session(self) -> None:
+        handler = _DummyLiveOwnerChatAction(user_id="123456789")
+
+        class _Request:
+            path = "/twitch/admin/chat_action"
+            method = "POST"
+            headers = {}
+            rel_url = SimpleNamespace(path_qs="/twitch/admin/chat_action")
+            query = {}
+
+            async def post(self):
+                return {
+                    "login": "partner_one",
+                    "mode": "message",
+                    "message": "test",
+                    "csrf_token": "valid-csrf",
+                }
+
+        with self.assertRaises(web.HTTPFound) as ctx:
+            await handler.admin_partner_chat_action(_Request())
+        self.assertEqual(ctx.exception.location, "/twitch/admin?err=1")
+        self.assertEqual(handler.chat_bot.chat_calls, [])
+
+    async def test_owner_chat_action_sends_action_message(self) -> None:
+        handler = _DummyLiveOwnerChatAction()
+
+        class _Request:
+            path = "/twitch/admin/chat_action"
+            method = "POST"
+            headers = {}
+            rel_url = SimpleNamespace(path_qs="/twitch/admin/chat_action")
+            query = {}
+
+            async def post(self):
+                return {
+                    "login": "partner_one",
+                    "mode": "action",
+                    "message": "hallo chat",
+                    "csrf_token": "valid-csrf",
+                }
+
+        with self.assertRaises(web.HTTPFound) as ctx:
+            await handler.admin_partner_chat_action(_Request())
+        self.assertEqual(ctx.exception.location, "/twitch/admin?ok=1")
+        self.assertEqual(len(handler.chat_bot.chat_calls), 1)
+        self.assertEqual(handler.chat_bot.chat_calls[0]["login"], "partner_one")
+        self.assertEqual(handler.chat_bot.chat_calls[0]["channel_id"], "1001")
+        self.assertEqual(handler.chat_bot.chat_calls[0]["text"], "/me hallo chat")
+        self.assertEqual(handler.chat_bot.chat_calls[0]["source"], "admin_dashboard_manual")
+
+    async def test_owner_chat_action_resolves_missing_user_id_via_twitch_lookup(self) -> None:
+        handler = _DummyLiveOwnerChatAction(missing_channel_id=True, api_user_id="2002")
+
+        class _Request:
+            path = "/twitch/admin/chat_action"
+            method = "POST"
+            headers = {}
+            rel_url = SimpleNamespace(path_qs="/twitch/admin/chat_action")
+            query = {}
+
+            async def post(self):
+                return {
+                    "login": "partner_one",
+                    "mode": "message",
+                    "message": "hallo",
+                    "csrf_token": "valid-csrf",
+                }
+
+        with self.assertRaises(web.HTTPFound) as ctx:
+            await handler.admin_partner_chat_action(_Request())
+        self.assertEqual(ctx.exception.location, "/twitch/admin?ok=1")
+        self.assertEqual(len(handler.chat_bot.chat_calls), 1)
+        self.assertEqual(handler.chat_bot.chat_calls[0]["channel_id"], "2002")
+        self.assertEqual(handler.persisted_user_ids, [("partner_one", "2002")])
+
+    async def test_owner_chat_action_rejects_non_partner_streamer(self) -> None:
+        handler = _DummyLiveOwnerChatAction(is_partner=False)
+
+        class _Request:
+            path = "/twitch/admin/chat_action"
+            method = "POST"
+            headers = {}
+            rel_url = SimpleNamespace(path_qs="/twitch/admin/chat_action")
+            query = {}
+
+            async def post(self):
+                return {
+                    "login": "partner_one",
+                    "mode": "message",
+                    "message": "test",
+                    "csrf_token": "valid-csrf",
+                }
+
+        with self.assertRaises(web.HTTPFound) as ctx:
+            await handler.admin_partner_chat_action(_Request())
+        self.assertEqual(ctx.exception.location, "/twitch/admin?err=1")
+        self.assertEqual(handler.chat_bot.chat_calls, [])
 
     async def test_discord_link_rejects_invalid_csrf(self) -> None:
         class _DiscordLinkHandler(_DummyRoutes):

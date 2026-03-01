@@ -83,6 +83,7 @@ class TwitchDashboardMixin:
                     rows = c.execute(
                         """
                         SELECT s.twitch_login,
+                               COALESCE(NULLIF(s.twitch_user_id, ''), NULLIF(a.twitch_user_id, '')) AS twitch_user_id,
                                s.manual_verified_permanent,
                                s.manual_verified_until,
                                s.manual_verified_at,

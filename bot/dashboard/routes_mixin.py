@@ -2817,6 +2817,7 @@ class _DashboardRoutesMixin:
                 web.post("/twitch/add_url", self.add_url),
                 web.post("/twitch/add_login/{login}", self.add_login),
                 web.post("/twitch/add_streamer", self.add_streamer),
+                web.post("/twitch/admin/chat_action", self.admin_partner_chat_action),
                 web.post("/twitch/remove", self.remove),
                 web.post("/twitch/verify", self.verify),
                 web.post("/twitch/archive", self.archive),
