@@ -11,6 +11,7 @@ import {
   DollarSign,
   Globe,
   UserSearch,
+  FlaskConical,
 } from 'lucide-react';
 
 export type TabId =
@@ -24,12 +25,14 @@ export type TabId =
   | 'schedule'
   | 'coaching'
   | 'monetization'
-  | 'category';
+  | 'category'
+  | 'experimental';
 
 interface Tab {
   id: TabId;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
+  beta?: boolean;
 }
 
 const tabs: Tab[] = [
@@ -44,6 +47,7 @@ const tabs: Tab[] = [
   { id: 'coaching', label: 'Coaching', icon: GraduationCap },
   { id: 'monetization', label: 'Monetization', icon: DollarSign },
   { id: 'category', label: 'Kategorie', icon: Globe },
+  { id: 'experimental', label: 'Labor', icon: FlaskConical, beta: true },
 ];
 
 interface TabNavigationProps {
@@ -78,6 +82,11 @@ export function TabNavigation({ activeTab, onTabChange }: TabNavigationProps) {
               <span className="relative z-10 flex items-center gap-2">
                 <Icon className="w-4 h-4" />
                 <span className="hidden sm:inline">{tab.label}</span>
+                {tab.beta && (
+                  <span className="hidden sm:inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-accent/20 text-accent border border-accent/30 leading-none">
+                    Beta
+                  </span>
+                )}
               </span>
             </button>
           );

@@ -13,6 +13,7 @@ from aiohttp import web
 
 from ..core.chat_bots import build_known_chat_bot_not_in_clause
 from .api_audience import _AnalyticsAudienceMixin
+from .api_experimental import _AnalyticsExperimentalMixin
 from .api_insights import _AnalyticsInsightsMixin
 from .api_overview import _AnalyticsOverviewMixin
 from .api_performance import _AnalyticsPerformanceMixin
@@ -80,6 +81,7 @@ class AnalyticsV2Mixin(
     _AnalyticsRaidsMixin,
     _AnalyticsViewersMixin,
     _AnalyticsChatDeepMixin,
+    _AnalyticsExperimentalMixin,
 ):
     """Mixin providing v2 analytics API endpoints for the dashboard."""
 

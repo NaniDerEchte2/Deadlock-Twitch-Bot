@@ -36,6 +36,10 @@ import type {
   ChatHypeTimeline,
   ChatContentAnalysis,
   ChatSocialGraph,
+  ExpOverview,
+  ExpGameBreakdown,
+  ExpGameTransition,
+  ExpGrowthCurve,
 } from '@/types/analytics';
 
 const API_BASE = '/twitch/api/v2';
@@ -534,4 +538,34 @@ export async function fetchCategoryLeaderboard(
     sort,
     ...(excludeExternal && { exclude_external: '1' }),
   });
+}
+
+// ========= Experimental (Labor) API Functions =========
+
+export async function fetchExpOverview(
+  streamer: string,
+  days: number
+): Promise<ExpOverview> {
+  return fetchApi<ExpOverview>("/exp/overview", { streamer, days });
+}
+
+export async function fetchExpGameBreakdown(
+  streamer: string,
+  days: number
+): Promise<ExpGameBreakdown[]> {
+  return fetchApi<ExpGameBreakdown[]>("/exp/game-breakdown", { streamer, days });
+}
+
+export async function fetchExpGameTransitions(
+  streamer: string,
+  days: number
+): Promise<ExpGameTransition[]> {
+  return fetchApi<ExpGameTransition[]>("/exp/game-transitions", { streamer, days });
+}
+
+export async function fetchExpGrowthCurves(
+  streamer: string,
+  days: number
+): Promise<ExpGrowthCurve[]> {
+  return fetchApi<ExpGrowthCurve[]>("/exp/growth-curves", { streamer, days });
 }

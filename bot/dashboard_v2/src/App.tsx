@@ -13,6 +13,7 @@ import { Coaching } from '@/pages/Coaching';
 import { Monetization } from '@/pages/Monetization';
 import { Category } from '@/pages/Category';
 import { Viewers } from '@/pages/Viewers';
+import { Experimental } from '@/pages/Experimental';
 import { useStreamerList, useAuthStatus } from '@/hooks/useAnalytics';
 import type { TimeRange } from '@/types/analytics';
 import { Shield, ShieldCheck, ShieldAlert, Wifi, AlertTriangle } from 'lucide-react';
@@ -233,6 +234,10 @@ function Dashboard() {
             onStreamerSelect={setStreamer}
             onNavigate={setActiveTab}
           />
+        )}
+
+        {activeTab === 'experimental' && (
+          <Experimental streamer={streamer} days={days} />
         )}
 
       </div>

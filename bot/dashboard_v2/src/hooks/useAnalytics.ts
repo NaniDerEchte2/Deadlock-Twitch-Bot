@@ -37,6 +37,10 @@ import {
   fetchChatHypeTimeline,
   fetchChatContentAnalysis,
   fetchChatSocialGraph,
+  fetchExpOverview,
+  fetchExpGameBreakdown,
+  fetchExpGameTransitions,
+  fetchExpGrowthCurves,
 } from '@/api/client';
 import type { TimeRange, ViewerSortField, ViewerFilterType } from '@/types/analytics';
 
@@ -387,5 +391,43 @@ export function useCategoryLeaderboard(
     queryKey: ['category-leaderboard', streamer, days, limit, sort, excludeExternal],
     queryFn: () => fetchCategoryLeaderboard(streamer, days, limit, sort, excludeExternal),
     staleTime: STALE_TIME,
+  });
+}
+
+// ========= Experimental (Labor) Hooks =========
+
+export function useExpOverview(streamer: string | null, days: number) {
+  return useQuery({
+    queryKey: ['exp-overview', streamer, days],
+    queryFn: () => fetchExpOverview(streamer!, days),
+    staleTime: STALE_TIME,
+    enabled: !!streamer,
+  });
+}
+
+export function useExpGameBreakdown(streamer: string | null, days: number) {
+  return useQuery({
+    queryKey: ['exp-game-breakdown', streamer, days],
+    queryFn: () => fetchExpGameBreakdown(streamer!, days),
+    staleTime: STALE_TIME,
+    enabled: !!streamer,
+  });
+}
+
+export function useExpGameTransitions(streamer: string | null, days: number) {
+  return useQuery({
+    queryKey: ['exp-game-transitions', streamer, days],
+    queryFn: () => fetchExpGameTransitions(streamer!, days),
+    staleTime: STALE_TIME,
+    enabled: !!streamer,
+  });
+}
+
+export function useExpGrowthCurves(streamer: string | null, days: number) {
+  return useQuery({
+    queryKey: ['exp-growth-curves', streamer, days],
+    queryFn: () => fetchExpGrowthCurves(streamer!, days),
+    staleTime: STALE_TIME,
+    enabled: !!streamer,
   });
 }

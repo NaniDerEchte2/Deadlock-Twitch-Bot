@@ -106,7 +106,7 @@ class _SessionsMixin:
         tags_list = stream.get("tags") or []
         tags_str = ",".join(tags_list) if isinstance(tags_list, list) else ""
 
-        return self._start_stream_session(
+        session_id = self._start_stream_session(
             login=login_lower,
             stream=stream,
             started_at_iso=started_at_iso,
@@ -117,6 +117,14 @@ class _SessionsMixin:
             is_mature=is_mature,
             tags=tags_str,
         )
+        # --- Experimental hook: session start ---
+        try:
+            exp_on_start = getattr(self, "_exp_on_session_start", None)
+            if callable(exp_on_start):
+                exp_on_start(login=login_lower, stream=stream, started_at_iso=started_at_iso)
+        except Exception:
+            log.debug("exp: _exp_on_session_start fehlgeschlagen für %s", login_lower, exc_info=True)
+        return session_id
 
     def _start_stream_session(
         self,
@@ -259,6 +267,17 @@ class _SessionsMixin:
                 )
         except Exception:
             log.debug("Konnte Session-Sample nicht speichern fuer %s", login, exc_info=True)
+        else:
+            # --- Experimental hook: sample ---
+            try:
+                exp_sample = getattr(self, "_exp_on_session_sample", None)
+                exp_get_id = getattr(self, "_get_exp_session_id", None)
+                if callable(exp_sample) and callable(exp_get_id):
+                    exp_id = exp_get_id(login)
+                    if exp_id is not None:
+                        exp_sample(login=login, exp_session_id=exp_id, stream=stream)
+            except Exception:
+                log.debug("exp: _exp_on_session_sample fehlgeschlagen für %s", login, exc_info=True)
 
     async def _finalize_stream_session(self, *, login: str, reason: str = "done") -> None:
         login_lower = login.lower()
@@ -497,6 +516,22 @@ class _SessionsMixin:
             )
         finally:
             cache.pop(login_lower, None)
+
+        # --- Experimental hook: session finalize ---
+        try:
+            exp_finalize = getattr(self, "_exp_on_session_finalize", None)
+            exp_get_id = getattr(self, "_get_exp_session_id", None)
+            if callable(exp_finalize) and callable(exp_get_id):
+                exp_id = exp_get_id(login_lower)
+                if exp_id is not None:
+                    exp_finalize(
+                        login=login_lower,
+                        exp_session_id=exp_id,
+                        follower_delta=follower_delta,
+                        now_dt=now_dt,
+                    )
+        except Exception:
+            log.debug("exp: _exp_on_session_finalize fehlgeschlagen für %s", login_lower, exc_info=True)
 
     async def _fetch_followers_total_safe(
         self,

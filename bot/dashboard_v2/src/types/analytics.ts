@@ -1066,3 +1066,38 @@ export interface ViewerPersonality {
   primary: string;
   distribution: Record<string, number>;
 }
+
+// ========= Experimental (Labor) Analytics =========
+
+export interface ExpOverview {
+  totalSessions: number;
+  gamesPlayed: number;
+  avgViewers: number;
+  bestGame: string;
+  bestGameAvgViewers: number;
+}
+
+export interface ExpGameBreakdown {
+  game: string;
+  sessions: number;
+  avgViewers: number;
+  peakViewers: number;
+  avgDurationMin: number;
+  avgFollowerDelta: number;
+}
+
+export interface ExpGameTransition {
+  fromGame: string;
+  toGame: string;
+  count: number;
+  avgViewersBefore: number;
+  avgViewersAfter: number;
+  viewerDelta: number;
+}
+
+export interface ExpGrowthCurve {
+  game: string;
+  minuteFromStart: number;
+  avgViewers: number;
+  sampleCount: number;
+}

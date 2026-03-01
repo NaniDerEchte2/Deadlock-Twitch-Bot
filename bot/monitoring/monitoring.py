@@ -22,10 +22,11 @@ from ..core.constants import (
 )
 from .embeds_mixin import _EmbedsMixin
 from .eventsub_mixin import _EventSubMixin
+from .exp_sessions_mixin import _ExpSessionsMixin
 from .sessions_mixin import _SessionsMixin
 
 
-class TwitchMonitoringMixin(_EventSubMixin, _SessionsMixin, _EmbedsMixin):
+class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _EmbedsMixin):
     """Polling loops and helpers used by the Twitch cog."""
 
     @staticmethod
@@ -490,6 +491,31 @@ class TwitchMonitoringMixin(_EventSubMixin, _SessionsMixin, _EmbedsMixin):
                 is_live and bool(target_game_lower) and game_name_lower == target_game_lower
             )
             had_deadlock_in_session = had_deadlock_prev or is_deadlock
+
+            # --- Experimental hook: game transition ---
+            if (
+                is_live
+                and was_live
+                and game_name
+                and previous_game
+                and game_name_lower != previous_game_lower
+            ):
+                try:
+                    exp_transition = getattr(self, "_exp_on_game_transition", None)
+                    exp_get_id = getattr(self, "_get_exp_session_id", None)
+                    if callable(exp_transition) and callable(exp_get_id):
+                        exp_id = exp_get_id(login_lower)
+                        if exp_id is not None:
+                            viewer_count_now = int(stream.get("viewer_count") or 0)
+                            exp_transition(
+                                login=login_lower,
+                                exp_session_id=exp_id,
+                                from_game=previous_game,
+                                to_game=game_name,
+                                viewer_count=viewer_count_now,
+                            )
+                except Exception:
+                    log.debug("exp: game_transition fehlgeschlagen für %s", login_lower, exc_info=True)
             had_deadlock_to_store = had_deadlock_in_session if is_live else False
             last_title_value = (
                 stream.get("title") if stream else previous_state.get("last_title")
