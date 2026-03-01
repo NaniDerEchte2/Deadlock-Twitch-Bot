@@ -581,9 +581,10 @@ export async function fetchExpGrowthCurves(
 
 export async function fetchAIAnalysis(
   streamer: string,
-  days: number
+  days: number,
+  gameFilter: 'deadlock' | 'all' = 'all'
 ): Promise<AIAnalysisResult> {
-  return fetchApi<AIAnalysisResult>('/ai/analysis', { streamer, days }, 240_000); // 4-minute timeout for Claude Opus
+  return fetchApi<AIAnalysisResult>('/ai/analysis', { streamer, days, game_filter: gameFilter }, 240_000);
 }
 
 export async function fetchAIHistory(

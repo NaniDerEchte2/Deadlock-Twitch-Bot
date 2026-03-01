@@ -62,12 +62,15 @@ function getPriorityConfig(priority: string) {
   return PRIORITY_CONFIG.mittel;
 }
 
+type GameFilter = 'deadlock' | 'all';
+
 export function AIAnalysis({ streamer, days }: AIAnalysisProps) {
   const { data: authStatus, isLoading: loadingAuth } = useAuthStatus();
   const [result, setResult] = useState<AIAnalysisResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expandedPoint, setExpandedPoint] = useState<number | null>(null);
+  const [gameFilter, setGameFilter] = useState<GameFilter>('all');
 
   const isAdmin = authStatus?.isAdmin || authStatus?.isLocalhost;
 
@@ -114,7 +117,7 @@ export function AIAnalysis({ streamer, days }: AIAnalysisProps) {
     setResult(null);
     setExpandedPoint(null);
     try {
-      const data = await fetchAIAnalysis(streamer, days);
+      const data = await fetchAIAnalysis(streamer, days, gameFilter);
       setResult(data);
       setExpandedPoint(1);
       refetchHistory();
@@ -153,23 +156,51 @@ export function AIAnalysis({ streamer, days }: AIAnalysisProps) {
             </div>
           </div>
 
-          <button
-            onClick={handleAnalyze}
-            disabled={isLoading || !streamer}
-            className="flex items-center gap-2 px-5 py-2.5 bg-primary hover:bg-primary-hover disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl font-semibold transition-all text-sm flex-shrink-0 shadow-lg shadow-primary/20"
-          >
-            {isLoading ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Analysiere...
-              </>
-            ) : (
-              <>
-                <Sparkles className="w-4 h-4" />
-                {result ? 'Neu analysieren' : 'Analyse starten'}
-              </>
-            )}
-          </button>
+          <div className="flex items-center gap-3 flex-shrink-0">
+            {/* Game Filter Toggle */}
+            <div className="flex rounded-xl border border-border overflow-hidden text-sm">
+              <button
+                onClick={() => setGameFilter('all')}
+                disabled={isLoading}
+                className={`px-3 py-2 transition-colors ${
+                  gameFilter === 'all'
+                    ? 'bg-primary text-white font-semibold'
+                    : 'text-text-secondary hover:text-white hover:bg-background/60'
+                }`}
+              >
+                Alle Spiele
+              </button>
+              <button
+                onClick={() => setGameFilter('deadlock')}
+                disabled={isLoading}
+                className={`px-3 py-2 transition-colors border-l border-border ${
+                  gameFilter === 'deadlock'
+                    ? 'bg-primary text-white font-semibold'
+                    : 'text-text-secondary hover:text-white hover:bg-background/60'
+                }`}
+              >
+                Deadlock
+              </button>
+            </div>
+
+            <button
+              onClick={handleAnalyze}
+              disabled={isLoading || !streamer}
+              className="flex items-center gap-2 px-5 py-2.5 bg-primary hover:bg-primary-hover disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl font-semibold transition-all text-sm shadow-lg shadow-primary/20"
+            >
+              {isLoading ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Analysiere...
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-4 h-4" />
+                  {result ? 'Neu analysieren' : 'Analyse starten'}
+                </>
+              )}
+            </button>
+          </div>
         </div>
 
         {!streamer && (
@@ -246,17 +277,22 @@ export function AIAnalysis({ streamer, days }: AIAnalysisProps) {
           <DataSnapshotGrid snapshot={result.dataSnapshot} />
 
           {/* Meta info */}
-          <div className="flex items-center gap-2 text-xs text-text-secondary px-1">
-            <Brain className="w-3 h-3 text-primary" />
-            <span>
-              Claude Opus · generiert am{' '}
-              {new Date(result.generatedAt).toLocaleString('de-DE', {
-                day: '2-digit',
-                month: '2-digit',
-                year: 'numeric',
-                hour: '2-digit',
-                minute: '2-digit',
-              })}
+          <div className="flex items-center gap-3 flex-wrap text-xs text-text-secondary px-1">
+            <div className="flex items-center gap-2">
+              <Brain className="w-3 h-3 text-primary" />
+              <span>
+                Claude Opus · generiert am{' '}
+                {new Date(result.generatedAt).toLocaleString('de-DE', {
+                  day: '2-digit',
+                  month: '2-digit',
+                  year: 'numeric',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                })}
+              </span>
+            </div>
+            <span className="px-2 py-0.5 rounded-full bg-background/60 border border-border font-medium">
+              {result.gameFilter === 'deadlock' ? '🎮 Deadlock' : '🌐 Alle Spiele'}
             </span>
           </div>
 

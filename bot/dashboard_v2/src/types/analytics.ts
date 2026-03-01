@@ -1117,6 +1117,7 @@ export interface AIAnalysisResult {
   id?: number | null;
   streamer: string;
   days: number;
+  gameFilter?: 'deadlock' | 'all';
   generatedAt: string;
   points: AIAnalysisPoint[];
   dataSnapshot: {

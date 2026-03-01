@@ -149,11 +149,15 @@ class _AnalyticsAIMixin:
         except (ValueError, TypeError):
             days = 30
 
+        game_filter = request.query.get("game_filter", "all").strip().lower()
+        if game_filter not in ("deadlock", "all"):
+            game_filter = "all"
+
         since = (datetime.now(UTC) - timedelta(days=days)).isoformat()
 
         # Step 1: collect analytics context from DB
         try:
-            ctx = self._collect_ai_context(streamer, days, since)
+            ctx = self._collect_ai_context(streamer, days, since, game_filter)
         except Exception as exc:
             log.exception("Error collecting AI context for %s", streamer)
             return web.json_response(
@@ -162,7 +166,7 @@ class _AnalyticsAIMixin:
 
         # Step 2: call Claude Opus
         try:
-            points = await self._call_claude_opus(streamer, days, ctx)
+            points = await self._call_claude_opus(streamer, days, ctx, game_filter)
         except RuntimeError as exc:
             return web.json_response({"error": str(exc)[:300]}, status=503)
         except Exception as exc:
@@ -209,6 +213,7 @@ class _AnalyticsAIMixin:
                 "id": record_id,
                 "streamer": streamer,
                 "days": days,
+                "gameFilter": game_filter,
                 "generatedAt": generated_at.isoformat(),
                 "points": points,
                 "dataSnapshot": ctx.get("summary", {}),
@@ -220,12 +225,17 @@ class _AnalyticsAIMixin:
                 status=500,
             )
 
-    def _collect_ai_context(self, streamer: str, days: int, since: str) -> dict:
+    def _collect_ai_context(
+        self, streamer: str, days: int, since: str, game_filter: str = "all"
+    ) -> dict:
         """Collect comprehensive analytics data for Opus context."""
+        # SQL-Fragment das auf alle Haupt-Queries angewendet wird
+        gf_sql = "AND had_deadlock_in_session = true" if game_filter == "deadlock" else ""
+
         with storage.get_conn() as conn:
             # 1. Overview KPIs
             ov = conn.execute(
-                """
+                f"""
                 SELECT
                     COUNT(*) AS stream_count,
                     ROUND((SUM(duration_seconds) / 3600.0)::numeric, 1) AS total_hours,
@@ -241,13 +251,14 @@ class _AnalyticsAIMixin:
                 WHERE LOWER(streamer_login) = %s
                   AND started_at >= %s
                   AND ended_at IS NOT NULL
+                  {gf_sql}
                 """,
                 (streamer, since),
             ).fetchone()
 
             # 2. Recent sessions (last 20, newest first)
             sessions_rows = conn.execute(
-                """
+                f"""
                 SELECT
                     started_at::date,
                     stream_title,
@@ -262,6 +273,7 @@ class _AnalyticsAIMixin:
                 WHERE LOWER(streamer_login) = %s
                   AND started_at >= %s
                   AND ended_at IS NOT NULL
+                  {gf_sql}
                 ORDER BY started_at DESC
                 LIMIT 20
                 """,
@@ -270,7 +282,7 @@ class _AnalyticsAIMixin:
 
             # 3. Weekday performance (sorted by avg viewers)
             weekday_rows = conn.execute(
-                """
+                f"""
                 SELECT
                     EXTRACT(DOW FROM started_at)::int AS dow,
                     COUNT(*) AS streams,
@@ -280,6 +292,7 @@ class _AnalyticsAIMixin:
                 WHERE LOWER(streamer_login) = %s
                   AND started_at >= %s
                   AND ended_at IS NOT NULL
+                  {gf_sql}
                 GROUP BY dow
                 ORDER BY AVG(avg_viewers) DESC
                 """,
@@ -288,7 +301,7 @@ class _AnalyticsAIMixin:
 
             # 4. Best 5 sessions by avg viewers
             best_rows = conn.execute(
-                """
+                f"""
                 SELECT
                     COALESCE(stream_title, ''), avg_viewers, peak_viewers,
                     ROUND((retention_10m * 100)::numeric, 1), started_at::date
@@ -296,6 +309,7 @@ class _AnalyticsAIMixin:
                 WHERE LOWER(streamer_login) = %s
                   AND started_at >= %s
                   AND ended_at IS NOT NULL
+                  {gf_sql}
                 ORDER BY avg_viewers DESC NULLS LAST
                 LIMIT 5
                 """,
@@ -304,7 +318,7 @@ class _AnalyticsAIMixin:
 
             # 5. Worst 5 sessions by avg viewers
             worst_rows = conn.execute(
-                """
+                f"""
                 SELECT
                     COALESCE(stream_title, ''), avg_viewers, peak_viewers,
                     ROUND((retention_10m * 100)::numeric, 1), started_at::date
@@ -312,6 +326,7 @@ class _AnalyticsAIMixin:
                 WHERE LOWER(streamer_login) = %s
                   AND started_at >= %s
                   AND ended_at IS NOT NULL
+                  {gf_sql}
                 ORDER BY avg_viewers ASC NULLS LAST
                 LIMIT 5
                 """,
@@ -322,7 +337,7 @@ class _AnalyticsAIMixin:
             game_rows = []
             try:
                 game_rows = conn.execute(
-                    """
+                    f"""
                     SELECT
                         COALESCE(game_name, 'Unbekannt') AS game,
                         COUNT(*) AS sessions,
@@ -333,6 +348,7 @@ class _AnalyticsAIMixin:
                     WHERE LOWER(streamer) = %s
                       AND started_at >= %s
                       AND ended_at IS NOT NULL
+                      {"AND LOWER(game_name) = 'deadlock'" if game_filter == "deadlock" else ""}
                     GROUP BY game_name
                     ORDER BY AVG(avg_viewers) DESC
                     LIMIT 10
@@ -344,7 +360,7 @@ class _AnalyticsAIMixin:
 
             # 7. Weekly follower trend
             trend_rows = conn.execute(
-                """
+                f"""
                 SELECT
                     DATE_TRUNC('week', started_at)::date AS week_start,
                     COUNT(*) AS streams,
@@ -353,8 +369,54 @@ class _AnalyticsAIMixin:
                 WHERE LOWER(streamer_login) = %s
                   AND started_at >= %s
                   AND ended_at IS NOT NULL
+                  {gf_sql}
                 GROUP BY week_start
                 ORDER BY week_start
+                """,
+                (streamer, since),
+            ).fetchall()
+
+            # 8. Deadlock-spezifische KPIs (zum Vergleich mit All-Games-Übersicht)
+            deadlock_ov = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS session_count,
+                    ROUND((SUM(duration_seconds) / 3600.0)::numeric, 1) AS total_hours,
+                    ROUND(AVG(avg_viewers)::numeric, 1) AS avg_viewers,
+                    MAX(peak_viewers) AS peak_viewers,
+                    COALESCE(SUM(
+                        CASE WHEN follower_delta > 0 THEN follower_delta ELSE 0 END
+                    ), 0) AS followers_gained
+                FROM twitch_stream_sessions
+                WHERE LOWER(streamer_login) = %s
+                  AND started_at >= %s
+                  AND ended_at IS NOT NULL
+                  AND had_deadlock_in_session = true
+                """,
+                (streamer, since),
+            ).fetchone()
+
+            # 9. Per-Game Breakdown aus sessions (alle gespielten Kategorien)
+            game_session_rows = conn.execute(
+                """
+                SELECT
+                    COALESCE(game_name, 'Unbekannt') AS game,
+                    COUNT(*) AS sessions,
+                    ROUND(AVG(avg_viewers)::numeric, 1) AS avg_viewers,
+                    MAX(peak_viewers) AS peak_viewers,
+                    ROUND((SUM(duration_seconds) / 3600.0)::numeric, 1) AS total_hours,
+                    COALESCE(SUM(
+                        CASE WHEN follower_delta > 0 THEN follower_delta ELSE 0 END
+                    ), 0) AS followers_gained,
+                    SUM(samples) AS total_samples,
+                    MAX(started_at)::date AS last_played
+                FROM twitch_stream_sessions
+                WHERE LOWER(streamer_login) = %s
+                  AND started_at >= %s
+                  AND ended_at IS NOT NULL
+                GROUP BY game_name
+                ORDER BY COUNT(*) DESC, AVG(avg_viewers) DESC NULLS LAST
+                LIMIT 15
                 """,
                 (streamer, since),
             ).fetchall()
@@ -434,21 +496,63 @@ class _AnalyticsAIMixin:
                 }
                 for t in trend_rows
             ],
+            "deadlockSummary": {
+                "sessionCount": int(_s(deadlock_ov[0])),
+                "totalHours": float(_s(deadlock_ov[1])),
+                "avgViewers": float(_s(deadlock_ov[2])),
+                "peakViewers": int(_s(deadlock_ov[3])),
+                "followersGained": int(_s(deadlock_ov[4])),
+            },
+            "gameBreakdown": [
+                {
+                    "game": str(g[0]),
+                    "sessions": int(g[1]),
+                    "avgViewers": float(_s(g[2])),
+                    "peakViewers": int(_s(g[3])),
+                    "totalHours": float(_s(g[4])),
+                    "followersGained": int(_s(g[5])),
+                    "totalSamples": int(_s(g[6])),
+                    # hasFullData=False bedeutet: Sessions ohne Viewer-Sampling –
+                    # avg_viewers/peak nur Initialwert, nicht aussagekräftig
+                    "hasFullData": int(_s(g[6])) > 2,
+                    "lastPlayed": str(g[7]),
+                }
+                for g in game_session_rows
+            ],
         }
 
     async def _call_claude_opus(
-        self, streamer: str, days: int, ctx: dict
+        self, streamer: str, days: int, ctx: dict, game_filter: str = "all"
     ) -> list[dict]:
         """Send analytics context to Claude Opus, return structured 10-point analysis."""
         s = ctx["summary"]
+        mode_label = "Nur Deadlock-Sessions" if game_filter == "deadlock" else "Alle gespielten Kategorien"
 
         game_section = ctx.get("gamePerformance", [])
         if not game_section:
             game_section = [{"note": "Keine Kategorie-Daten vorhanden (exp_sessions leer)"}]
 
+        game_breakdown = ctx.get("gameBreakdown", [])
+        deadlock_summary = ctx.get("deadlockSummary", {})
+
+        dl = deadlock_summary
+        multi_game_lines = [
+            f"Deadlock (gesamt): {dl.get('sessionCount', 0)} Sessions | "
+            f"{dl.get('totalHours', 0)}h | Ø {dl.get('avgViewers', 0)} Viewer | "
+            f"Peak {dl.get('peakViewers', 0)} | +{dl.get('followersGained', 0)} Follower",
+        ]
+        for g in game_breakdown:
+            quality = "" if g["hasFullData"] else " (Viewer-Daten unvollständig)"
+            multi_game_lines.append(
+                f"  {g['game']}: {g['sessions']} Sessions | {g['totalHours']}h | "
+                f"Ø {g['avgViewers']} Viewer | Peak {g['peakViewers']} | "
+                f"+{g['followersGained']} Follower | zuletzt {g['lastPlayed']}{quality}"
+            )
+        multi_game_section = "\n".join(multi_game_lines) if multi_game_lines else "Keine Daten"
+
         prompt = f"""Du bist ein Experte für Twitch-Streaming-Analytik und Wachstumsstrategie.
 
-Analysiere die Streaming-Daten des Kanals **{streamer}** (letzte {days} Tage) und erstelle einen TIEFEN, DATEN-BASIERTEN 10-Punkte-Verbesserungsplan.
+Analysiere die Streaming-Daten des Kanals **{streamer}** (letzte {days} Tage, Modus: {mode_label}) und erstelle einen TIEFEN, DATEN-BASIERTEN 10-Punkte-Verbesserungsplan.
 
 REGELN:
 - Referenziere IMMER konkrete Zahlen aus den Daten
@@ -479,6 +583,9 @@ Follower gewonnen: +{s['followersGained']}
 === KATEGORIEN-PERFORMANCE ===
 {json.dumps(game_section, ensure_ascii=False)}
 
+=== ALLE GESTREAMTEN SPIELE (inkl. Nicht-Deadlock) ===
+{multi_game_section}
+
 === WÖCHENTLICHER FOLLOWER-TREND ===
 {json.dumps(ctx.get('weeklyTrend', []), ensure_ascii=False)}
 
@@ -497,7 +604,11 @@ Antworte NUR als JSON Array mit exakt 10 Objekten. Kein Markdown, kein Text auß
 ]
 
 Gültige priority-Werte: "kritisch", "hoch", "mittel"
-Punkte 1-3: kritisch | Punkte 4-7: hoch | Punkte 8-10: mittel"""
+Punkte 1-3: kritisch | Punkte 4-7: hoch | Punkte 8-10: mittel
+
+DATENHINWEIS: Spiele mit "(Viewer-Daten unvollständig)" haben kein Viewer-Sampling –
+avg_viewers/peak dort sind Initialwerte bei Stream-Start, nicht repräsentativ.
+Vollständige Viewer-Metriken nur für Einträge ohne diesen Hinweis verwenden."""
 
         client = _get_async_client()
         msg = await client.messages.create(
@@ -505,6 +616,7 @@ Punkte 1-3: kritisch | Punkte 4-7: hoch | Punkte 8-10: mittel"""
             max_tokens=20000,
             messages=[{"role": "user", "content": prompt}],
         )
+
 
         raw = (msg.content[0].text or "").strip()
 

@@ -889,11 +889,9 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
         except Exception:
             log.exception("Konnte tracked-Stats nicht loggen")
 
-        # 2) Session samples (light-weight, keep separate to avoid losing data)
+        # 2) Session samples – alle Spiele erfassen, nicht nur Deadlock
         try:
             for stream in streams_by_login.values():
-                if not self._stream_is_in_target_category(stream):
-                    continue
                 login = (stream.get("user_login") or "").lower()
                 self._record_session_sample(login=login, stream=stream)
         except Exception:
