@@ -179,7 +179,10 @@ class RaidBot:
         grace_period_check_interval = 3600.0  # stündlich
 
         last_state_cleanup = 0.0
-        last_token_refresh = 0.0
+        # Startup-Delay: erster Token-Refresh erst nach 5 Minuten (nicht sofort nach 60s).
+        # Verhindert Race-Condition wenn ein alter Prozess noch kurz weiterläuft,
+        # bevor der PID-Lock greift.
+        last_token_refresh = time.time() - token_refresh_interval + 300.0
         last_blacklist_cleanup = 0.0
         last_raid_cleanup = 0.0
         last_grace_period_check = 0.0

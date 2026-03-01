@@ -513,10 +513,13 @@ class RaidAuthManager:
 
             async with self._lock:
                 try:
-                    # Double-Check im Lock, falls parallel ein Raid lief und refresht hat
+                    # Double-Check im Lock: Expiry UND Refresh-Token neu lesen.
+                    # Wenn ein anderer Prozess den Token bereits refresht hat, ist
+                    # refresh_token_enc in der DB anders als unser pre-lock refresh_tok.
                     with get_conn() as conn:
                         current = conn.execute(
-                            "SELECT token_expires_at FROM twitch_raid_auth WHERE twitch_user_id = ?",
+                            """SELECT token_expires_at, refresh_token_enc, enc_version
+                               FROM twitch_raid_auth WHERE twitch_user_id = ?""",
                             (user_id,),
                         ).fetchone()
 
@@ -529,9 +532,25 @@ class RaidAuthManager:
                             )
                             continue
                         curr_ts = _parse_expiry_ts(curr_iso)
-                        # Bug Fix: time.time() statt veraltetes now_ts verwenden
                         if time.time() < curr_ts - 7200:
-                            continue  # Wurde bereits refresht
+                            continue  # Wurde bereits refresht (Expiry weit genug in der Zukunft)
+
+                        # Refresh-Token geändert? → anderer Prozess hat bereits refresht.
+                        # Frischesten Token aus DB verwenden, nicht den pre-lock-read.
+                        _curr_enc_v = current["enc_version"] or 1
+                        curr_refresh_tok = self._resolve_token(
+                            current["refresh_token_enc"],
+                            f"twitch_raid_auth|refresh_token|{user_id}|{_curr_enc_v}",
+                            "refresh_token.dc2",
+                            str(user_id),
+                        )
+                        if curr_refresh_tok and curr_refresh_tok != refresh_tok:
+                            log.info(
+                                "Refresh token changed for broadcaster=%s since pre-lock read "
+                                "(another process refreshed). Using updated token.",
+                                _mask_log_identifier(login),
+                            )
+                            refresh_tok = curr_refresh_tok
                 except Exception as exc:
                     # Bug Fix: Bei Exception im Double-Check SKIP statt Fallthrough zum Refresh
                     log.warning(
