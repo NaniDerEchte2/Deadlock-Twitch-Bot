@@ -16,6 +16,7 @@ from .dashboard.mixin import TwitchDashboardMixin
 from .monitoring.monitoring import TwitchMonitoringMixin
 from .raid.commands import RaidCommandsMixin
 from .raid.mixin import TwitchRaidMixin
+from .reload_mixin import TwitchReloadMixin
 
 __all__ = [
     "TwitchStreamCog",
@@ -34,6 +35,7 @@ class TwitchStreamCog(
     TwitchLeaderboardMixin,
     TwitchAdminMixin,
     TwitchMonitoringMixin,
+    TwitchReloadMixin,
     TwitchBaseCog,
 ):
     """Monitor Twitch-Streamer (Deadlock), poste Go-Live, sammle Stats, Dashboard, Auto-Raids."""

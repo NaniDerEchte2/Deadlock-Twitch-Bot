@@ -45,6 +45,7 @@ from .core.constants import (
     log,
 )
 from .raid.manager import RaidBot
+from .reload_manager import LoopSpec, SubsystemDef, TwitchReloadManager
 
 
 def _parse_env_bool(name: str, default: bool) -> bool:
@@ -297,6 +298,100 @@ class TwitchBaseCog(commands.Cog):
             log.info(
                 "Social Media Clip Management initialized (ClipManager + ClipFetcher + UploadWorker)"
             )
+
+        # Subsystem hot-reload manager
+        self._reload_manager = TwitchReloadManager(self)
+        self._reload_manager.register(SubsystemDef(
+            name="analytics",
+            display_name="Analytics",
+            modules=["bot.analytics.mixin"],
+            loops=[
+                LoopSpec("collect_analytics_data"),
+                LoopSpec("collect_chatters_data"),
+                LoopSpec("compute_raid_retention"),
+            ],
+            hot_reloadable=True,
+        ))
+        self._reload_manager.register(SubsystemDef(
+            name="community",
+            display_name="Community",
+            modules=["bot.community.admin", "bot.community.leaderboard", "bot.community.partner_recruit"],
+            loops=[],
+            hot_reloadable=True,
+        ))
+        self._reload_manager.register(SubsystemDef(
+            name="social",
+            display_name="Social Media",
+            modules=["bot.social_media.clip_fetcher", "bot.social_media.clip_manager", "bot.social_media.upload_worker"],
+            loops=[],
+            hot_reloadable=True,
+            teardown_hook="_reload_social_teardown",
+            startup_hook="_reload_social_startup",
+        ))
+        self._reload_manager.register(SubsystemDef(
+            name="monitoring",
+            display_name="Monitoring",
+            modules=["bot.monitoring.monitoring", "bot.monitoring.eventsub_mixin", "bot.monitoring.sessions_mixin", "bot.monitoring.embeds_mixin"],
+            loops=[
+                LoopSpec("poll_streams"),
+                LoopSpec("invites_refresh"),
+            ],
+            hot_reloadable=False,
+        ))
+        self._reload_manager.register(SubsystemDef(
+            name="chat",
+            display_name="Chat Bot",
+            modules=["bot.chat.bot", "bot.chat.commands", "bot.chat.connection"],
+            loops=[],
+            hot_reloadable=False,
+        ))
+        self._reload_manager.register(SubsystemDef(
+            name="dashboard",
+            display_name="Dashboard",
+            modules=["bot.dashboard.mixin", "bot.dashboard.server_v2", "bot.dashboard.routes_mixin"],
+            loops=[],
+            hot_reloadable=False,
+        ))
+        self._reload_manager.register(SubsystemDef(
+            name="raid",
+            display_name="Raid",
+            modules=["bot.raid.mixin", "bot.raid.manager", "bot.raid.commands", "bot.raid.auth"],
+            loops=[],
+            hot_reloadable=False,
+        ))
+        log.debug("Subsystem reload manager ready (%d subsystems)", len(self._reload_manager.get_all_names()))
+
+    async def _reload_social_teardown(self) -> None:
+        """Stop ClipFetcher and UploadWorker before hot-reloading social modules."""
+        if self.clip_fetcher:
+            try:
+                self.clip_fetcher.cog_unload()
+                self.clip_fetcher = None
+            except Exception:
+                log.exception("_reload_social_teardown: ClipFetcher stop failed")
+        if self.upload_worker:
+            try:
+                self.upload_worker.cog_unload()
+                self.upload_worker = None
+            except Exception:
+                log.exception("_reload_social_teardown: UploadWorker stop failed")
+
+    async def _reload_social_startup(self) -> None:
+        """Re-create ClipFetcher and UploadWorker after hot-reloading social modules."""
+        if not self.api:
+            log.warning("_reload_social_startup: no Twitch API — skipping social workers")
+            return
+        try:
+            from .social_media.clip_fetcher import ClipFetcher
+            from .social_media.clip_manager import ClipManager
+            from .social_media.upload_worker import UploadWorker
+
+            self.clip_manager = ClipManager(twitch_api=self.api)
+            self.clip_fetcher = ClipFetcher(self.bot, self.api, self.clip_manager)
+            self.upload_worker = UploadWorker(self.bot, self.clip_manager)
+            log.info("_reload_social_startup: social workers restarted")
+        except Exception:
+            log.exception("_reload_social_startup: failed to restart social workers")
 
     async def _scout_deadlock_channels(self):
         """Periodically scout for live German Deadlock streams and join them.
