@@ -1101,3 +1101,31 @@ export interface ExpGrowthCurve {
   avgViewers: number;
   sampleCount: number;
 }
+
+// ========= KI Analyse (AI Analysis) =========
+
+export interface AIAnalysisPoint {
+  number: number;
+  priority: 'kritisch' | 'hoch' | 'mittel';
+  title: string;
+  analysis: string;
+  action: string;
+  expectedImpact: string;
+}
+
+export interface AIAnalysisResult {
+  streamer: string;
+  days: number;
+  generatedAt: string;
+  points: AIAnalysisPoint[];
+  dataSnapshot: {
+    streamCount: number;
+    totalHours: number;
+    avgViewers: number;
+    peakViewers: number;
+    followersGained: number;
+    avgRetention10m: number;
+    avgDropoffPct: number;
+    avgChatters: number;
+  };
+}

@@ -40,6 +40,7 @@ import type {
   ExpGameBreakdown,
   ExpGameTransition,
   ExpGrowthCurve,
+  AIAnalysisResult,
 } from '@/types/analytics';
 
 const API_BASE = '/twitch/api/v2';
@@ -568,4 +569,13 @@ export async function fetchExpGrowthCurves(
   days: number
 ): Promise<ExpGrowthCurve[]> {
   return fetchApi<ExpGrowthCurve[]>("/exp/growth-curves", { streamer, days });
+}
+
+// ========= KI Analyse (AI Analysis) =========
+
+export async function fetchAIAnalysis(
+  streamer: string,
+  days: number
+): Promise<AIAnalysisResult> {
+  return fetchApi<AIAnalysisResult>('/ai/analysis', { streamer, days });
 }

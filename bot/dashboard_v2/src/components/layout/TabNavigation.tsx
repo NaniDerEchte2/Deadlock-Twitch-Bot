@@ -12,6 +12,7 @@ import {
   Globe,
   UserSearch,
   FlaskConical,
+  Brain,
 } from 'lucide-react';
 
 export type TabId =
@@ -26,7 +27,8 @@ export type TabId =
   | 'coaching'
   | 'monetization'
   | 'category'
-  | 'experimental';
+  | 'experimental'
+  | 'ai';
 
 interface Tab {
   id: TabId;
@@ -48,6 +50,7 @@ const tabs: Tab[] = [
   { id: 'monetization', label: 'Monetization', icon: DollarSign },
   { id: 'category', label: 'Kategorie', icon: Globe },
   { id: 'experimental', label: 'Labor', icon: FlaskConical, beta: true },
+  { id: 'ai', label: 'KI Analyse', icon: Brain, beta: true },
 ];
 
 interface TabNavigationProps {

@@ -12,6 +12,7 @@ from urllib.parse import urlencode, urlsplit
 from aiohttp import web
 
 from ..core.chat_bots import build_known_chat_bot_not_in_clause
+from .api_ai import _AnalyticsAIMixin
 from .api_audience import _AnalyticsAudienceMixin
 from .api_experimental import _AnalyticsExperimentalMixin
 from .api_insights import _AnalyticsInsightsMixin
@@ -82,6 +83,7 @@ class AnalyticsV2Mixin(
     _AnalyticsViewersMixin,
     _AnalyticsChatDeepMixin,
     _AnalyticsExperimentalMixin,
+    _AnalyticsAIMixin,
 ):
     """Mixin providing v2 analytics API endpoints for the dashboard."""
 
