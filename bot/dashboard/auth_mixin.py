@@ -12,6 +12,7 @@ from aiohttp import web
 
 from .. import storage
 from ..core.constants import log
+from ..storage import sessions_db
 
 TWITCH_OAUTH_AUTHORIZE_URL = "https://id.twitch.tv/oauth2/authorize"
 TWITCH_OAUTH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"  # noqa: S105
@@ -203,6 +204,12 @@ class _DashboardAuthMixin:
         for sid in expired_sessions:
             self._auth_sessions.pop(sid, None)
 
+        if expired_sessions:
+            try:
+                sessions_db.delete_expired_sessions(now)
+            except Exception as _exc:
+                log.debug("Could not purge expired dashboard sessions from DB: %s", _exc)
+
         # Hard cap to prevent unbounded growth under heavy abuse
         _MAX_STATES = 500
         if len(self._oauth_states) > _MAX_STATES:
@@ -223,6 +230,15 @@ class _DashboardAuthMixin:
                 self._auth_sessions.pop(k, None)
 
     def _get_dashboard_auth_session(self, request: web.Request) -> dict[str, Any] | None:
+        if not self._sessions_db_loaded:
+            self._sessions_db_loaded = True
+            try:
+                for sid, data in sessions_db.load_valid_sessions("twitch", time.time()):
+                    if sid not in self._auth_sessions:
+                        self._auth_sessions[sid] = data
+            except Exception as _exc:
+                log.debug("Could not load dashboard sessions from DB: %s", _exc)
+
         self._cleanup_auth_state()
         session_id = (request.cookies.get(self._session_cookie_name) or "").strip()
         if not session_id:
@@ -235,9 +251,22 @@ class _DashboardAuthMixin:
         expires_at = float(session.get("expires_at", 0.0))
         if expires_at <= now:
             self._auth_sessions.pop(session_id, None)
+            try:
+                sessions_db.delete_session(session_id)
+            except Exception as _exc:
+                log.debug("Could not delete expired session from DB: %s", _exc)
             return None
 
+        old_expires = expires_at
         session["expires_at"] = now + self._session_ttl_seconds
+        if session["expires_at"] - old_expires > 1800:
+            try:
+                sessions_db.upsert_session(
+                    session_id, "twitch", session,
+                    float(session.get("created_at", now)), session["expires_at"],
+                )
+            except Exception as _exc:
+                log.debug("Could not refresh dashboard session in DB: %s", _exc)
         return session
 
     def _set_session_cookie(
@@ -268,7 +297,7 @@ class _DashboardAuthMixin:
         self._cleanup_auth_state()
         session_id = secrets.token_urlsafe(32)
         now = time.time()
-        self._auth_sessions[session_id] = {
+        session_data = {
             "twitch_login": twitch_login,
             "twitch_user_id": twitch_user_id,
             "display_name": display_name or twitch_login,
@@ -276,6 +305,13 @@ class _DashboardAuthMixin:
             "created_at": now,
             "expires_at": now + self._session_ttl_seconds,
         }
+        self._auth_sessions[session_id] = session_data
+        try:
+            sessions_db.upsert_session(
+                session_id, "twitch", session_data, now, now + self._session_ttl_seconds
+            )
+        except Exception as _exc:
+            log.debug("Could not persist dashboard session to DB: %s", _exc)
         return session_id
 
     def _is_partner_allowed(
@@ -437,6 +473,16 @@ class _DashboardAuthMixin:
     def _get_discord_admin_session(self, request: web.Request) -> dict[str, Any] | None:
         if not self._discord_admin_required:
             return None
+
+        if not self._discord_sessions_db_loaded:
+            self._discord_sessions_db_loaded = True
+            try:
+                for sid, data in sessions_db.load_valid_sessions("discord_admin", time.time()):
+                    if sid not in self._discord_admin_sessions:
+                        self._discord_admin_sessions[sid] = data
+            except Exception as _exc:
+                log.debug("Could not load discord admin sessions from DB: %s", _exc)
+
         self._cleanup_discord_admin_state()
         session_id = (request.cookies.get(self._discord_admin_cookie_name) or "").strip()
         if not session_id:
@@ -447,10 +493,24 @@ class _DashboardAuthMixin:
         now = time.time()
         if float(session.get("expires_at", 0.0)) <= now:
             self._discord_admin_sessions.pop(session_id, None)
+            try:
+                sessions_db.delete_session(session_id)
+            except Exception as _exc:
+                log.debug("Could not delete expired discord session from DB: %s", _exc)
             return None
+
+        old_expires = float(session.get("expires_at", 0.0))
         session["expires_at"] = now + self._discord_admin_session_ttl
         session["last_seen_at"] = now
         session.setdefault("auth_type", "discord_admin")
+        if session["expires_at"] - old_expires > 1800:
+            try:
+                sessions_db.upsert_session(
+                    session_id, "discord_admin", session,
+                    float(session.get("created_at", now)), session["expires_at"],
+                )
+            except Exception as _exc:
+                log.debug("Could not refresh discord admin session in DB: %s", _exc)
         return session
 
     def _is_discord_admin_request(self, request: web.Request) -> bool:
@@ -791,7 +851,7 @@ class _DashboardAuthMixin:
 
         now = time.time()
         session_id = secrets.token_urlsafe(32)
-        self._discord_admin_sessions[session_id] = {
+        discord_session_data = {
             "auth_type": "discord_admin",
             "user_id": user_id,
             "username": username,
@@ -801,6 +861,14 @@ class _DashboardAuthMixin:
             "last_seen_at": now,
             "expires_at": now + self._discord_admin_session_ttl,
         }
+        self._discord_admin_sessions[session_id] = discord_session_data
+        try:
+            sessions_db.upsert_session(
+                session_id, "discord_admin", discord_session_data,
+                now, now + self._discord_admin_session_ttl,
+            )
+        except Exception as _exc:
+            log.debug("Could not persist discord admin session to DB: %s", _exc)
 
         log.info(
             "AUDIT twitch-dashboard discord login success: user=%s reason=%s peer=%s",
@@ -818,6 +886,10 @@ class _DashboardAuthMixin:
         session_id = (request.cookies.get(self._discord_admin_cookie_name) or "").strip()
         if session_id:
             self._discord_admin_sessions.pop(session_id, None)
+            try:
+                sessions_db.delete_session(session_id)
+            except Exception as _exc:
+                log.debug("Could not delete discord admin session from DB: %s", _exc)
         login_url = (
             TWITCH_ADMIN_DISCORD_LOGIN_URL if self._discord_admin_required else "/twitch/dashboards"
         )

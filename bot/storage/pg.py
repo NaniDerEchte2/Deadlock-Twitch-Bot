@@ -1638,3 +1638,4 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_streamer_plans_login ON streamer_plans(twitch_login)"
     )
+

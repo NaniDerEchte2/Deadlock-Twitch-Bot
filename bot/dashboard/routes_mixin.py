@@ -2133,6 +2133,11 @@ class _DashboardRoutesMixin:
                 self._sanitize_log_value(twitch_login),
                 self._sanitize_log_value(self._peer_host(request)),
             )
+            try:
+                from ..storage import sessions_db
+                sessions_db.delete_session(session_id)
+            except Exception as _exc:
+                log.debug("Could not delete dashboard session from DB: %s", _exc)
 
         response = web.HTTPFound(TWITCH_DASHBOARD_V2_LOGIN_URL)
         self._clear_session_cookie(response, request)

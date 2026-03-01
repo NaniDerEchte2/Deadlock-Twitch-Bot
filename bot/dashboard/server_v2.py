@@ -122,6 +122,7 @@ class DashboardV2Server(
         self._session_cookie_name = "twitch_dash_session"
         self._oauth_states: dict[str, dict[str, Any]] = {}
         self._auth_sessions: dict[str, dict[str, Any]] = {}
+        self._sessions_db_loaded: bool = False
         self._oauth_state_ttl_seconds = 600
         self._rate_limits: dict[str, list[float]] = {}
         self._add = add_cb if callable(add_cb) else self._empty_add
@@ -174,6 +175,7 @@ class DashboardV2Server(
         self._discord_admin_state_ttl = 600
         self._discord_admin_oauth_states: dict[str, dict[str, Any]] = {}
         self._discord_admin_sessions: dict[str, dict[str, Any]] = {}
+        self._discord_sessions_db_loaded: bool = False
         self._discord_admin_required = self._discord_admin_enabled and bool(
             self._discord_admin_client_id
             and self._discord_admin_client_secret
