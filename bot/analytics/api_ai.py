@@ -94,6 +94,17 @@ class _AnalyticsAIMixin:
 
     async def _api_v2_ai_analysis(self, request: web.Request) -> web.Response:
         """Deep stream analytics analysis via Claude Opus (admin only)."""
+        try:
+            return await self._api_v2_ai_analysis_inner(request)
+        except Exception as exc:
+            log.exception("Unhandled exception in _api_v2_ai_analysis")
+            return web.Response(
+                body=json.dumps({"error": f"Interner Fehler: {type(exc).__name__}: {str(exc)[:300]}"}),
+                content_type="application/json",
+                status=500,
+            )
+
+    async def _api_v2_ai_analysis_inner(self, request: web.Request) -> web.Response:
         err = self._require_v2_admin_api(request)
         if err is not None:
             return err
@@ -115,18 +126,24 @@ class _AnalyticsAIMixin:
         except Exception as exc:
             log.exception("Error collecting AI context for %s", streamer)
             return web.json_response(
-                {"error": f"Datensammlung fehlgeschlagen: {exc}"}, status=500
+                {"error": f"Datensammlung fehlgeschlagen: {str(exc)[:300]}"}, status=500
             )
 
         # Step 2: call Claude Opus
         try:
             points = await self._call_claude_opus(streamer, days, ctx)
         except RuntimeError as exc:
-            return web.json_response({"error": str(exc)}, status=503)
+            return web.json_response({"error": str(exc)[:300]}, status=503)
         except Exception as exc:
             log.exception("Error calling Claude Opus for %s", streamer)
+            err_str = str(exc)
+            if "credit balance is too low" in err_str:
+                return web.json_response(
+                    {"error": "Kein Guthaben auf dem Anthropic-Konto. Bitte auf console.anthropic.com/billing Credits kaufen."},
+                    status=503,
+                )
             return web.json_response(
-                {"error": f"KI-Analyse fehlgeschlagen: {exc}"}, status=500
+                {"error": f"KI-Analyse fehlgeschlagen: {err_str[:400]}"}, status=500
             )
 
         generated_at = datetime.now(UTC)
@@ -155,14 +172,25 @@ class _AnalyticsAIMixin:
         except Exception:
             log.warning("Failed to persist AI analysis to DB", exc_info=True)
 
-        return web.json_response({
-            "id": record_id,
-            "streamer": streamer,
-            "days": days,
-            "generatedAt": generated_at.isoformat(),
-            "points": points,
-            "dataSnapshot": ctx.get("summary", {}),
-        })
+        # Build response body explicitly to catch any serialization error
+        try:
+            body = json.dumps({
+                "id": record_id,
+                "streamer": streamer,
+                "days": days,
+                "generatedAt": generated_at.isoformat(),
+                "points": points,
+                "dataSnapshot": ctx.get("summary", {}),
+            })
+        except Exception as exc:
+            log.exception("JSON serialization error in _api_v2_ai_analysis")
+            return web.Response(
+                body=json.dumps({"error": f"Serialisierungsfehler: {type(exc).__name__}: {str(exc)[:200]}"}),
+                content_type="application/json",
+                status=500,
+            )
+
+        return web.Response(body=body, content_type="application/json")
 
     def _collect_ai_context(self, streamer: str, days: int, since: str) -> dict:
         """Collect comprehensive analytics data for Opus context."""
@@ -446,7 +474,7 @@ Punkte 1-3: kritisch | Punkte 4-7: hoch | Punkte 8-10: mittel"""
         client = _get_async_client()
         msg = await client.messages.create(
             model="claude-opus-4-6",
-            max_tokens=4096,
+            max_tokens=20000,
             messages=[{"role": "user", "content": prompt}],
         )
 
@@ -458,23 +486,47 @@ Punkte 1-3: kritisch | Punkte 4-7: hoch | Punkte 8-10: mittel"""
             lines = [ln for ln in lines if not ln.strip().startswith("```")]
             raw = "\n".join(lines).strip()
 
+        # Try direct parse first
         try:
             points = json.loads(raw)
             if isinstance(points, list):
                 return points
         except json.JSONDecodeError:
-            log.warning("Claude returned non-JSON response (first 300 chars): %s", raw[:300])
-            return [
-                {
-                    "number": 1,
-                    "priority": "hoch",
-                    "title": "Rohe Analyse",
-                    "analysis": raw,
-                    "action": "",
-                    "expectedImpact": "",
-                }
-            ]
+            pass
 
+        # Fallback: extract the JSON array portion (handles trailing text or truncation)
+        bracket_start = raw.find("[")
+        bracket_end = raw.rfind("]")
+        if bracket_start != -1 and bracket_end > bracket_start:
+            try:
+                points = json.loads(raw[bracket_start : bracket_end + 1])
+                if isinstance(points, list):
+                    log.info("Extracted JSON array from Claude response (offset %d-%d)", bracket_start, bracket_end)
+                    return points
+            except json.JSONDecodeError:
+                pass
+
+        # Last resort: response was truncated — try to salvage complete items
+        # Find the last complete object ending with `}` before a trailing comma or EOF
+        if bracket_start != -1:
+            partial = raw[bracket_start:]
+            last_complete = partial.rfind("},")
+            if last_complete == -1:
+                last_complete = partial.rfind("}")
+            if last_complete != -1:
+                attempt = partial[: last_complete + 1] + "]"
+                try:
+                    points = json.loads(attempt)
+                    if isinstance(points, list) and points:
+                        log.warning(
+                            "Response was truncated; salvaged %d/%d points",
+                            len(points), 10,
+                        )
+                        return points
+                except json.JSONDecodeError:
+                    pass
+
+        log.warning("Claude returned unparseable response (first 300 chars): %s", raw[:300])
         return []
 
     # ------------------------------------------------------------------

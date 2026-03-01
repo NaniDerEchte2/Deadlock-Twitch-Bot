@@ -1,4 +1,4 @@
-import { useState, useEffect, Component, type ReactNode, type ErrorInfo } from 'react';
+import { useState, useEffect, useRef, Component, type ReactNode, type ErrorInfo } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Header } from '@/components/layout/Header';
 import { TabNavigation, type TabId } from '@/components/layout/TabNavigation';
@@ -84,18 +84,32 @@ function Dashboard() {
   const { data: streamers = [], isLoading: loadingStreamers } = useStreamerList();
   const { data: authStatus, isLoading: loadingAuth, isError: authError } = useAuthStatus();
 
+  // Tracks if we already auto-set the streamer from auth (fire-once guard)
+  const hasAutoSetStreamer = useRef(false);
+
   // Parse URL params on mount
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const urlStreamer = params.get('streamer');
     const urlDays = params.get('days');
 
-    if (urlStreamer) setStreamer(urlStreamer);
+    if (urlStreamer) {
+      setStreamer(urlStreamer);
+      hasAutoSetStreamer.current = true; // URL explicitly set — skip auto-set
+    }
     if (urlDays) {
       const d = parseInt(urlDays, 10);
       if (d === 7 || d === 30 || d === 90) setDays(d);
     }
   }, []);
+
+  // Auto-set streamer to logged-in Twitch user on first auth load
+  useEffect(() => {
+    if (!hasAutoSetStreamer.current && authStatus?.twitchLogin) {
+      setStreamer(authStatus.twitchLogin);
+      hasAutoSetStreamer.current = true;
+    }
+  }, [authStatus]);
 
   // Update URL when params change
   useEffect(() => {
