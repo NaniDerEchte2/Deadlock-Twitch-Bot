@@ -119,7 +119,15 @@ export function AIAnalysis({ streamer, days }: AIAnalysisProps) {
       setExpandedPoint(1);
       refetchHistory();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Analyse fehlgeschlagen');
+      const isAbort = e instanceof DOMException && e.name === 'AbortError';
+      setError(
+        isAbort
+          ? 'Analyse hat zu lange gedauert (>4 Min). Ergebnis eventuell im Verlauf verfügbar.'
+          : e instanceof Error
+          ? e.message
+          : 'Analyse fehlgeschlagen'
+      );
+      refetchHistory(); // backend may have saved result despite connection drop
     } finally {
       setIsLoading(false);
     }
@@ -201,7 +209,7 @@ export function AIAnalysis({ streamer, days }: AIAnalysisProps) {
           <div className="text-center">
             <p className="text-white font-semibold">Claude Opus analysiert...</p>
             <p className="text-text-secondary text-sm mt-1 max-w-xs">
-              Alle Stream-Daten werden ausgewertet. Das kann 15–30 Sekunden dauern.
+              Alle Stream-Daten werden ausgewertet. Das kann 1–3 Minuten dauern.
             </p>
           </div>
           <div className="flex gap-1.5 mt-2">

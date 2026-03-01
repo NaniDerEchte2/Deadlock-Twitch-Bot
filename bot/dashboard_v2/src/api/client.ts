@@ -81,12 +81,17 @@ function getBrowserTimezone(): string {
 }
 
 // Generic fetch wrapper
-async function fetchApi<T>(endpoint: string, params: Record<string, string | number | boolean> = {}): Promise<T> {
+async function fetchApi<T>(endpoint: string, params: Record<string, string | number | boolean> = {}, timeoutMs?: number): Promise<T> {
   const url = buildUrl(endpoint, params);
+
+  const abortCtrl = timeoutMs ? new AbortController() : null;
+  const timer = abortCtrl ? setTimeout(() => abortCtrl.abort(), timeoutMs!) : null;
+
   const response = await fetch(url, {
-    headers: {
-      'Accept': 'application/json',
-    },
+    headers: { 'Accept': 'application/json' },
+    signal: abortCtrl?.signal,
+  }).finally(() => {
+    if (timer) clearTimeout(timer);
   });
 
   if (response.status === 401) {
@@ -578,7 +583,7 @@ export async function fetchAIAnalysis(
   streamer: string,
   days: number
 ): Promise<AIAnalysisResult> {
-  return fetchApi<AIAnalysisResult>('/ai/analysis', { streamer, days });
+  return fetchApi<AIAnalysisResult>('/ai/analysis', { streamer, days }, 240_000); // 4-minute timeout for Claude Opus
 }
 
 export async function fetchAIHistory(
