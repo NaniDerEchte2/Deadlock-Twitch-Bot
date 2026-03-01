@@ -550,6 +550,8 @@ class PromoMixin:
         if not allowed_logins:
             return []
 
+        target_game_lower = (getattr(self, "_target_game_lower", None) or "deadlock").strip().lower()
+
         try:
             # Uses storage.get_conn() so twitch_* schema is ensured before querying.
             with get_conn():
@@ -559,7 +561,9 @@ class PromoMixin:
                       FROM twitch_streamers s
                       JOIN twitch_live_state l ON s.twitch_user_id = l.twitch_user_id
                      WHERE l.is_live = 1
-                    """
+                       AND LOWER(COALESCE(l.last_game, '')) = ?
+                    """,
+                    (target_game_lower,),
                 )
         except Exception:
             log.debug("_get_live_channels_for_promo: DB-Query fehlgeschlagen", exc_info=True)
