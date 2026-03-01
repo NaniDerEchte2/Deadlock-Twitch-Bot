@@ -4,12 +4,26 @@
 """Package entry point for the Twitch stream monitor cog."""
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 from typing import Optional
 
 import discord
 from discord.ext import commands
+
+# Last-synced fingerprint per guild — persists for the process lifetime so
+# reloads don't re-sync when commands haven't changed.
+_last_sync_hash: dict[int, str] = {}
+
+
+def _command_payload_hash(bot: commands.Bot, guild: discord.Object) -> str:
+    """Return a stable hash of the current app-command payload for *guild*."""
+    payload = [cmd.to_dict() for cmd in bot.tree.get_commands(guild=guild)]
+    # Sort by name so ordering differences don't cause false cache misses.
+    payload.sort(key=lambda c: c.get("name", ""))
+    return hashlib.md5(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 log = logging.getLogger("TwitchStreams")
 
@@ -46,10 +60,23 @@ async def _sync_app_commands_after_ready(bot: commands.Bot) -> None:
     for guild_id in guild_ids:
         guild = discord.Object(id=guild_id)
         try:
-            # Fast path: guild sync appears immediately in Discord clients.
             bot.tree.copy_global_to(guild=guild)
+            current_hash = _command_payload_hash(bot, guild)
+            if _last_sync_hash.get(guild_id) == current_hash:
+                log.debug("App commands unchanged for guild %s — skipping sync", guild_id)
+                continue
             synced = await bot.tree.sync(guild=guild)
+            _last_sync_hash[guild_id] = current_hash
             log.info("Synced %d app command(s) to guild %s", len(synced), guild_id)
+        except discord.HTTPException as exc:
+            if exc.status == 429 and exc.code == 30034:
+                log.warning(
+                    "Guild %s: daily command-create quota exhausted (200/day). "
+                    "Sync skipped — will retry on next bot restart.",
+                    guild_id,
+                )
+            else:
+                log.exception("Guild app-command sync failed for guild %s", guild_id)
         except Exception:
             log.exception("Guild app-command sync failed for guild %s", guild_id)
 
