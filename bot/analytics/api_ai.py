@@ -23,6 +23,38 @@ _DOW_NAMES = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"]
 _ai_table_ready = False
 
 
+def _extract_json_array(text: str) -> str | None:
+    """Return the first complete JSON array from *text*, correctly skipping ] inside strings.
+
+    Returns None if the array is not fully terminated (truncated response).
+    """
+    start = text.find("[")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i, ch in enumerate(text[start:], start):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None  # truncated – no matching ]
+
+
 def _ensure_ai_table(conn) -> None:
     """Create ai_analyses table if it doesn't exist (runs once per process)."""
     global _ai_table_ready
@@ -482,7 +514,7 @@ Punkte 1-3: kritisch | Punkte 4-7: hoch | Punkte 8-10: mittel"""
             lines = [ln for ln in lines if not ln.strip().startswith("```")]
             raw = "\n".join(lines).strip()
 
-        # Try direct parse first
+        # 1) Direct parse – works when Claude returns perfect JSON
         try:
             points = json.loads(raw)
             if isinstance(points, list):
@@ -490,34 +522,54 @@ Punkte 1-3: kritisch | Punkte 4-7: hoch | Punkte 8-10: mittel"""
         except json.JSONDecodeError:
             pass
 
-        # Fallback: extract the JSON array portion (handles trailing text or truncation)
-        bracket_start = raw.find("[")
-        bracket_end = raw.rfind("]")
-        if bracket_start != -1 and bracket_end > bracket_start:
+        # 2) Proper bracket extraction – handles preamble/trailing text AND ] inside strings
+        extracted = _extract_json_array(raw)
+        if extracted:
             try:
-                points = json.loads(raw[bracket_start : bracket_end + 1])
+                points = json.loads(extracted)
                 if isinstance(points, list):
-                    log.info("Extracted JSON array from Claude response (offset %d-%d)", bracket_start, bracket_end)
+                    log.info("Extracted complete JSON array from Claude response")
                     return points
             except json.JSONDecodeError:
                 pass
 
-        # Last resort: response was truncated — try to salvage complete items
-        # Find the last complete object ending with `}` before a trailing comma or EOF
-        if bracket_start != -1:
-            partial = raw[bracket_start:]
-            last_complete = partial.rfind("},")
-            if last_complete == -1:
-                last_complete = partial.rfind("}")
-            if last_complete != -1:
-                attempt = partial[: last_complete + 1] + "]"
+        # 3) Truncation salvage – response cut off mid-array; collect complete objects
+        #    Scan for depth-1 object boundaries using proper string-aware tracking.
+        array_start = raw.find("[")
+        if array_start != -1:
+            depth = 0
+            in_string = False
+            escape_next = False
+            obj_start: int | None = None
+            salvaged: list[str] = []
+            for i, ch in enumerate(raw[array_start:], array_start):
+                if escape_next:
+                    escape_next = False
+                    continue
+                if ch == "\\" and in_string:
+                    escape_next = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
+                    if depth == 0:
+                        obj_start = i
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0 and obj_start is not None:
+                        salvaged.append(raw[obj_start : i + 1])
+                        obj_start = None
+                elif ch == "]" and depth == 0:
+                    break  # array closed – shouldn't reach here after step 2
+            if salvaged:
                 try:
-                    points = json.loads(attempt)
+                    points = json.loads("[" + ",".join(salvaged) + "]")
                     if isinstance(points, list) and points:
-                        log.warning(
-                            "Response was truncated; salvaged %d/%d points",
-                            len(points), 10,
-                        )
+                        log.warning("Response truncated; salvaged %d/%d points", len(points), 10)
                         return points
                 except json.JSONDecodeError:
                     pass
