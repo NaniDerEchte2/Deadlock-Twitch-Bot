@@ -38,7 +38,11 @@ def _get_async_client():
     api_key = ""
     try:
         import keyring
-        api_key = keyring.get_password("DeadlockBot", "ANTHROPIC_API_KEY") or ""
+        api_key = (
+            keyring.get_password("ANTHROPIC_API_KEY@DeadlockBot", "ANTHROPIC_API_KEY")
+            or keyring.get_password("DeadlockBot", "ANTHROPIC_API_KEY")
+            or ""
+        )
     except Exception:
         pass
 
