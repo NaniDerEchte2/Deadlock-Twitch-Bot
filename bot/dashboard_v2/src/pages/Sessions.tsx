@@ -44,7 +44,7 @@ export function Sessions({ streamer, days }: SessionsProps) {
         <StatCard
           icon={<Play className="w-5 h-5" />}
           label="Total Streams"
-          value={data.summary.streamCount.toString()}
+          value={String(data.summary.streamCount ?? 0)}
           color="primary"
         />
         <StatCard
@@ -226,9 +226,9 @@ function SessionDetails({ sessionId, session }: SessionDetailsProps) {
 
         {/* Viewer Stats */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <MetricBox label="Start Viewer" value={session.startViewers.toString()} />
-          <MetricBox label="End Viewer" value={session.endViewers.toString()} />
-          <MetricBox label="Unique Chatter" value={session.totalChatterSessions.toString()} icon={<MessageCircle className="w-4 h-4" />} />
+          <MetricBox label="Start Viewer" value={String(session.startViewers ?? 0)} />
+          <MetricBox label="End Viewer" value={String(session.endViewers ?? 0)} />
+          <MetricBox label="Unique Chatter" value={String(session.totalChatterSessions ?? 0)} icon={<MessageCircle className="w-4 h-4" />} />
           <MetricBox
             label="Follower"
             value={`${session.followersEnd - session.followersStart >= 0 ? '+' : ''}${session.followersEnd - session.followersStart}`}
