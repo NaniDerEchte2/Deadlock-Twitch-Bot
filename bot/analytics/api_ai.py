@@ -121,15 +121,15 @@ class _AnalyticsAIMixin:
                 """
                 SELECT
                     COUNT(*) AS stream_count,
-                    ROUND(SUM(duration_seconds) / 3600.0, 1) AS total_hours,
-                    ROUND(AVG(avg_viewers), 1) AS avg_viewers,
+                    ROUND((SUM(duration_seconds) / 3600.0)::numeric, 1) AS total_hours,
+                    ROUND(AVG(avg_viewers)::numeric, 1) AS avg_viewers,
                     MAX(peak_viewers) AS peak_viewers,
                     COALESCE(SUM(
                         CASE WHEN follower_delta > 0 THEN follower_delta ELSE 0 END
                     ), 0) AS followers_gained,
-                    ROUND(AVG(retention_10m) * 100, 1) AS avg_retention_10m,
-                    ROUND(AVG(dropoff_pct) * 100, 1) AS avg_dropoff_pct,
-                    ROUND(AVG(COALESCE(unique_chatters, 0)), 0) AS avg_chatters
+                    ROUND((AVG(retention_10m) * 100)::numeric, 1) AS avg_retention_10m,
+                    ROUND((AVG(dropoff_pct) * 100)::numeric, 1) AS avg_dropoff_pct,
+                    ROUND(AVG(COALESCE(unique_chatters, 0))::numeric, 0) AS avg_chatters
                 FROM twitch_stream_sessions
                 WHERE LOWER(streamer_login) = %s
                   AND started_at >= %s
@@ -144,11 +144,11 @@ class _AnalyticsAIMixin:
                 SELECT
                     started_at::date,
                     stream_title,
-                    ROUND(duration_seconds / 3600.0, 2) AS hours,
-                    ROUND(avg_viewers, 1),
+                    ROUND((duration_seconds / 3600.0)::numeric, 2) AS hours,
+                    ROUND(avg_viewers::numeric, 1),
                     peak_viewers,
-                    ROUND(retention_10m * 100, 1),
-                    ROUND(dropoff_pct * 100, 1),
+                    ROUND((retention_10m * 100)::numeric, 1),
+                    ROUND((dropoff_pct * 100)::numeric, 1),
                     COALESCE(unique_chatters, 0),
                     COALESCE(follower_delta, 0)
                 FROM twitch_stream_sessions
@@ -167,8 +167,8 @@ class _AnalyticsAIMixin:
                 SELECT
                     EXTRACT(DOW FROM started_at)::int AS dow,
                     COUNT(*) AS streams,
-                    ROUND(AVG(avg_viewers), 1),
-                    ROUND(AVG(peak_viewers), 1)
+                    ROUND(AVG(avg_viewers)::numeric, 1),
+                    ROUND(AVG(peak_viewers)::numeric, 1)
                 FROM twitch_stream_sessions
                 WHERE LOWER(streamer_login) = %s
                   AND started_at >= %s
@@ -184,7 +184,7 @@ class _AnalyticsAIMixin:
                 """
                 SELECT
                     COALESCE(stream_title, ''), avg_viewers, peak_viewers,
-                    ROUND(retention_10m * 100, 1), started_at::date
+                    ROUND((retention_10m * 100)::numeric, 1), started_at::date
                 FROM twitch_stream_sessions
                 WHERE LOWER(streamer_login) = %s
                   AND started_at >= %s
@@ -200,7 +200,7 @@ class _AnalyticsAIMixin:
                 """
                 SELECT
                     COALESCE(stream_title, ''), avg_viewers, peak_viewers,
-                    ROUND(retention_10m * 100, 1), started_at::date
+                    ROUND((retention_10m * 100)::numeric, 1), started_at::date
                 FROM twitch_stream_sessions
                 WHERE LOWER(streamer_login) = %s
                   AND started_at >= %s
@@ -219,9 +219,9 @@ class _AnalyticsAIMixin:
                     SELECT
                         COALESCE(game_name, 'Unbekannt') AS game,
                         COUNT(*) AS sessions,
-                        ROUND(AVG(avg_viewers), 1),
+                        ROUND(AVG(avg_viewers)::numeric, 1),
                         MAX(peak_viewers),
-                        ROUND(AVG(duration_min), 1)
+                        ROUND(AVG(duration_min)::numeric, 1)
                     FROM exp_sessions
                     WHERE LOWER(streamer) = %s
                       AND started_at >= %s
