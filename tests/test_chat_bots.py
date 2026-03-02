@@ -11,6 +11,7 @@ class ChatBotsTests(unittest.TestCase):
     def test_is_known_chat_bot_is_case_insensitive(self) -> None:
         self.assertTrue(is_known_chat_bot("NightBot"))
         self.assertTrue(is_known_chat_bot("STREAMELEMENTS"))
+        self.assertTrue(is_known_chat_bot("BoTRiX"))
         self.assertFalse(is_known_chat_bot("real_viewer_123"))
 
     def test_sql_helper_builds_stable_placeholders_and_params(self) -> None:
