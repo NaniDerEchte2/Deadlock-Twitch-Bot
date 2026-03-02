@@ -1,74 +1,213 @@
-import { Play, Youtube, Film, Camera, CheckCircle2 } from "lucide-react";
+import { useState } from "react";
+import { ExternalLink, CheckCircle2 } from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
 import { ScrollReveal } from "@/components/ui/ScrollReveal";
 
+interface EmbeddedClip {
+  id: string;
+  platform: "Twitch" | "Medal";
+  sourceUrl: string;
+  embedUrl: string;
+}
+
+const CLIPS: EmbeddedClip[] = [
+  {
+    id: "twitch-main",
+    platform: "Twitch",
+    sourceUrl:
+      "https://www.twitch.tv/earlysalty/clip/PlainSleepyBaboonDoritosChip-S5HmbowuRWcgn74-",
+    embedUrl:
+      "https://clips.twitch.tv/embed?clip=PlainSleepyBaboonDoritosChip-S5HmbowuRWcgn74-&parent=earlysalty.de&parent=www.earlysalty.de",
+  },
+  {
+    id: "medal-1",
+    platform: "Medal",
+    sourceUrl:
+      "https://medal.tv/de/games/deadlock/clips/mdXb5pFcYk0B5p9XU?invite=cr-MSx5anMsNDc2NTU1MzY0&v=34",
+    embedUrl: "https://medal.tv/de/games/deadlock/clip/mdXb5pFcYk0B5p9XU",
+  },
+  {
+    id: "medal-2",
+    platform: "Medal",
+    sourceUrl:
+      "https://medal.tv/de/games/deadlock/clips/mdXAyLMC391loUOmb?invite=cr-MSxETmIsNDc2NTU1MzY0&v=16",
+    embedUrl: "https://medal.tv/de/games/deadlock/clip/mdXAyLMC391loUOmb",
+  },
+  {
+    id: "medal-3",
+    platform: "Medal",
+    sourceUrl:
+      "https://medal.tv/de/games/deadlock/clips/mdXEiosLrxM1B-LKB?invite=cr-MSxWWlQsNDc2NTU1MzY0&v=22",
+    embedUrl: "https://medal.tv/de/games/deadlock/clip/mdXEiosLrxM1B-LKB",
+  },
+  {
+    id: "medal-4",
+    platform: "Medal",
+    sourceUrl:
+      "https://medal.tv/games/deadlock/clips/mdXfCZJXOjdeteVvf?invite=cr-MSxoZGksNDc2NTU1MzY0&v=24",
+    embedUrl: "https://medal.tv/games/deadlock/clip/mdXfCZJXOjdeteVvf",
+  },
+];
+
+function wrapIndex(index: number, length: number) {
+  return (index + length) % length;
+}
+
+function clipSrc(clip: EmbeddedClip, active: boolean) {
+  if (!active || clip.platform !== "Twitch") {
+    return clip.embedUrl;
+  }
+  return `${clip.embedUrl}&autoplay=true&muted=true`;
+}
+
+function ClipPreview({
+  clip,
+  onSelect,
+  side,
+}: {
+  clip: EmbeddedClip;
+  onSelect: () => void;
+  side: "left" | "right";
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-label={`${side === "left" ? "Linken" : "Rechten"} Clip auswählen`}
+      className={[
+        "absolute hidden md:block top-1/2 -translate-y-1/2 z-0",
+        "w-[75%] aspect-video rounded-xl overflow-hidden",
+        "border border-[var(--color-border)] bg-black/70",
+        "opacity-70 hover:opacity-95 transition duration-300",
+        side === "left"
+          ? "left-0 -translate-x-1/2 shadow-[-12px_0_40px_rgba(0,0,0,0.45)]"
+          : "right-0 translate-x-1/2 shadow-[12px_0_40px_rgba(0,0,0,0.45)]",
+      ].join(" ")}
+    >
+      <iframe
+        src={clipSrc(clip, false)}
+        title={`${clip.platform} Vorschau`}
+        className="w-full h-full border-0 pointer-events-none saturate-[0.65]"
+        loading="lazy"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+        referrerPolicy="strict-origin-when-cross-origin"
+        allowFullScreen
+      />
+    </button>
+  );
+}
+
 export function ClipManager() {
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [direction, setDirection] = useState<1 | -1>(1);
+  const clipCount = CLIPS.length;
+  const prevIndex = wrapIndex(activeIndex - 1, clipCount);
+  const nextIndex = wrapIndex(activeIndex + 1, clipCount);
+  const activeClip = CLIPS[activeIndex];
+
+  function selectClip(index: number, nextDirection: 1 | -1) {
+    setDirection(nextDirection);
+    setActiveIndex(index);
+  }
+
   return (
     <section id="clips" className="py-24">
       <div className="max-w-7xl mx-auto px-6">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-16 items-center">
-
-          {/* LEFT: Visual mock UI */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-16 lg:gap-28 items-center">
           <ScrollReveal direction="left">
-            <div className="panel-card rounded-2xl p-8">
-              <p className="text-lg font-semibold text-[var(--color-text-primary)] mb-6">
-                Clip verteilen
-              </p>
+            <div className="rounded-2xl border border-[var(--color-border)] bg-[linear-gradient(160deg,rgba(16,38,53,0.92),rgba(10,30,42,0.92))] overflow-visible p-1.5 md:p-2">
+              <div className="relative h-[205px] sm:h-[260px] lg:h-[350px] overflow-visible">
+                <AnimatePresence initial={false} custom={direction} mode="sync">
+                  <motion.div
+                    key={activeClip.id}
+                    custom={direction}
+                    initial={{ opacity: 0, x: direction > 0 ? 42 : -42, scale: 0.995 }}
+                    animate={{
+                      opacity: 1,
+                      x: 0,
+                      scale: 1,
+                      transition: { duration: 0.2, ease: [0.25, 1, 0.5, 1] },
+                    }}
+                    exit={{
+                      opacity: 0,
+                      x: direction > 0 ? -42 : 42,
+                      scale: 0.995,
+                      transition: { duration: 0.2, ease: [0.25, 1, 0.5, 1] },
+                    }}
+                    className="absolute inset-0 z-10 rounded-xl overflow-hidden border border-[var(--color-border-hover)] bg-black"
+                  >
+                    <iframe
+                      src={clipSrc(activeClip, true)}
+                      title={`${activeClip.platform} Hauptclip`}
+                      className="w-full h-full border-0"
+                      loading="lazy"
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                      referrerPolicy="strict-origin-when-cross-origin"
+                      allowFullScreen
+                    />
+                    <a
+                      href={activeClip.sourceUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="absolute right-3 bottom-3 z-30 rounded-md px-3 py-1.5 text-xs font-semibold text-white bg-black/55 border border-white/20 inline-flex items-center gap-1 hover:bg-black/75 transition"
+                    >
+                      Clip öffnen
+                      <ExternalLink size={13} />
+                    </a>
+                  </motion.div>
+                </AnimatePresence>
 
-              {/* Mock clip preview */}
-              <div className="aspect-video bg-[var(--color-bg)]/50 rounded-lg mb-6 flex flex-col items-center justify-center gap-3">
-                <div className="w-12 h-12 rounded-full gradient-accent flex items-center justify-center">
-                  <Play size={22} className="text-white ml-1" />
-                </div>
-                <span className="text-sm text-[var(--color-text-secondary)]">
-                  Krasser 4K Play
-                </span>
+                <ClipPreview
+                  clip={CLIPS[prevIndex]}
+                  side="left"
+                  onSelect={() => selectClip(prevIndex, -1)}
+                />
+                <ClipPreview
+                  clip={CLIPS[nextIndex]}
+                  side="right"
+                  onSelect={() => selectClip(nextIndex, 1)}
+                />
               </div>
 
-              {/* Platform toggles */}
-              <div className="space-y-2">
-                {/* YouTube Shorts — on */}
-                <div className="flex items-center justify-between bg-[var(--color-bg)]/50 rounded-lg p-3">
-                  <div className="flex items-center gap-3">
-                    <Youtube size={18} className="text-[var(--color-text-secondary)]" />
-                    <span className="text-sm text-[var(--color-text-primary)]">YouTube Shorts</span>
-                  </div>
-                  <div className="w-10 h-5 bg-[var(--color-success)] rounded-full relative flex items-center px-0.5">
-                    <div className="w-4 h-4 bg-white rounded-full ml-auto shadow-sm" />
-                  </div>
-                </div>
-
-                {/* TikTok — on */}
-                <div className="flex items-center justify-between bg-[var(--color-bg)]/50 rounded-lg p-3">
-                  <div className="flex items-center gap-3">
-                    <Film size={18} className="text-[var(--color-text-secondary)]" />
-                    <span className="text-sm text-[var(--color-text-primary)]">TikTok</span>
-                  </div>
-                  <div className="w-10 h-5 bg-[var(--color-success)] rounded-full relative flex items-center px-0.5">
-                    <div className="w-4 h-4 bg-white rounded-full ml-auto shadow-sm" />
-                  </div>
-                </div>
-
-                {/* Instagram Reels — off */}
-                <div className="flex items-center justify-between bg-[var(--color-bg)]/50 rounded-lg p-3">
-                  <div className="flex items-center gap-3">
-                    <Camera size={18} className="text-[var(--color-text-secondary)]" />
-                    <span className="text-sm text-[var(--color-text-primary)]">Instagram Reels</span>
-                  </div>
-                  <div className="w-10 h-5 bg-[var(--color-border)] rounded-full relative flex items-center px-0.5">
-                    <div className="w-4 h-4 bg-white rounded-full shadow-sm" />
-                  </div>
-                </div>
-              </div>
-
-              {/* Publish button */}
-              <div className="gradient-accent rounded-lg px-4 py-2 text-sm text-white w-full text-center mt-4 cursor-pointer">
-                Clip veröffentlichen
+              <div className="mt-2 grid grid-cols-2 gap-2 md:hidden">
+                <button
+                  type="button"
+                  aria-label="Linke Vorschau anzeigen"
+                  onClick={() => selectClip(prevIndex, -1)}
+                  className="rounded-md border border-[var(--color-border)] overflow-hidden bg-black aspect-video"
+                >
+                  <iframe
+                    src={clipSrc(CLIPS[prevIndex], false)}
+                    title="Linke Vorschau"
+                    className="w-full h-full border-0 pointer-events-none saturate-[0.65]"
+                    loading="lazy"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    referrerPolicy="strict-origin-when-cross-origin"
+                    allowFullScreen
+                  />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Rechte Vorschau anzeigen"
+                  onClick={() => selectClip(nextIndex, 1)}
+                  className="rounded-md border border-[var(--color-border)] overflow-hidden bg-black aspect-video"
+                >
+                  <iframe
+                    src={clipSrc(CLIPS[nextIndex], false)}
+                    title="Rechte Vorschau"
+                    className="w-full h-full border-0 pointer-events-none saturate-[0.65]"
+                    loading="lazy"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    referrerPolicy="strict-origin-when-cross-origin"
+                    allowFullScreen
+                  />
+                </button>
               </div>
             </div>
           </ScrollReveal>
 
           {/* RIGHT: Text content */}
-          <ScrollReveal delay={0.2}>
+          <ScrollReveal delay={0.2} className="lg:pl-20 xl:pl-28 2xl:pl-32">
             <p className="text-sm text-[var(--color-accent)] font-medium uppercase tracking-wider mb-4">
               Clip Manager
             </p>
@@ -95,10 +234,6 @@ export function ClipManager() {
                   desc: "Automatische Titel, Beschreibungen und Hashtags",
                 },
                 {
-                  title: "Auto-Crop",
-                  desc: "Intelligentes Zuschneiden für vertikale Formate",
-                },
-                {
                   title: "Clip-Archiv",
                   desc: "Alle Clips organisiert und durchsuchbar",
                 },
@@ -120,7 +255,6 @@ export function ClipManager() {
               ))}
             </ul>
           </ScrollReveal>
-
         </div>
       </div>
     </section>

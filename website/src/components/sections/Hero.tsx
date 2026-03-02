@@ -1,6 +1,10 @@
 import { motion } from "framer-motion";
 import { MessageCircle, ExternalLink } from "lucide-react";
 import { BrowserMockup } from "@/components/ui/BrowserMockup";
+import {
+  DISCORD_INVITE_URL,
+  DISCORD_OAUTH_URL,
+} from "@/data/externalLinks";
 
 export function Hero() {
   return (
@@ -55,14 +59,18 @@ export function Hero() {
             className="mt-10 flex gap-4 justify-center flex-wrap"
           >
             <a
-              href="#"
+              href={DISCORD_INVITE_URL}
+              target="_blank"
+              rel="noopener noreferrer"
               className="gradient-accent rounded-xl px-7 py-3.5 font-semibold text-white inline-flex items-center gap-2 transition-all duration-200 hover:brightness-110 hover:shadow-[0_0_24px_4px_rgba(255,122,24,0.3)]"
             >
               <MessageCircle size={18} />
               Discord beitreten
             </a>
             <a
-              href="#"
+              href={DISCORD_OAUTH_URL}
+              target="_blank"
+              rel="noopener noreferrer"
               className="border border-[var(--color-border)] rounded-xl px-7 py-3.5 font-semibold text-[var(--color-text-primary)] inline-flex items-center gap-2 transition-all duration-200 hover:border-[var(--color-border-hover)] hover:bg-white/5"
             >
               <ExternalLink size={18} />

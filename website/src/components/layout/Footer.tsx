@@ -1,3 +1,5 @@
+import { DISCORD_INVITE_URL } from "@/data/externalLinks";
+
 function scrollToId(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' });
 }
@@ -18,7 +20,7 @@ const NAV_SECTION_LINKS: FooterLink[] = [
 
 const MORE_LINKS: FooterLink[] = [
   { label: 'Demo Dashboard', href: 'https://demo.earlysalty.com', external: true },
-  { label: 'Discord beitreten', href: 'https://dc.earlysalty.com', external: true },
+  { label: 'Discord beitreten', href: DISCORD_INVITE_URL, external: true },
   { label: 'Impressum', href: 'https://twitch.earlysalty.com/twitch/impressum', external: true },
   { label: 'Datenschutz', href: 'https://twitch.earlysalty.com/twitch/datenschutz', external: true },
 ];

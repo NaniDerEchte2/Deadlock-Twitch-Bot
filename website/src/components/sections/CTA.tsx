@@ -1,5 +1,9 @@
 import { MessageCircle, ExternalLink } from "lucide-react";
 import { ScrollReveal } from "@/components/ui/ScrollReveal";
+import {
+  DISCORD_INVITE_URL,
+  DISCORD_OAUTH_URL,
+} from "@/data/externalLinks";
 
 export function CTA() {
   return (
@@ -23,14 +27,18 @@ export function CTA() {
 
           <div className="flex gap-4 justify-center flex-wrap">
             <a
-              href="#"
+              href={DISCORD_INVITE_URL}
+              target="_blank"
+              rel="noopener noreferrer"
               className="gradient-accent rounded-xl px-8 py-4 font-semibold text-white text-lg inline-flex items-center gap-2"
             >
               <MessageCircle size={20} />
               Discord beitreten
             </a>
             <a
-              href="#"
+              href={DISCORD_OAUTH_URL}
+              target="_blank"
+              rel="noopener noreferrer"
               className="border border-[var(--color-border)] rounded-xl px-8 py-4 font-semibold text-[var(--color-text-primary)] text-lg hover:border-[var(--color-border-hover)] transition inline-flex items-center gap-2"
             >
               <ExternalLink size={20} />
