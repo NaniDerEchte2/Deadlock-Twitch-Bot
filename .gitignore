@@ -22,6 +22,9 @@ build/
 # Node.js (Dashboard V2)
 twitch_cog/dashboard_v2/node_modules/
 twitch_cog/analytics/dashboard_v2/node_modules/
+website/node_modules/
+website/dist/
+website/.vite/
 
 # Datenbanken
 *.sqlite3

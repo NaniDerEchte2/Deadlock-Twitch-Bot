@@ -1,0 +1,160 @@
+@import "tailwindcss";
+
+/* Self-hosted Fonts (DSGVO-konform) */
+@font-face {
+  font-family: "Manrope";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("/website/fonts/manrope-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Manrope";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("/website/fonts/manrope-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Sora";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("/website/fonts/sora-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Sora";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("/website/fonts/sora-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* Brand Theme – mirrored from Dashboard */
+@theme {
+  --color-bg: #07151d;
+  --color-background: #0b1d28;
+  --color-card: #102635;
+  --color-card-hover: #173448;
+  --color-primary: #ff7a18;
+  --color-primary-hover: #ff8d39;
+  --color-accent: #10b7ad;
+  --color-accent-hover: #1dd4ca;
+  --color-success: #2ecc71;
+  --color-warning: #f5b642;
+  --color-danger: #ff6b5e;
+  --color-secondary: #8ea8bb;
+  --color-text-primary: #e9f1f7;
+  --color-text-secondary: #9bb3c5;
+  --color-border: rgba(194, 221, 240, 0.14);
+  --color-border-hover: rgba(194, 221, 240, 0.3);
+  --font-sans: "Manrope", "Segoe UI", sans-serif;
+  --font-display: "Sora", "Manrope", sans-serif;
+}
+
+/* Base Styles */
+html {
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+  background:
+    radial-gradient(1200px 520px at 90% -10%, rgba(255, 122, 24, 0.18), transparent 65%),
+    radial-gradient(900px 460px at 12% -20%, rgba(16, 183, 173, 0.24), transparent 60%),
+    linear-gradient(160deg, #07151d 0%, #081a24 55%, #0a202c 100%);
+  color: var(--color-text-primary);
+  position: relative;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 36px 36px;
+  mask-image: radial-gradient(ellipse at top, black 40%, transparent 75%);
+  opacity: 0.35;
+  z-index: 0;
+}
+
+#root {
+  min-height: 100vh;
+  width: 100%;
+  position: relative;
+  z-index: 1;
+}
+
+h1, h2, h3, h4, .display-font {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-primary) 45%, transparent);
+  color: #ffffff;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: #071923; }
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #1a3f57, #204e6b);
+  border-radius: 999px;
+  border: 2px solid #071923;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #20506f, #2c698e);
+}
+
+/* Shared Effects */
+.glass {
+  background: rgba(12, 35, 49, 0.72);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--color-border);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.gradient-accent {
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-accent) 100%);
+}
+
+.panel-card {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(160deg, rgba(16, 38, 53, 0.92), rgba(10, 30, 42, 0.92));
+  border: 1px solid var(--color-border);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.panel-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(120deg, rgba(255, 255, 255, 0.06), transparent 35%);
+  opacity: 0.4;
+}
+
+.soft-elevate {
+  transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.soft-elevate:hover {
+  transform: translateY(-2px);
+  border-color: var(--color-border-hover);
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.24);
+}
