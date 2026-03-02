@@ -20,7 +20,7 @@ _last_sync_hash: dict[int, str] = {}
 
 def _command_payload_hash(bot: commands.Bot, guild: discord.Object) -> str:
     """Return a stable hash of the current app-command payload for *guild*."""
-    payload = [cmd.to_dict() for cmd in bot.tree.get_commands(guild=guild)]
+    payload = [cmd.to_dict(bot.tree) for cmd in bot.tree.get_commands(guild=guild)]
     # Sort by name so ordering differences don't cause false cache misses.
     payload.sort(key=lambda c: c.get("name", ""))
     return hashlib.md5(json.dumps(payload, sort_keys=True).encode()).hexdigest()
