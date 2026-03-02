@@ -840,7 +840,29 @@ const TOPIC_COLORS: Record<string, string> = {
   meta: '#ef4444',
   gameplay: '#06b6d4',
   backseat: '#f97316',
+  commands: '#60a5fa',
+  social: '#34d399',
+  smalltalk: '#facc15',
+  greeting: '#22d3ee',
+  community: '#10b981',
+  reaction: '#ec4899',
   other: '#6b7280',
+};
+
+const TOPIC_LABELS: Record<string, string> = {
+  heroes: 'Heroes',
+  builds: 'Builds',
+  ranked: 'Ranked',
+  meta: 'Meta',
+  gameplay: 'Gameplay',
+  backseat: 'Backseat',
+  commands: 'Commands',
+  social: 'Social',
+  smalltalk: 'Smalltalk',
+  greeting: 'Begruessung',
+  community: 'Community',
+  reaction: 'Reaktionen',
+  other: 'Sonstiges',
 };
 
 function StimmungTopicsSection({ data }: { data: ChatContentAnalysis }) {
@@ -851,7 +873,7 @@ function StimmungTopicsSection({ data }: { data: ChatContentAnalysis }) {
   const topicEntries = Object.entries(data.topicBreakdown).filter(([, v]) => v > 0);
   const topicTotal = topicEntries.reduce((s, [, v]) => s + v, 0);
   const donutData = topicEntries.map(([key, val]) => ({
-    name: key === 'heroes' ? 'Heroes' : key === 'builds' ? 'Builds' : key === 'ranked' ? 'Ranked' : key === 'meta' ? 'Meta' : key === 'gameplay' ? 'Gameplay' : key === 'backseat' ? 'Backseat' : 'Sonstiges',
+    name: TOPIC_LABELS[key] || key,
     value: val,
     color: TOPIC_COLORS[key] || '#6b7280',
   }));
@@ -945,8 +967,8 @@ function StimmungTopicsSection({ data }: { data: ChatContentAnalysis }) {
                   </ResponsiveContainer>
                 </div>
                 <div className="flex flex-wrap gap-2 text-xs">
-                  {donutData.map(d => (
-                    <span key={d.name} className="flex items-center gap-1.5 text-text-secondary">
+                  {donutData.map((d, idx) => (
+                    <span key={`${d.name}-${idx}`} className="flex items-center gap-1.5 text-text-secondary">
                       <span className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: d.color }} />
                       {d.name}: {topicTotal > 0 ? Math.round(d.value / topicTotal * 100) : 0}%
                     </span>

@@ -125,6 +125,78 @@ BACKSEAT_PHRASES = (
     "spiel mal", "geh mal", "nicht kaufen", "hör auf", "lass das",
 )
 
+# Messages about socials/channel/meta-chat (non gameplay).
+SOCIAL_MARKERS = (
+    "discord", "youtube", "tiktok", "instagram", "social",
+    "follow", "abo", "sub", "community",
+    "raid", "clip", "danke", "thanks", "thx",
+)
+
+# Emote-heavy or hype one-liners that otherwise often land in "other".
+REACTION_TOKENS = frozenset({
+    "gg", "wp", "lul", "kekw", "xd", "xdd", "kappa",
+    "pog", "pogchamp", "poggers", "peepo", "catjam",
+    "nice", "geil", "krass", "banger", "lol", "lmao", "ggs",
+    "omg", "wtf", "insane", "crazy", "hype", "letsgo", "sadge",
+    "rip", "damn", "woah", "huh", "haha", "hahaha",
+    "notlikethis", "shruge", "heyguys", "cheerstothat",
+    "uff", "wow", "nah", "safe",
+})
+
+REACTION_PHRASES = (
+    "let's go",
+    "lets go",
+    "<3",
+    ":d",
+    ":(",
+    ":o",
+    "skill issue",
+    "all good",
+)
+
+EMOTE_PREFIXES = (
+    "dhalu",
+    "frag",
+    "peepo",
+    "kitty",
+    "owo",
+    "uwu",
+    "xdgara",
+    "seems",
+)
+
+EMOTE_SUFFIXES = (
+    "cheer",
+    "hype",
+    "love",
+    "clap",
+    "lul",
+    "dance",
+    "jam",
+    "hug",
+)
+
+SMALLTALK_TOKENS = frozenset({
+    "ja", "jaa", "jaaa", "nein", "nö", "ne", "yes", "yep",
+    "ok", "okay", "jo", "klar", "mhm", "doch", "ah", "oh", "oha",
+    "stimmt", "wieder", "zusammen",
+    "true", "sure", "no", "same", "check", "achso", "stark", "na",
+    "genau", "man",
+})
+
+GREETING_TOKENS = frozenset({
+    "servus", "nabend", "abend", "nacht", "hallo", "hey", "hi",
+    "hello", "bye", "gn8", "huhu", "moooin", "moin", "wb", "back", "o7",
+})
+
+GREETING_PHRASES = (
+    "guten morgen",
+    "guten abend",
+    "gute nacht",
+    "bye bye",
+    "wie läufts",
+)
+
 # ── Sentiment Wordlists (Twitch-culture-aware) ──
 
 POSITIVE_WORDS = frozenset({
@@ -185,6 +257,7 @@ SHORT_POSITIVE = frozenset({"w", "dw", "gg"})
 SHORT_NEGATIVE = frozenset({"l", "f", "ff", "nah"})
 
 _MENTION_RE = re.compile(r"(?<!\w)@([A-Za-z0-9_]{3,25})\b")
+_WORD_RE = re.compile(r"[a-z0-9äöüß_+#']+")
 
 
 def _detect_heroes(content_lower: str) -> list[str]:
@@ -203,6 +276,87 @@ def _detect_topics(content_lower: str) -> list[str]:
         if any(kw in content_lower for kw in keywords):
             topics.append(topic)
     return topics
+
+
+def _tokenize_words(content_lower: str) -> list[str]:
+    """Tokenize lowercased chat content into simple alnum/emote-friendly tokens."""
+    return _WORD_RE.findall(content_lower)
+
+
+def _is_reaction_message(content_lower: str, tokens: list[str] | None = None) -> bool:
+    """Heuristic for short emote/hype messages."""
+    stripped = content_lower.strip()
+    words = tokens or _tokenize_words(content_lower)
+
+    if stripped in {"?", "??", "!", "!!"}:
+        return True
+
+    if any(phrase in content_lower for phrase in REACTION_PHRASES):
+        return True
+
+    # Emoji-only / symbol-only messages (no alnum tokens) are pure reaction chat.
+    if not words and stripped:
+        return True
+
+    return any(
+        token in REACTION_TOKENS
+        or token.startswith(EMOTE_PREFIXES)
+        or token.endswith(EMOTE_SUFFIXES)
+        or token.startswith("xd")
+        or token.startswith("haha")
+        for token in words
+    )
+
+
+def _is_command_message(content_lower: str) -> bool:
+    """Detect bot/chat command style messages."""
+    return content_lower.strip().startswith("!")
+
+
+def _is_greeting_message(content_lower: str, tokens: list[str] | None = None) -> bool:
+    """Heuristic for greeting/goodbye messages."""
+    words = tokens or _tokenize_words(content_lower)
+    if any(phrase in content_lower for phrase in GREETING_PHRASES):
+        return True
+    return any(token in GREETING_TOKENS for token in words)
+
+
+def _is_social_message(content_lower: str) -> bool:
+    """Detect social/channel/meta-chat markers."""
+    return any(marker in content_lower for marker in SOCIAL_MARKERS)
+
+
+def _is_smalltalk_message(content_lower: str, tokens: list[str] | None = None) -> bool:
+    """Detect short acknowledgements and lightweight banter."""
+    words = tokens or _tokenize_words(content_lower)
+    if len(words) <= 4 and any(token in SMALLTALK_TOKENS for token in words):
+        return True
+
+    alpha_words = [
+        token for token in words
+        if any(("a" <= ch <= "z") or ch in "äöüß" for ch in token)
+    ]
+    return 1 <= len(alpha_words) <= 2
+
+
+def _looks_like_community_message(content_lower: str, tokens: list[str] | None = None) -> bool:
+    """Heuristic for community/chat/social messages that don't hit game topics."""
+    words = tokens or _tokenize_words(content_lower)
+
+    alpha_words = [
+        token for token in words
+        if any(("a" <= ch <= "z") or ch in "äöüß" for ch in token)
+    ]
+
+    # Multi-word discussion often belongs to stream/community chatter.
+    if len(alpha_words) >= 4:
+        return True
+
+    # Short Q&A messages should not stay in "other".
+    if "?" in content_lower and len(alpha_words) >= 2:
+        return True
+
+    return False
 
 
 def _score_sentiment(content_lower: str) -> int:
@@ -553,7 +707,21 @@ class _AnalyticsChatDeepMixin:
                 # Hero mentions
                 hero_counts: dict[str, int] = {}
                 # Topic counters
-                topic_counts = {"heroes": 0, "builds": 0, "ranked": 0, "meta": 0, "gameplay": 0, "backseat": 0, "other": 0}
+                topic_counts = {
+                    "heroes": 0,
+                    "builds": 0,
+                    "ranked": 0,
+                    "meta": 0,
+                    "gameplay": 0,
+                    "backseat": 0,
+                    "commands": 0,
+                    "social": 0,
+                    "smalltalk": 0,
+                    "greeting": 0,
+                    "community": 0,
+                    "reaction": 0,
+                    "other": 0,
+                }
                 # Sentiment per 15-min bucket
                 sentiment_buckets: dict[str, dict[str, int]] = {}
                 total_positive = 0
@@ -595,6 +763,28 @@ class _AnalyticsChatDeepMixin:
                         if len(backseat_examples) < 10:
                             example = content[:80] + ("..." if len(content) > 80 else "")
                             backseat_examples.append(example)
+
+                    # Fallback topic classification to reduce generic "other" share.
+                    if not matched_any:
+                        tokens = _tokenize_words(content_lower)
+                        if _is_reaction_message(content_lower, tokens):
+                            topic_counts["reaction"] += 1
+                            matched_any = True
+                        elif _is_greeting_message(content_lower, tokens):
+                            topic_counts["greeting"] += 1
+                            matched_any = True
+                        elif _is_command_message(content_lower):
+                            topic_counts["commands"] += 1
+                            matched_any = True
+                        elif _is_social_message(content_lower):
+                            topic_counts["social"] += 1
+                            matched_any = True
+                        elif _is_smalltalk_message(content_lower, tokens):
+                            topic_counts["smalltalk"] += 1
+                            matched_any = True
+                        elif _looks_like_community_message(content_lower, tokens):
+                            topic_counts["community"] += 1
+                            matched_any = True
 
                     if not matched_any:
                         topic_counts["other"] += 1
