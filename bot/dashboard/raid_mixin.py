@@ -364,9 +364,32 @@ new Chart(ctx, {{
     # ------------------------------------------------------------------ #
 
     async def raid_auth_start(self, request: web.Request) -> web.StreamResponse:
-        """Create OAuth URL for raid bot authorization."""
-        self._require_token(request)
-        login = (request.query.get("login") or "").strip().lower()
+        """Create OAuth URL for raid bot authorization.
+
+        Access policy:
+        - Streamer dashboard session may only authorize its own Twitch login.
+        - Explicit `?login=` overrides require admin token/session gate.
+        """
+        requested_login = (request.query.get("login") or "").strip().lower()
+        login = ""
+        session_getter = getattr(self, "_get_dashboard_auth_session", None)
+        if callable(session_getter):
+            try:
+                dashboard_session = session_getter(request)
+            except Exception:
+                log.debug("Could not resolve dashboard auth session for raid auth", exc_info=True)
+                dashboard_session = None
+            if isinstance(dashboard_session, dict):
+                login = str(dashboard_session.get("twitch_login") or "").strip().lower()
+
+        if requested_login:
+            if not login or requested_login != login:
+                self._require_token(request)
+            login = requested_login
+        elif not login:
+            self._require_token(request)
+            login = requested_login
+
         if not login:
             return web.Response(text="Missing login parameter", status=400)
 
@@ -375,10 +398,7 @@ new Chart(ctx, {{
             return web.Response(text="Raid bot not initialized", status=503)
 
         auth_url = str(auth_manager.generate_auth_url(login))
-        return web.Response(
-            text=self._build_raid_auth_start_html(login, auth_url),
-            content_type="text/html",
-        )
+        raise web.HTTPFound(location=auth_url)
 
     async def raid_auth_go(self, request: web.Request) -> web.StreamResponse:
         """Kurz-Redirect für Discord-Buttons → leitet zum vollen Twitch-OAuth-URL weiter.

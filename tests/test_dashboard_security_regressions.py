@@ -9,6 +9,7 @@ from bot.analytics.api_overview import _AnalyticsOverviewMixin
 from bot.analytics.api_v2 import AnalyticsV2Mixin
 from bot.dashboard.billing_mixin import _DashboardBillingMixin
 from bot.dashboard.live import DashboardLiveMixin
+from bot.dashboard.raid_mixin import _DashboardRaidMixin
 from bot.dashboard.routes_mixin import _DashboardRoutesMixin
 from bot.dashboard.server_v2 import DashboardV2Server
 from bot.social_media.clip_manager import ClipManager
@@ -73,9 +74,14 @@ class _DummyOverviewAssetsAuth(_AnalyticsOverviewMixin):
 
 class _DummyInternalHomeApi(AnalyticsV2Mixin):
     def __init__(self, dashboard_session=None, discord_admin_session=None) -> None:
+        self._noauth = False
+        self._token = "admin-secret"
+        self._partner_token = "partner-secret"
         self.dashboard_session = dashboard_session
         self.discord_admin_session = discord_admin_session
         self.payload_args = None
+        self.changelog_can_write = None
+        self.created_changelog_args = None
 
     def _get_dashboard_auth_session(self, request):
         return self.dashboard_session
@@ -90,6 +96,15 @@ class _DummyInternalHomeApi(AnalyticsV2Mixin):
             "display_name": display_name,
             "days": days,
         }
+        events = [
+            {
+                "type": "raid_history",
+                "target_login": "raid_target",
+                "target_id": "424242",
+                "timestamp": "2026-03-03T12:30:00+00:00",
+                "status_label": "[RAID]",
+            }
+        ]
         return {
             "profile": {"twitch_login": twitch_login, "twitch_user_id": twitch_user_id},
             "status": {"raid_status": {"state": "active", "read_only": True}},
@@ -100,8 +115,39 @@ class _DummyInternalHomeApi(AnalyticsV2Mixin):
                 "bot_bans_keyword_count": 0,
             },
             "recent_streams": [],
-            "bot_impact": {"events": [], "summary": {}, "note": "ok"},
+            "bot_impact": {"events": list(events), "summary": {}, "note": "ok"},
+            "bot_activity": {"events": list(events)},
             "links": {"dashboard": "/twitch/dashboard"},
+        }
+
+    def _get_internal_home_changelog_payload(self, *, can_write):
+        self.changelog_can_write = can_write
+        return {
+            "entries": [
+                {
+                    "id": 1,
+                    "entry_date": "2026-03-03",
+                    "title": "Backend deployed",
+                    "content": "Internal Home changelog is live.",
+                    "created_at": "2026-03-03T12:00:00+00:00",
+                }
+            ],
+            "can_write": can_write,
+            "max_entries": 20,
+        }
+
+    def _create_internal_home_changelog_entry(self, *, title, content, entry_date):
+        self.created_changelog_args = {
+            "title": title,
+            "content": content,
+            "entry_date": entry_date,
+        }
+        return {
+            "id": 2,
+            "entry_date": entry_date.isoformat(),
+            "title": title,
+            "content": content,
+            "created_at": "2026-03-03T13:00:00+00:00",
         }
 
 
@@ -125,6 +171,25 @@ class _DummyLiveActions(DashboardLiveMixin):
     async def _do_add(self, raw: str) -> str:
         self.add_calls.append(raw)
         return raw or "added"
+
+
+class _DummyRaidAuthRoute(_DashboardRaidMixin):
+    def __init__(self) -> None:
+        self.dashboard_session = None
+        self.require_token_calls = 0
+        self._raid_bot = SimpleNamespace(
+            auth_manager=SimpleNamespace(
+                generate_auth_url=lambda login: f"https://auth.example/{login}"
+            )
+        )
+
+    def _get_dashboard_auth_session(self, request):
+        return self.dashboard_session
+
+    def _require_token(self, request):
+        del request
+        self.require_token_calls += 1
+        return None
 
 
 class _DummyDashboardChatBot:
@@ -572,6 +637,42 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
             methods = {route.method for route in app.router.routes() if route.resource.canonical == path}
             self.assertEqual(methods, {"POST"})
 
+    def test_internal_home_changelog_route_is_post_only(self) -> None:
+        app = web.Application()
+        handler = DashboardV2Server(
+            app_token="admin-secret",
+            noauth=False,
+            partner_token="partner-secret",
+        )
+        handler.attach(app)
+
+        methods = {
+            route.method
+            for route in app.router.routes()
+            if route.resource.canonical == "/twitch/api/v2/internal-home/changelog"
+        }
+        self.assertEqual(methods, {"POST"})
+
+    async def test_raid_auth_start_uses_session_login_without_admin_gate(self) -> None:
+        handler = _DummyRaidAuthRoute()
+        handler.dashboard_session = {"twitch_login": "partner_one"}
+        request = SimpleNamespace(query={})
+
+        with self.assertRaises(web.HTTPFound) as ctx:
+            await handler.raid_auth_start(request)
+        self.assertEqual(ctx.exception.location, "https://auth.example/partner_one")
+        self.assertEqual(handler.require_token_calls, 0)
+
+    async def test_raid_auth_start_login_override_requires_admin_gate(self) -> None:
+        handler = _DummyRaidAuthRoute()
+        handler.dashboard_session = {"twitch_login": "partner_one"}
+        request = SimpleNamespace(query={"login": "victim"})
+
+        with self.assertRaises(web.HTTPFound) as ctx:
+            await handler.raid_auth_start(request)
+        self.assertEqual(ctx.exception.location, "https://auth.example/victim")
+        self.assertEqual(handler.require_token_calls, 1)
+
     def test_rate_limit_key_ignores_forwarded_headers(self) -> None:
         handler = DashboardV2Server.__new__(DashboardV2Server)
         request = SimpleNamespace(
@@ -806,11 +907,41 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("kpis", payload)
         self.assertIn("recent_streams", payload)
         self.assertIn("bot_impact", payload)
+        self.assertIn("changelog", payload)
         self.assertIn("links", payload)
         self.assertEqual(payload["status"]["raid_status"]["state"], "active")
         self.assertTrue(payload["status"]["raid_status"]["read_only"])
+        self.assertEqual(payload["changelog"]["entries"][0]["id"], 1)
+        self.assertFalse(payload["changelog"]["can_write"])
+        self.assertEqual(payload["changelog"]["max_entries"], 20)
+        self.assertNotIn("target_id", payload["bot_impact"]["events"][0])
+        self.assertNotIn("target_id", payload["bot_activity"]["events"][0])
         self.assertEqual(handler.payload_args["twitch_login"], "partner_one")
+        self.assertFalse(handler.changelog_can_write)
         self.assertEqual(handler.payload_args["days"], 30)
+
+    async def test_internal_home_keeps_target_id_for_admin_session(self) -> None:
+        handler = _DummyInternalHomeApi(
+            dashboard_session={
+                "twitch_login": "earlysalty",
+                "twitch_user_id": "1",
+                "display_name": "Admin",
+            }
+        )
+        request = SimpleNamespace(
+            headers={"Host": "dashboard.example"},
+            host="dashboard.example",
+            remote="203.0.113.10",
+            transport=None,
+            query={},
+        )
+
+        response = await handler._api_v2_internal_home(request)
+        payload = json.loads(response.text)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["bot_impact"]["events"][0].get("target_id"), "424242")
+        self.assertEqual(payload["bot_activity"]["events"][0].get("target_id"), "424242")
 
     async def test_internal_home_rejects_discord_admin_without_twitch_binding(self) -> None:
         handler = _DummyInternalHomeApi(
@@ -824,6 +955,228 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(ctx.exception.text)
         self.assertEqual(payload.get("error"), "streamer_session_required")
         self.assertNotIn("profile", payload)
+
+    async def test_internal_home_allows_admin_streamer_override_without_twitch_binding(self) -> None:
+        handler = _DummyInternalHomeApi(
+            dashboard_session=None,
+            discord_admin_session={"user_id": 77, "display_name": "Admin User"},
+        )
+        request = SimpleNamespace(
+            headers={"Host": "dashboard.example"},
+            host="dashboard.example",
+            remote="203.0.113.10",
+            transport=None,
+            query={"streamer": "partner_two"},
+        )
+
+        response = await handler._api_v2_internal_home(request)
+        payload = json.loads(response.text)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["profile"]["twitch_login"], "partner_two")
+        self.assertEqual(handler.payload_args["twitch_login"], "partner_two")
+        self.assertEqual(handler.payload_args["display_name"], "partner_two")
+
+    async def test_internal_home_rejects_partner_streamer_override(self) -> None:
+        handler = _DummyInternalHomeApi(
+            dashboard_session={
+                "twitch_login": "partner_one",
+                "twitch_user_id": "1001",
+                "display_name": "Partner One",
+            }
+        )
+        request = SimpleNamespace(
+            headers={"Host": "dashboard.example"},
+            host="dashboard.example",
+            remote="203.0.113.10",
+            transport=None,
+            query={"streamer": "partner_two"},
+        )
+
+        with self.assertRaises(web.HTTPForbidden) as ctx:
+            await handler._api_v2_internal_home(request)
+        payload = json.loads(ctx.exception.text)
+        self.assertEqual(payload.get("error"), "streamer_override_requires_admin")
+
+    async def test_internal_home_changelog_create_rejects_partner_session(self) -> None:
+        handler = _DummyInternalHomeApi(
+            dashboard_session={
+                "twitch_login": "partner_one",
+                "twitch_user_id": "1001",
+                "display_name": "Partner One",
+            }
+        )
+
+        class _Request:
+            headers = {"Host": "dashboard.example"}
+            host = "dashboard.example"
+            remote = "203.0.113.10"
+            transport = None
+
+            async def json(self):
+                return {"content": "Should not write"}
+
+        response = await handler._api_v2_internal_home_changelog_create(_Request())
+        payload = json.loads(response.text)
+
+        self.assertEqual(response.status, 403)
+        self.assertEqual(payload.get("error"), "admin_required")
+        self.assertIsNone(handler.created_changelog_args)
+
+    async def test_internal_home_changelog_create_allows_admin_session(self) -> None:
+        handler = _DummyInternalHomeApi(
+            dashboard_session={
+                "twitch_login": "earlysalty",
+                "twitch_user_id": "1",
+                "display_name": "Admin",
+            }
+        )
+
+        class _Request:
+            headers = {
+                "Host": "dashboard.example",
+                "Origin": "http://dashboard.example",
+            }
+            host = "dashboard.example"
+            remote = "203.0.113.10"
+            transport = None
+
+            async def json(self):
+                return {
+                    "title": "Backend",
+                    "content": "Stored from admin session.",
+                    "entry_date": "2026-03-03",
+                }
+
+        response = await handler._api_v2_internal_home_changelog_create(_Request())
+        payload = json.loads(response.text)
+
+        self.assertEqual(response.status, 201)
+        self.assertEqual(payload.get("id"), 2)
+        self.assertEqual(payload.get("entry_date"), "2026-03-03")
+        self.assertEqual(payload.get("title"), "Backend")
+        self.assertEqual(payload.get("content"), "Stored from admin session.")
+        self.assertIsNotNone(handler.created_changelog_args)
+        self.assertEqual(handler.created_changelog_args["entry_date"].isoformat(), "2026-03-03")
+
+    async def test_internal_home_changelog_create_rejects_session_without_origin_headers(self) -> None:
+        handler = _DummyInternalHomeApi(
+            dashboard_session={
+                "twitch_login": "earlysalty",
+                "twitch_user_id": "1",
+                "display_name": "Admin",
+            }
+        )
+
+        class _Request:
+            headers = {"Host": "dashboard.example"}
+            host = "dashboard.example"
+            remote = "203.0.113.10"
+            transport = None
+
+            async def json(self):
+                return {"content": "No origin"}
+
+        response = await handler._api_v2_internal_home_changelog_create(_Request())
+        payload = json.loads(response.text)
+
+        self.assertEqual(response.status, 403)
+        self.assertEqual(payload.get("error"), "csrf_origin_invalid")
+        self.assertIsNone(handler.created_changelog_args)
+
+    async def test_internal_home_changelog_create_rejects_cross_origin_session_request(self) -> None:
+        handler = _DummyInternalHomeApi(
+            dashboard_session={
+                "twitch_login": "earlysalty",
+                "twitch_user_id": "1",
+                "display_name": "Admin",
+            }
+        )
+
+        class _Request:
+            headers = {
+                "Host": "dashboard.example",
+                "Origin": "https://evil.example",
+            }
+            host = "dashboard.example"
+            remote = "203.0.113.10"
+            transport = None
+
+            async def json(self):
+                return {"content": "Cross origin"}
+
+        response = await handler._api_v2_internal_home_changelog_create(_Request())
+        payload = json.loads(response.text)
+
+        self.assertEqual(response.status, 403)
+        self.assertEqual(payload.get("error"), "csrf_origin_invalid")
+        self.assertIsNone(handler.created_changelog_args)
+
+    async def test_internal_home_changelog_create_allows_admin_token_without_origin_header(self) -> None:
+        handler = _DummyInternalHomeApi(dashboard_session=None)
+
+        class _Request:
+            headers = {
+                "Host": "dashboard.example",
+                "X-Admin-Token": "admin-secret",
+            }
+            host = "dashboard.example"
+            remote = "203.0.113.10"
+            transport = None
+
+            async def json(self):
+                return {
+                    "title": "Token path",
+                    "content": "Stored from token-auth API client.",
+                    "entry_date": "2026-03-03",
+                }
+
+        response = await handler._api_v2_internal_home_changelog_create(_Request())
+        payload = json.loads(response.text)
+
+        self.assertEqual(response.status, 201)
+        self.assertEqual(payload.get("id"), 2)
+        self.assertEqual(payload.get("title"), "Token path")
+        self.assertIsNotNone(handler.created_changelog_args)
+
+    async def test_internal_home_changelog_create_applies_rate_limit(self) -> None:
+        class _RateLimitedInternalHomeApi(_DummyInternalHomeApi):
+            def __init__(self, **kwargs) -> None:
+                super().__init__(**kwargs)
+                self.rate_limit_args = None
+
+            def _check_rate_limit(self, request, *, max_requests=10, window_seconds=60.0):
+                del request
+                self.rate_limit_args = (max_requests, window_seconds)
+                return False
+
+        handler = _RateLimitedInternalHomeApi(
+            dashboard_session={
+                "twitch_login": "earlysalty",
+                "twitch_user_id": "1",
+                "display_name": "Admin",
+            }
+        )
+
+        class _Request:
+            headers = {
+                "Host": "dashboard.example",
+                "Origin": "http://dashboard.example",
+            }
+            host = "dashboard.example"
+            remote = "203.0.113.10"
+            transport = None
+
+            async def json(self):
+                return {"content": "Should be rate-limited"}
+
+        response = await handler._api_v2_internal_home_changelog_create(_Request())
+        payload = json.loads(response.text)
+
+        self.assertEqual(response.status, 429)
+        self.assertEqual(payload.get("error"), "rate_limit_exceeded")
+        self.assertEqual(handler.rate_limit_args, (10, 60.0))
+        self.assertIsNone(handler.created_changelog_args)
 
     async def test_demo_dashboard_v2_assets_do_not_redirect_when_unauthenticated(self) -> None:
         handler = _DummyOverviewAssetsAuth()

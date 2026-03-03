@@ -42,6 +42,10 @@ class _AnalyticsOverviewMixin:
         router.add_get("/twitch/api/v2/session/{id}", self._api_v2_session_detail)
         router.add_get("/twitch/api/v2/auth-status", self._api_v2_auth_status)
         router.add_get("/twitch/api/v2/internal-home", self._api_v2_internal_home)
+        router.add_post(
+            "/twitch/api/v2/internal-home/changelog",
+            self._api_v2_internal_home_changelog_create,
+        )
         # New Audience Analytics Endpoints
         router.add_get(
             "/twitch/api/v2/watch-time-distribution",

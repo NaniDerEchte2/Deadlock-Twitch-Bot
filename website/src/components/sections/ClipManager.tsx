@@ -10,6 +10,8 @@ interface EmbeddedClip {
   embedUrl: string;
 }
 
+const TWITCH_PARENTS = ["earlysalty.de", "www.earlysalty.de"] as const;
+
 const CLIPS: EmbeddedClip[] = [
   {
     id: "twitch-main",
@@ -17,7 +19,7 @@ const CLIPS: EmbeddedClip[] = [
     sourceUrl:
       "https://www.twitch.tv/earlysalty/clip/PlainSleepyBaboonDoritosChip-S5HmbowuRWcgn74-",
     embedUrl:
-      "https://clips.twitch.tv/embed?clip=PlainSleepyBaboonDoritosChip-S5HmbowuRWcgn74-&parent=earlysalty.de&parent=www.earlysalty.de",
+      "https://clips.twitch.tv/embed?clip=PlainSleepyBaboonDoritosChip-S5HmbowuRWcgn74-",
   },
   {
     id: "medal-1",
@@ -54,10 +56,27 @@ function wrapIndex(index: number, length: number) {
 }
 
 function clipSrc(clip: EmbeddedClip, active: boolean) {
-  if (!active || clip.platform !== "Twitch") {
+  if (clip.platform !== "Twitch") {
     return clip.embedUrl;
   }
-  return `${clip.embedUrl}&autoplay=true&muted=true`;
+
+  const url = new URL(clip.embedUrl);
+  const parents = new Set<string>(TWITCH_PARENTS);
+
+  if (typeof window !== "undefined" && window.location.hostname) {
+    parents.add(window.location.hostname);
+  }
+
+  for (const parent of parents) {
+    url.searchParams.append("parent", parent);
+  }
+
+  if (active) {
+    url.searchParams.set("autoplay", "true");
+    url.searchParams.set("muted", "true");
+  }
+
+  return url.toString();
 }
 
 function ClipPreview({

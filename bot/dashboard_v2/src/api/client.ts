@@ -46,7 +46,9 @@ import type {
 
 const API_BASE = '/twitch/api/v2';
 const INTERNAL_REDIRECT_PREFIX = '/twitch';
+const INTERNAL_HOME_LOGIN_FALLBACK = '/twitch/auth/login?next=%2Ftwitch%2Fdashboard';
 const DASHBOARD_V2_LOGIN_FALLBACK = '/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2';
+const INTERNAL_HOME_BLOCKED_OAUTH_PATHS = ['/twitch/raid/requirements'] as const;
 
 // Get partner token from URL or localStorage
 function getPartnerToken(): string | null {
@@ -102,6 +104,25 @@ function sanitizeInternalRedirectUrl(rawUrl: string | null | undefined, fallback
   } catch {
     return safeFallback;
   }
+}
+
+function sanitizeInternalHomeOauthUrl(
+  rawUrl: string | null | undefined,
+  fallback = INTERNAL_HOME_LOGIN_FALLBACK
+): string {
+  const safeFallback = sanitizeInternalRedirectUrl(null, fallback);
+  const sanitized = sanitizeInternalRedirectUrl(rawUrl, safeFallback);
+
+  try {
+    const parsed = new URL(sanitized, window.location.origin);
+    if (INTERNAL_HOME_BLOCKED_OAUTH_PATHS.some((blockedPath) => blockedPath === parsed.pathname)) {
+      return safeFallback;
+    }
+  } catch {
+    return safeFallback;
+  }
+
+  return sanitized;
 }
 
 // Helper to build URL with params
@@ -328,13 +349,38 @@ export interface InternalHomeSession {
   category?: string | null;
 }
 
-export interface InternalHomeImpactEntry {
+export interface InternalHomeActionEntry {
   id?: number | string;
   timestamp?: string | null;
+  eventType?: string | null;
+  statusLabel?: string | null;
+  targetLogin?: string | null;
+  targetId?: string | null;
+  actorLogin?: string | null;
+  reason?: string | null;
+  summary?: string | null;
   title?: string | null;
   description?: string | null;
   metric?: string | null;
+  viewerCount?: number | null;
+  success?: boolean | null;
   severity?: 'success' | 'info' | 'warning' | 'critical' | string;
+}
+
+export type InternalHomeImpactEntry = InternalHomeActionEntry;
+
+export interface InternalHomeChangelogEntry {
+  id?: number | string;
+  entryDate?: string | null;
+  title?: string | null;
+  content?: string | null;
+  createdAt?: string | null;
+}
+
+export interface InternalHomeChangelog {
+  entries?: InternalHomeChangelogEntry[] | null;
+  canWrite?: boolean;
+  maxEntries?: number | null;
 }
 
 export interface InternalHomeData {
@@ -346,7 +392,9 @@ export interface InternalHomeData {
   raid?: InternalHomeRaidStatus | null;
   kpis30d?: InternalHomeKpis30d | null;
   recentStreams?: InternalHomeSession[] | null;
+  actionLog?: InternalHomeActionEntry[] | null;
   impactFeed?: InternalHomeImpactEntry[] | null;
+  changelog?: InternalHomeChangelog | null;
   generatedAt?: string | null;
 }
 
@@ -390,12 +438,28 @@ interface InternalHomeRawStream {
 
 interface InternalHomeRawImpactEvent {
   type?: string | null;
+  event_type?: string | null;
   timestamp?: string | null;
+  title?: string | null;
+  status_label?: string | null;
+  description?: string | null;
+  metric?: string | null;
   target_login?: string | null;
+  target_id?: string | null;
   moderator_login?: string | null;
+  actor_login?: string | null;
   reason?: string | null;
   viewer_count?: number | null;
   success?: boolean | null;
+  severity?: string | null;
+}
+
+interface InternalHomeRawChangelogEntry {
+  id?: number | string | null;
+  entry_date?: string | null;
+  title?: string | null;
+  content?: string | null;
+  created_at?: string | null;
 }
 
 interface InternalHomeRawResponse {
@@ -409,6 +473,14 @@ interface InternalHomeRawResponse {
   bot_impact?: {
     events?: InternalHomeRawImpactEvent[] | null;
     note?: string | null;
+  } | null;
+  bot_activity?: {
+    events?: InternalHomeRawImpactEvent[] | null;
+  } | null;
+  changelog?: {
+    entries?: InternalHomeRawChangelogEntry[] | null;
+    can_write?: boolean;
+    max_entries?: number | null;
   } | null;
   links?: {
     oauth_reconnect?: string | null;
@@ -431,35 +503,79 @@ function toFiniteNumber(value: unknown): number | undefined {
 function mapImpactEntry(
   entry: InternalHomeRawImpactEvent,
   index: number
-): InternalHomeImpactEntry {
-  const eventType = String(entry.type || '').toLowerCase();
+): InternalHomeActionEntry {
+  const eventType = String(entry.event_type || entry.type || '').toLowerCase();
   const timestamp = String(entry.timestamp || '') || null;
+  const target = String(entry.target_login || '').trim() || null;
+  const targetId = String(entry.target_id || '').trim() || null;
+  const actorLogin =
+    String(entry.actor_login || entry.moderator_login || '').trim() || null;
+  const reason = String(entry.reason || '').trim();
+  const metric = String(entry.metric || '').trim();
+  const description = String(entry.description || '').trim();
+  const title = String(entry.title || '').trim();
+  const viewers = toFiniteNumber(entry.viewer_count);
+  const severity = String(entry.severity || '').trim().toLowerCase();
+  const normalizedSeverity =
+    severity === 'critical' || severity === 'warning' || severity === 'success' || severity === 'info'
+      ? severity
+      : undefined;
 
-  if (eventType === 'ban_keyword_hit') {
-    const target = String(entry.target_login || '').trim();
-    const moderator = String(entry.moderator_login || '').trim();
-    const reason = String(entry.reason || '').trim();
+  if (eventType === 'ban' || eventType === 'ban_keyword_hit') {
     return {
       id: `ban-${index}`,
       timestamp,
-      title: target ? `Ban gegen ${target}` : 'Bot-relevanter Ban',
-      description: reason || (moderator ? `Mod: ${moderator}` : 'Ban-Reason nicht gesetzt'),
-      metric: moderator ? `Moderator: ${moderator}` : null,
-      severity: 'warning',
+      eventType: 'ban',
+      statusLabel: entry.status_label || '[BANNED]',
+      targetLogin: target,
+      targetId,
+      actorLogin,
+      reason: reason || null,
+      summary: reason || (actorLogin ? `Mod: @${actorLogin}` : 'Ban ausgeführt'),
+      title: title || (target ? `Ban gegen @${target}` : 'Ban ausgeführt'),
+      description: description || null,
+      metric: metric || null,
+      severity: normalizedSeverity || 'warning',
     };
   }
 
-  if (eventType === 'raid_history') {
-    const target = String(entry.target_login || '').trim();
-    const viewers = toFiniteNumber(entry.viewer_count);
-    const reason = String(entry.reason || '').trim();
+  if (eventType === 'unban') {
+    return {
+      id: `unban-${index}`,
+      timestamp,
+      eventType: 'unban',
+      statusLabel: entry.status_label || '[UNBANNED]',
+      targetLogin: target,
+      targetId,
+      actorLogin,
+      reason: reason || null,
+      summary: reason || (actorLogin ? `Unban durch @${actorLogin}` : 'Unban ausgeführt'),
+      title: title || (target ? `Unban für @${target}` : 'Unban ausgeführt'),
+      description: description || null,
+      metric: metric || null,
+      severity: normalizedSeverity || 'success',
+    };
+  }
+
+  if (eventType === 'raid' || eventType === 'raid_history') {
     const success = entry.success !== false;
     return {
       id: `raid-${index}`,
       timestamp,
-      title: target ? `Raid zu ${target}` : 'Raid-Aktivität',
-      description: reason || (success ? 'Raid erfolgreich ausgeführt' : 'Raid nicht erfolgreich'),
-      metric: viewers !== undefined ? `${viewers.toLocaleString('de-DE')} Viewer` : null,
+      eventType: 'raid',
+      statusLabel: entry.status_label || '[RAID]',
+      targetLogin: target,
+      targetId,
+      actorLogin,
+      reason: reason || null,
+      summary:
+        reason || (success ? 'Raid erfolgreich ausgeführt' : 'Raid nicht erfolgreich'),
+      title: title || (target ? `Raid zu @${target}` : 'Raid-Aktivität'),
+      description: description || null,
+      metric:
+        metric || (viewers !== undefined ? `${viewers.toLocaleString('de-DE')} Viewer` : null),
+      viewerCount: viewers ?? null,
+      success,
       severity: success ? 'info' : 'warning',
     };
   }
@@ -467,46 +583,78 @@ function mapImpactEntry(
   return {
     id: `event-${index}`,
     timestamp,
-    title: 'Bot Update',
-    description: 'Neues Bot-Ereignis',
-    severity: 'info',
+    eventType: eventType || 'event',
+    statusLabel: entry.status_label || '[EVENT]',
+    targetLogin: target,
+    targetId,
+    actorLogin,
+    reason: reason || null,
+    summary: description || reason || 'Neues Bot-Ereignis',
+    title: title || 'Bot Update',
+    description: description || null,
+    metric: metric || null,
+    viewerCount: viewers ?? null,
+    success: entry.success ?? null,
+    severity: normalizedSeverity || 'info',
   };
 }
 
-export async function fetchInternalHome(): Promise<InternalHomeData> {
-  const raw = await fetchApi<InternalHomeRawResponse>('/internal-home');
+function mapChangelogEntry(
+  entry: InternalHomeRawChangelogEntry,
+  index: number
+): InternalHomeChangelogEntry {
+  return {
+    id: entry.id ?? `changelog-${index}`,
+    entryDate: entry.entry_date || null,
+    title: entry.title || null,
+    content: entry.content || null,
+    createdAt: entry.created_at || null,
+  };
+}
+
+export async function fetchInternalHome(streamer?: string | null): Promise<InternalHomeData> {
+  const raw = await fetchApi<InternalHomeRawResponse>('/internal-home', {
+    ...(streamer ? { streamer } : {}),
+  });
   const profile = raw.profile || {};
   const status = raw.status || {};
   const oauth = status.oauth || {};
   const raidStatus = status.raid_status || {};
   const kpis = raw.kpis || {};
   const links = raw.links || {};
-  const loginUrl = sanitizeInternalRedirectUrl(
+  const missingScopes = oauth.missing_scopes || [];
+  const loginUrl = sanitizeInternalHomeOauthUrl(
     links.oauth_reconnect || null,
-    '/twitch/auth/login?next=%2Ftwitch%2Fdashboard'
+    INTERNAL_HOME_LOGIN_FALLBACK
   );
-  const reconnectUrl = sanitizeInternalRedirectUrl(
+  const reconnectUrl = sanitizeInternalHomeOauthUrl(
     oauth.reconnect_url || links.oauth_reconnect || null,
-    '/twitch/raid/auth'
+    INTERNAL_HOME_LOGIN_FALLBACK
   );
-  const profileUrl = sanitizeInternalRedirectUrl(
-    oauth.profile_url || links.profile_status || null,
-    '/twitch/raid/requirements'
-  );
+  const profileStatusUrl =
+    oauth.profile_url || links.profile_status || oauth.reconnect_url || links.oauth_reconnect || null;
+  const profileUrl = missingScopes.length > 0
+    ? reconnectUrl
+    : sanitizeInternalHomeOauthUrl(profileStatusUrl, INTERNAL_HOME_LOGIN_FALLBACK);
 
   const impactEvents = (raw.bot_impact?.events || []).map(mapImpactEntry);
+  const activityEvents = (raw.bot_activity?.events || []).map(mapImpactEntry);
+  const actionLog =
+    activityEvents.length > 0 ? activityEvents : impactEvents;
   const note = String(raw.bot_impact?.note || '').trim();
   if (note) {
-    impactEvents.push({
+    actionLog.push({
       id: 'impact-note',
       timestamp: raw.generated_at || null,
+      eventType: 'note',
+      statusLabel: '[INFO]',
+      summary: note,
       title: 'Hinweis',
       description: note,
       severity: 'info',
     });
   }
 
-  const missingScopes = oauth.missing_scopes || [];
   const connected = Boolean(oauth.connected);
   const oauthStatus = String(oauth.status || '').toLowerCase();
   const normalizedOauthStatus: InternalHomeOAuthStatus['status'] =
@@ -562,8 +710,76 @@ export async function fetchInternalHome(): Promise<InternalHomeData> {
       category: null,
       followerDelta: toFiniteNumber(stream.follower_delta),
     })),
-    impactFeed: impactEvents,
+    actionLog,
+    impactFeed: actionLog,
+    changelog: {
+      entries: (raw.changelog?.entries || []).map(mapChangelogEntry),
+      canWrite: raw.changelog?.can_write !== false,
+      maxEntries: toFiniteNumber(raw.changelog?.max_entries),
+    },
     generatedAt: raw.generated_at || null,
+  };
+}
+
+export interface CreateInternalHomeChangelogPayload {
+  title?: string;
+  content: string;
+  entryDate?: string;
+}
+
+export async function createInternalHomeChangelogEntry(
+  payload: CreateInternalHomeChangelogPayload
+): Promise<InternalHomeChangelogEntry> {
+  const url = buildUrl('/internal-home/changelog');
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: payload.title || '',
+      content: payload.content || '',
+      entry_date: payload.entryDate || null,
+    }),
+  });
+
+  if (response.status === 401) {
+    const unauthorized = await response.json().catch(() => null) as
+      | { error?: string; loginUrl?: string }
+      | null;
+    if (unauthorized?.loginUrl) {
+      window.location.href = sanitizeInternalRedirectUrl(
+        unauthorized.loginUrl,
+        '/twitch/auth/login?next=%2Ftwitch%2Fdashboard'
+      );
+      throw new Error('Redirecting to Twitch login');
+    }
+    throw new Error(unauthorized?.error || 'Unauthorized');
+  }
+
+  const body = await response.json().catch(() => null) as
+    | {
+        id?: number | string;
+        entry_date?: string | null;
+        title?: string | null;
+        content?: string | null;
+        created_at?: string | null;
+        error?: string;
+        message?: string;
+      }
+    | null;
+
+  if (!response.ok) {
+    throw new Error(body?.message || body?.error || `Server-Fehler (HTTP ${response.status})`);
+  }
+
+  return {
+    id: body?.id ?? undefined,
+    entryDate: body?.entry_date || null,
+    title: body?.title || null,
+    content: body?.content || null,
+    createdAt: body?.created_at || null,
   };
 }
 

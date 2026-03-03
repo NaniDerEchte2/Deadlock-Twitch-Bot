@@ -7,7 +7,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
@@ -48,6 +48,13 @@ _INTERNAL_HOME_REQUIRED_SCOPES: tuple[str, ...] = (
     "moderator:manage:chat_messages",
     "moderator:read:chatters",
 )
+_INTERNAL_HOME_CHANGELOG_MAX_ENTRIES = 20
+_INTERNAL_HOME_CHANGELOG_TITLE_MAX_LENGTH = 160
+_INTERNAL_HOME_CHANGELOG_CONTENT_MAX_LENGTH = 4000
+_INTERNAL_HOME_RATE_LIMIT_MAX_REQUESTS = 30
+_INTERNAL_HOME_RATE_LIMIT_WINDOW_SECONDS = 60.0
+_INTERNAL_HOME_CHANGELOG_WRITE_RATE_LIMIT_MAX_REQUESTS = 10
+_INTERNAL_HOME_CHANGELOG_WRITE_RATE_LIMIT_WINDOW_SECONDS = 60.0
 
 
 def _is_loopback_host(raw_value: str) -> bool:
@@ -434,6 +441,173 @@ class AnalyticsV2Mixin(
             return str(value.isoformat())
         return str(value)
 
+    @staticmethod
+    def _internal_home_entry_date_iso(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        text = str(value).strip()
+        return text[:10] if text else ""
+
+    @staticmethod
+    def _empty_internal_home_changelog_payload(*, can_write: bool) -> dict[str, Any]:
+        return {
+            "entries": [],
+            "can_write": bool(can_write),
+            "max_entries": _INTERNAL_HOME_CHANGELOG_MAX_ENTRIES,
+        }
+
+    def _ensure_internal_home_changelog_storage(self, conn: Any) -> None:
+        if getattr(self, "_internal_home_changelog_storage_ready", False):
+            return
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS internal_home_changelog (
+                id BIGSERIAL PRIMARY KEY,
+                entry_date DATE NOT NULL DEFAULT CURRENT_DATE,
+                title TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "ALTER TABLE internal_home_changelog ADD COLUMN IF NOT EXISTS entry_date DATE"
+        )
+        conn.execute(
+            "ALTER TABLE internal_home_changelog ADD COLUMN IF NOT EXISTS title TEXT"
+        )
+        conn.execute(
+            "ALTER TABLE internal_home_changelog ADD COLUMN IF NOT EXISTS content TEXT"
+        )
+        conn.execute(
+            "ALTER TABLE internal_home_changelog ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ"
+        )
+        conn.execute(
+            """
+            UPDATE internal_home_changelog
+            SET
+                created_at = COALESCE(created_at, CURRENT_TIMESTAMP),
+                entry_date = COALESCE(
+                    entry_date,
+                    CAST(COALESCE(created_at, CURRENT_TIMESTAMP) AS DATE),
+                    CURRENT_DATE
+                ),
+                title = COALESCE(title, ''),
+                content = COALESCE(content, '')
+            WHERE created_at IS NULL
+               OR entry_date IS NULL
+               OR title IS NULL
+               OR content IS NULL
+            """
+        )
+        conn.execute(
+            "ALTER TABLE internal_home_changelog ALTER COLUMN entry_date SET DEFAULT CURRENT_DATE"
+        )
+        conn.execute(
+            "ALTER TABLE internal_home_changelog ALTER COLUMN title SET DEFAULT ''"
+        )
+        conn.execute(
+            "ALTER TABLE internal_home_changelog ALTER COLUMN content SET DEFAULT ''"
+        )
+        conn.execute(
+            """
+            ALTER TABLE internal_home_changelog
+            ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_internal_home_changelog_order
+            ON internal_home_changelog (entry_date DESC, created_at DESC, id DESC)
+            """
+        )
+        self._internal_home_changelog_storage_ready = True
+
+    def _serialize_internal_home_changelog_entry(self, row: Any) -> dict[str, Any]:
+        if not row:
+            return {
+                "id": None,
+                "entry_date": None,
+                "title": "",
+                "content": "",
+                "created_at": None,
+            }
+
+        raw_id = row[0]
+        try:
+            entry_id = int(raw_id) if raw_id is not None else None
+        except Exception:
+            entry_id = raw_id
+
+        entry_date = self._internal_home_entry_date_iso(row[1]) or None
+        created_at = self._internal_home_iso(row[4]) or None
+        return {
+            "id": entry_id,
+            "entry_date": entry_date,
+            "title": str(row[2] or ""),
+            "content": str(row[3] or ""),
+            "created_at": created_at,
+        }
+
+    def _fetch_internal_home_changelog_entries(self, conn: Any) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT id, entry_date, title, content, created_at
+            FROM internal_home_changelog
+            ORDER BY entry_date DESC, created_at DESC, id DESC
+            LIMIT ?
+            """,
+            [_INTERNAL_HOME_CHANGELOG_MAX_ENTRIES],
+        ).fetchall()
+        return [self._serialize_internal_home_changelog_entry(row) for row in rows]
+
+    def _get_internal_home_changelog_payload(self, *, can_write: bool) -> dict[str, Any]:
+        from ..storage import pg as storage
+
+        with storage.get_conn() as conn:
+            self._ensure_internal_home_changelog_storage(conn)
+            payload = self._empty_internal_home_changelog_payload(can_write=can_write)
+            payload["entries"] = self._fetch_internal_home_changelog_entries(conn)
+            return payload
+
+    def _create_internal_home_changelog_entry(
+        self,
+        *,
+        title: str,
+        content: str,
+        entry_date: date,
+    ) -> dict[str, Any]:
+        from ..storage import pg as storage
+
+        with storage.get_conn() as conn:
+            self._ensure_internal_home_changelog_storage(conn)
+            row = conn.execute(
+                """
+                INSERT INTO internal_home_changelog (entry_date, title, content)
+                VALUES (?, ?, ?)
+                RETURNING id, entry_date, title, content, created_at
+                """,
+                [entry_date, title, content],
+            ).fetchone()
+            conn.execute(
+                """
+                DELETE FROM internal_home_changelog
+                WHERE id IN (
+                    SELECT id
+                    FROM internal_home_changelog
+                    ORDER BY entry_date DESC, created_at DESC, id DESC
+                    OFFSET ?
+                )
+                """,
+                [_INTERNAL_HOME_CHANGELOG_MAX_ENTRIES],
+            )
+        return self._serialize_internal_home_changelog_entry(row)
+
     def _raise_internal_home_unauthorized(self, code: str, message: str) -> None:
         payload = {
             "error": code,
@@ -442,7 +616,133 @@ class AnalyticsV2Mixin(
         }
         raise web.HTTPUnauthorized(text=json.dumps(payload), content_type="application/json")
 
-    def _resolve_internal_home_identity(self, request: web.Request) -> tuple[str, str, str]:
+    @staticmethod
+    def _normalize_origin_value(raw_value: str | None) -> str:
+        value = str(raw_value or "").strip()
+        if not value or value.lower() == "null":
+            return ""
+        try:
+            parts = urlsplit(value)
+        except Exception:
+            return ""
+        if not parts.scheme or not parts.netloc:
+            return ""
+        return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+
+    def _request_origin(self, request: web.Request) -> str:
+        host = str(request.headers.get("Host") or request.host or "").strip()
+        if not host:
+            return ""
+
+        is_secure = bool(getattr(request, "secure", False))
+        secure_getter = getattr(self, "_is_secure_request", None)
+        if callable(secure_getter):
+            try:
+                is_secure = bool(secure_getter(request))
+            except Exception:
+                log.debug("Could not resolve request security state", exc_info=True)
+
+        scheme = "https" if is_secure else "http"
+        return f"{scheme}://{host.lower()}"
+
+    def _has_dashboard_bound_session(self, request: web.Request) -> bool:
+        try:
+            return isinstance(self._get_dashboard_session(request), dict)
+        except Exception:
+            log.debug("Could not resolve dashboard session state", exc_info=True)
+            return False
+
+    def _is_same_origin_session_request(self, request: web.Request) -> bool:
+        expected_origin = self._request_origin(request)
+        if not expected_origin:
+            return False
+
+        header_origin = self._normalize_origin_value(request.headers.get("Origin"))
+        if header_origin:
+            return header_origin == expected_origin
+
+        referer_origin = self._normalize_origin_value(request.headers.get("Referer"))
+        if referer_origin:
+            return referer_origin == expected_origin
+
+        return False
+
+    def _internal_home_rate_limit_response(
+        self,
+        request: web.Request,
+        *,
+        max_requests: int,
+        window_seconds: float,
+    ) -> web.Response | None:
+        check_rate_limit = getattr(self, "_check_rate_limit", None)
+        if not callable(check_rate_limit):
+            return None
+
+        allowed = True
+        try:
+            allowed = bool(
+                check_rate_limit(
+                    request,
+                    max_requests=max_requests,
+                    window_seconds=window_seconds,
+                )
+            )
+        except TypeError:
+            try:
+                allowed = bool(check_rate_limit(request))
+            except Exception:
+                log.debug("internal-home rate-limit hook failed", exc_info=True)
+        except Exception:
+            log.debug("internal-home rate-limit hook failed", exc_info=True)
+
+        if allowed:
+            return None
+
+        retry_after = str(int(window_seconds)) if window_seconds >= 1 else "1"
+        return web.json_response(
+            {
+                "error": "rate_limit_exceeded",
+                "message": "Too many requests. Please retry shortly.",
+            },
+            status=429,
+            headers={"Retry-After": retry_after},
+        )
+
+    @staticmethod
+    def _strip_internal_home_target_ids(payload: dict[str, Any]) -> None:
+        for section_key in ("bot_impact", "bot_activity"):
+            section = payload.get(section_key)
+            if not isinstance(section, dict):
+                continue
+            events = section.get("events")
+            if not isinstance(events, list):
+                continue
+            for event in events:
+                if isinstance(event, dict):
+                    event.pop("target_id", None)
+
+    def _normalize_internal_home_streamer_override(self, raw_value: str | None) -> str:
+        candidate = str(raw_value or "").strip()
+        if not candidate:
+            return ""
+        normalizer = getattr(self, "_normalize_login", None)
+        if callable(normalizer):
+            try:
+                normalized = normalizer(candidate)
+            except Exception:
+                log.debug("Could not normalize internal-home streamer override", exc_info=True)
+                normalized = None
+            if normalized:
+                return str(normalized).strip().lower()
+            return ""
+        return candidate.lower()
+
+    def _resolve_internal_home_identity(
+        self,
+        request: web.Request,
+        *,
+        streamer_override: str | None = None,
+    ) -> tuple[str, str, str]:
         session = self._get_dashboard_session(request)
         if not isinstance(session, dict):
             self._raise_internal_home_unauthorized(
@@ -450,9 +750,31 @@ class AnalyticsV2Mixin(
                 "A valid dashboard session is required.",
             )
         assert isinstance(session, dict)
+
+        requested_streamer = self._normalize_internal_home_streamer_override(streamer_override)
+        is_admin = False
+        try:
+            is_admin = self._check_v2_admin_auth(request)
+        except Exception:
+            log.debug("Could not resolve admin state for internal-home override", exc_info=True)
+
         twitch_login = str(session.get("twitch_login") or "").strip().lower()
         twitch_user_id = str(session.get("twitch_user_id") or "").strip()
         display_name = str(session.get("display_name") or twitch_login).strip() or twitch_login
+
+        if requested_streamer:
+            if not is_admin and requested_streamer != twitch_login:
+                raise web.HTTPForbidden(
+                    text=json.dumps(
+                        {
+                            "error": "streamer_override_requires_admin",
+                            "message": "Only admin sessions may view another streamer's profile.",
+                        }
+                    ),
+                    content_type="application/json",
+                )
+            return requested_streamer, "", requested_streamer
+
         if not twitch_login and not twitch_user_id:
             self._raise_internal_home_unauthorized(
                 "streamer_session_required",
@@ -617,14 +939,14 @@ class AnalyticsV2Mixin(
 
                 ban_event_rows = conn.execute(
                     f"""
-                    SELECT b.received_at, b.target_login, b.moderator_login, b.reason
+                    SELECT b.received_at, b.target_login, b.target_id, b.moderator_login, b.reason
                     FROM twitch_ban_events b
                     WHERE b.received_at >= ?
                       AND b.twitch_user_id = ?
                       AND LOWER(COALESCE(b.event_type, '')) = 'ban'
                       AND {ban_clause}
                     ORDER BY b.received_at DESC
-                    LIMIT 5
+                    LIMIT 10
                     """,
                     [since_date, resolved_user_id, *ban_params],
                 ).fetchall()
@@ -634,8 +956,10 @@ class AnalyticsV2Mixin(
                             "type": "ban_keyword_hit",
                             "timestamp": self._internal_home_iso(row[0]),
                             "target_login": str(row[1] or ""),
-                            "moderator_login": str(row[2] or ""),
-                            "reason": str(row[3] or ""),
+                            "target_id": str(row[2] or ""),
+                            "moderator_login": str(row[3] or ""),
+                            "reason": str(row[4] or ""),
+                            "status_label": "[BANNED]",
                         }
                     )
 
@@ -645,6 +969,7 @@ class AnalyticsV2Mixin(
                     SELECT
                         r.executed_at,
                         r.to_broadcaster_login,
+                        r.to_broadcaster_id,
                         r.viewer_count,
                         r.reason,
                         r.success
@@ -655,7 +980,7 @@ class AnalyticsV2Mixin(
                           OR (COALESCE(?, '') != '' AND LOWER(r.from_broadcaster_login) = ?)
                       )
                     ORDER BY r.executed_at DESC
-                    LIMIT 5
+                    LIMIT 10
                     """,
                     [since_date, resolved_user_id, resolved_user_id, resolved_login, resolved_login],
                 ).fetchall()
@@ -664,9 +989,11 @@ class AnalyticsV2Mixin(
                         "type": "raid_history",
                         "timestamp": self._internal_home_iso(row[0]),
                         "target_login": str(row[1] or ""),
-                        "viewer_count": int(row[2] or 0),
-                        "reason": str(row[3] or ""),
-                        "success": bool(row[4]) if row[4] is not None else True,
+                        "target_id": str(row[2] or ""),
+                        "viewer_count": int(row[3] or 0),
+                        "reason": str(row[4] or ""),
+                        "success": bool(row[5]) if row[5] is not None else True,
+                        "status_label": "[RAID]",
                     }
                     raid_events.append(raid_event)
                     bot_events.append(raid_event)
@@ -677,6 +1004,8 @@ class AnalyticsV2Mixin(
         overview_query = {"days": days}
         if resolved_login:
             overview_query["streamer"] = resolved_login
+
+        oauth_reconnect_url = "/twitch/raid/auth" if resolved_login else INTERNAL_HOME_LOGIN_URL
 
         return {
             "profile": {
@@ -693,8 +1022,8 @@ class AnalyticsV2Mixin(
                     "status": oauth_status,
                     "granted_scopes": granted_scopes,
                     "missing_scopes": missing_scopes,
-                    "reconnect_url": "/twitch/raid/auth",
-                    "profile_url": "/twitch/raid/requirements",
+                    "reconnect_url": oauth_reconnect_url,
+                    "profile_url": "/twitch/dashboard-v2",
                     "last_checked_at": generated_at,
                 },
                 "raid_status": {
@@ -720,14 +1049,17 @@ class AnalyticsV2Mixin(
                     "Bot impact events are informational and no write action is triggered here."
                 ),
             },
+            "bot_activity": {
+                "events": bot_events,
+            },
             "links": {
                 "dashboard": "/twitch/dashboard",
                 "dashboard_v2": "/twitch/dashboard-v2",
                 "raid_history": "/twitch/raid/history",
                 "raid_requirements": "/twitch/raid/requirements",
                 "billing": "/twitch/abbo",
-                "oauth_reconnect": "/twitch/raid/auth",
-                "profile_status": "/twitch/raid/requirements",
+                "oauth_reconnect": oauth_reconnect_url,
+                "profile_status": "/twitch/dashboard-v2",
                 "internal_home_api": f"/twitch/api/v2/internal-home?{urlencode({'days': days})}",
                 "overview_api": f"/twitch/api/v2/overview?{urlencode(overview_query)}",
             },
@@ -736,34 +1068,13 @@ class AnalyticsV2Mixin(
 
     async def _api_v2_internal_home(self, request: web.Request) -> web.Response:
         """Bundled internal dashboard payload for the logged-in streamer."""
-        check_rate_limit = getattr(self, "_check_rate_limit", None)
-        if callable(check_rate_limit):
-            allowed = True
-            try:
-                allowed = bool(
-                    check_rate_limit(
-                        request,
-                        max_requests=30,
-                        window_seconds=60.0,
-                    )
-                )
-            except TypeError:
-                try:
-                    allowed = bool(check_rate_limit(request))
-                except Exception:
-                    log.debug("internal-home rate-limit hook failed", exc_info=True)
-            except Exception:
-                log.debug("internal-home rate-limit hook failed", exc_info=True)
-
-            if not allowed:
-                return web.json_response(
-                    {
-                        "error": "rate_limit_exceeded",
-                        "message": "Too many requests. Please retry shortly.",
-                    },
-                    status=429,
-                    headers={"Retry-After": "60"},
-                )
+        rate_limit_response = self._internal_home_rate_limit_response(
+            request,
+            max_requests=_INTERNAL_HOME_RATE_LIMIT_MAX_REQUESTS,
+            window_seconds=_INTERNAL_HOME_RATE_LIMIT_WINDOW_SECONDS,
+        )
+        if rate_limit_response is not None:
+            return rate_limit_response
 
         raw_days = (request.query.get("days") or "").strip() if request.query else ""
         try:
@@ -771,21 +1082,160 @@ class AnalyticsV2Mixin(
         except ValueError:
             days = _INTERNAL_HOME_DEFAULT_DAYS
         days = min(max(days, 1), 365)
+        requested_streamer = (
+            str(request.query.get("streamer") or "").strip() if request.query else ""
+        )
 
         try:
-            twitch_login, twitch_user_id, display_name = self._resolve_internal_home_identity(request)
+            twitch_login, twitch_user_id, display_name = self._resolve_internal_home_identity(
+                request,
+                streamer_override=requested_streamer,
+            )
             payload = self._build_internal_home_payload(
                 twitch_login=twitch_login,
                 twitch_user_id=twitch_user_id,
                 display_name=display_name,
                 days=days,
             )
+            try:
+                has_admin_access = self._check_v2_admin_auth(request)
+            except Exception:
+                log.debug(
+                    "Could not resolve internal-home changelog write permissions",
+                    exc_info=True,
+                )
+                has_admin_access = False
+            if not has_admin_access:
+                self._strip_internal_home_target_ids(payload)
+            try:
+                payload["changelog"] = self._get_internal_home_changelog_payload(
+                    can_write=has_admin_access
+                )
+            except Exception:
+                log.exception("Error loading internal-home changelog")
+                payload["changelog"] = self._empty_internal_home_changelog_payload(
+                    can_write=has_admin_access
+                )
             return web.json_response(payload)
         except web.HTTPException:
             raise
         except Exception:
             log.exception("Error in internal-home API")
             return web.json_response({"error": "internal_home_failed"}, status=500)
+
+    async def _api_v2_internal_home_changelog_create(self, request: web.Request) -> web.Response:
+        """Create a new internal-home changelog entry (admin/localhost only)."""
+        err = self._require_v2_admin_api(request)
+        if err is not None:
+            return err
+
+        if self._has_dashboard_bound_session(request) and not self._is_same_origin_session_request(
+            request
+        ):
+            return web.json_response(
+                {
+                    "error": "csrf_origin_invalid",
+                    "message": (
+                        "Session-based POST requests must use same-origin Origin or Referer."
+                    ),
+                },
+                status=403,
+            )
+
+        rate_limit_response = self._internal_home_rate_limit_response(
+            request,
+            max_requests=_INTERNAL_HOME_CHANGELOG_WRITE_RATE_LIMIT_MAX_REQUESTS,
+            window_seconds=_INTERNAL_HOME_CHANGELOG_WRITE_RATE_LIMIT_WINDOW_SECONDS,
+        )
+        if rate_limit_response is not None:
+            return rate_limit_response
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(
+                {
+                    "error": "invalid_json",
+                    "message": "Request body must be valid JSON.",
+                },
+                status=400,
+            )
+
+        if not isinstance(body, dict):
+            return web.json_response(
+                {
+                    "error": "invalid_json",
+                    "message": "Request body must be a JSON object.",
+                },
+                status=400,
+            )
+
+        title = str(body.get("title") or "").strip()
+        content = str(body.get("content") or "").strip()
+        raw_entry_date = body.get("entry_date")
+
+        if not content:
+            return web.json_response(
+                {
+                    "error": "content_required",
+                    "message": "content is required.",
+                },
+                status=400,
+            )
+        if len(title) > _INTERNAL_HOME_CHANGELOG_TITLE_MAX_LENGTH:
+            return web.json_response(
+                {
+                    "error": "title_too_long",
+                    "message": (
+                        f"title must be {_INTERNAL_HOME_CHANGELOG_TITLE_MAX_LENGTH} "
+                        "characters or fewer."
+                    ),
+                },
+                status=400,
+            )
+        if len(content) > _INTERNAL_HOME_CHANGELOG_CONTENT_MAX_LENGTH:
+            return web.json_response(
+                {
+                    "error": "content_too_long",
+                    "message": (
+                        f"content must be {_INTERNAL_HOME_CHANGELOG_CONTENT_MAX_LENGTH} "
+                        "characters or fewer."
+                    ),
+                },
+                status=400,
+            )
+
+        try:
+            entry_date = (
+                date.fromisoformat(str(raw_entry_date).strip())
+                if raw_entry_date not in (None, "")
+                else datetime.now(UTC).date()
+            )
+        except ValueError:
+            return web.json_response(
+                {
+                    "error": "invalid_entry_date",
+                    "message": "entry_date must use YYYY-MM-DD.",
+                },
+                status=400,
+            )
+
+        try:
+            entry = self._create_internal_home_changelog_entry(
+                title=title,
+                content=content,
+                entry_date=entry_date,
+            )
+            return web.json_response(entry, status=201)
+        except Exception:
+            log.exception("Error creating internal-home changelog entry")
+            return web.json_response(
+                {
+                    "error": "internal_home_changelog_write_failed",
+                    "message": "Could not persist changelog entry.",
+                },
+                status=500,
+            )
 
     async def _api_v2_streamers(self, request: web.Request) -> web.Response:
         """Get list of streamers for dropdown."""
