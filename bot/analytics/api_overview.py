@@ -17,6 +17,8 @@ from .raid_metrics import recalculate_raid_chat_metrics
 from ..storage import pg as storage
 
 log = logging.getLogger("TwitchStreams.AnalyticsV2")
+DASHBOARD_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard"
+DASHBOARD_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard"
 DASHBOARD_V2_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
 DASHBOARD_V2_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard-v2"
 
@@ -39,6 +41,7 @@ class _AnalyticsOverviewMixin:
         router.add_get("/twitch/api/v2/streamers", self._api_v2_streamers)
         router.add_get("/twitch/api/v2/session/{id}", self._api_v2_session_detail)
         router.add_get("/twitch/api/v2/auth-status", self._api_v2_auth_status)
+        router.add_get("/twitch/api/v2/internal-home", self._api_v2_internal_home)
         # New Audience Analytics Endpoints
         router.add_get(
             "/twitch/api/v2/watch-time-distribution",
@@ -84,6 +87,7 @@ class _AnalyticsOverviewMixin:
         router.add_get("/twitch/api/v2/ai/analysis", self._api_v2_ai_analysis)
         router.add_get("/twitch/api/v2/ai/history", self._api_v2_ai_history)
         # Serve the dashboard
+        router.add_get("/twitch/dashboard", self._serve_dashboard)
         router.add_get("/twitch/dashboard-v2", self._serve_dashboard_v2)
         router.add_get("/twitch/dashboard-v2/{path:.*}", self._serve_dashboard_v2_assets)
         # Public demo (no auth required)
@@ -237,6 +241,24 @@ class _AnalyticsOverviewMixin:
                 login_url = DASHBOARD_V2_DISCORD_LOGIN_URL
             else:
                 login_url = DASHBOARD_V2_LOGIN_URL
+            raise web.HTTPFound(login_url)
+        import pathlib
+
+        dist_path = pathlib.Path(__file__).parent / "dashboard_v2" / "dist" / "index.html"
+        if dist_path.exists():
+            return web.FileResponse(dist_path)
+        return web.Response(
+            text="Dashboard not built. Run npm run build in dashboard_v2/", status=404
+        )
+
+    async def _serve_dashboard(self, request: web.Request) -> web.Response:
+        """Serve the new internal dashboard landing page."""
+        if not self._check_v2_auth(request):
+            should_use_discord = getattr(self, "_should_use_discord_admin_login", None)
+            if callable(should_use_discord) and bool(should_use_discord(request)):
+                login_url = DASHBOARD_DISCORD_LOGIN_URL
+            else:
+                login_url = DASHBOARD_LOGIN_URL
             raise web.HTTPFound(login_url)
         import pathlib
 

@@ -45,6 +45,8 @@ import type {
 } from '@/types/analytics';
 
 const API_BASE = '/twitch/api/v2';
+const INTERNAL_REDIRECT_PREFIX = '/twitch';
+const DASHBOARD_V2_LOGIN_FALLBACK = '/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2';
 
 // Get partner token from URL or localStorage
 function getPartnerToken(): string | null {
@@ -55,6 +57,51 @@ function getPartnerToken(): string | null {
     return token;
   }
   return localStorage.getItem('partner_token');
+}
+
+function isAllowedInternalRedirectPath(pathname: string): boolean {
+  return pathname === INTERNAL_REDIRECT_PREFIX || pathname.startsWith(`${INTERNAL_REDIRECT_PREFIX}/`);
+}
+
+function sanitizeInternalRedirectUrl(rawUrl: string | null | undefined, fallback: string): string {
+  const fallbackCandidate = (fallback || '').trim();
+  let safeFallback = DASHBOARD_V2_LOGIN_FALLBACK;
+  if (fallbackCandidate && fallbackCandidate.startsWith('/') && !fallbackCandidate.startsWith('//')) {
+    try {
+      const parsedFallback = new URL(fallbackCandidate, window.location.origin);
+      if (
+        parsedFallback.origin === window.location.origin &&
+        isAllowedInternalRedirectPath(parsedFallback.pathname)
+      ) {
+        safeFallback = `${parsedFallback.pathname}${parsedFallback.search}${parsedFallback.hash}`;
+      }
+    } catch {
+      safeFallback = DASHBOARD_V2_LOGIN_FALLBACK;
+    }
+  }
+
+  const candidate = (rawUrl || '').trim();
+  if (!candidate) {
+    return safeFallback;
+  }
+
+  if (!candidate.startsWith('/') || candidate.startsWith('//') || candidate.includes('\\')) {
+    return safeFallback;
+  }
+
+  try {
+    const parsed = new URL(candidate, window.location.origin);
+    if (parsed.origin !== window.location.origin) {
+      return safeFallback;
+    }
+    const normalized = `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    if (!isAllowedInternalRedirectPath(parsed.pathname)) {
+      return safeFallback;
+    }
+    return normalized;
+  } catch {
+    return safeFallback;
+  }
 }
 
 // Helper to build URL with params
@@ -99,7 +146,10 @@ async function fetchApi<T>(endpoint: string, params: Record<string, string | num
       | { error?: string; loginUrl?: string }
       | null;
     if (unauthorized?.loginUrl) {
-      window.location.href = unauthorized.loginUrl;
+      window.location.href = sanitizeInternalRedirectUrl(
+        unauthorized.loginUrl,
+        DASHBOARD_V2_LOGIN_FALLBACK
+      );
       throw new Error('Redirecting to Twitch login');
     }
     throw new Error(unauthorized?.error || 'Unauthorized');
@@ -239,6 +289,282 @@ export interface AuthStatus {
 
 export async function fetchAuthStatus(): Promise<AuthStatus> {
   return fetchApi<AuthStatus>('/auth-status');
+}
+
+// Internal Home
+export interface InternalHomeOAuthStatus {
+  connected?: boolean;
+  status?: 'connected' | 'partial' | 'missing' | 'error';
+  grantedScopes?: string[];
+  missingScopes?: string[];
+  reconnectUrl?: string | null;
+  profileUrl?: string | null;
+  lastCheckedAt?: string | null;
+}
+
+export interface InternalHomeRaidStatus {
+  active?: boolean;
+  statusText?: string | null;
+  note?: string | null;
+  lastEventAt?: string | null;
+}
+
+export interface InternalHomeKpis30d {
+  streams?: number;
+  avgViewers?: number;
+  followerDelta?: number;
+  banKpi?: number;
+}
+
+export interface InternalHomeSession {
+  id?: number | string;
+  startedAt?: string | null;
+  endedAt?: string | null;
+  durationMinutes?: number | null;
+  avgViewers?: number | null;
+  peakViewers?: number | null;
+  followerDelta?: number | null;
+  title?: string | null;
+  category?: string | null;
+}
+
+export interface InternalHomeImpactEntry {
+  id?: number | string;
+  timestamp?: string | null;
+  title?: string | null;
+  description?: string | null;
+  metric?: string | null;
+  severity?: 'success' | 'info' | 'warning' | 'critical' | string;
+}
+
+export interface InternalHomeData {
+  greeting?: string | null;
+  twitchLogin?: string | null;
+  displayName?: string | null;
+  loginUrl?: string | null;
+  oauth?: InternalHomeOAuthStatus | null;
+  raid?: InternalHomeRaidStatus | null;
+  kpis30d?: InternalHomeKpis30d | null;
+  recentStreams?: InternalHomeSession[] | null;
+  impactFeed?: InternalHomeImpactEntry[] | null;
+  generatedAt?: string | null;
+}
+
+interface InternalHomeRawOAuthStatus {
+  connected?: boolean;
+  status?: string;
+  granted_scopes?: string[];
+  missing_scopes?: string[];
+  reconnect_url?: string | null;
+  profile_url?: string | null;
+  last_checked_at?: string | null;
+}
+
+interface InternalHomeRawRaidStatus {
+  state?: string | null;
+  read_only?: boolean;
+}
+
+interface InternalHomeRawProfile {
+  twitch_login?: string | null;
+  twitch_user_id?: string | null;
+  display_name?: string | null;
+}
+
+interface InternalHomeRawKpis {
+  streams_count?: number | null;
+  avg_viewers?: number | null;
+  follower_delta?: number | null;
+  bot_bans_keyword_count?: number | null;
+}
+
+interface InternalHomeRawStream {
+  started_at?: string | null;
+  ended_at?: string | null;
+  duration_seconds?: number | null;
+  avg_viewers?: number | null;
+  peak_viewers?: number | null;
+  follower_delta?: number | null;
+  title?: string | null;
+}
+
+interface InternalHomeRawImpactEvent {
+  type?: string | null;
+  timestamp?: string | null;
+  target_login?: string | null;
+  moderator_login?: string | null;
+  reason?: string | null;
+  viewer_count?: number | null;
+  success?: boolean | null;
+}
+
+interface InternalHomeRawResponse {
+  profile?: InternalHomeRawProfile | null;
+  status?: {
+    oauth?: InternalHomeRawOAuthStatus | null;
+    raid_status?: InternalHomeRawRaidStatus | null;
+  } | null;
+  kpis?: InternalHomeRawKpis | null;
+  recent_streams?: InternalHomeRawStream[] | null;
+  bot_impact?: {
+    events?: InternalHomeRawImpactEvent[] | null;
+    note?: string | null;
+  } | null;
+  links?: {
+    oauth_reconnect?: string | null;
+    profile_status?: string | null;
+  } | null;
+  generated_at?: string | null;
+}
+
+function toFiniteNumber(value: unknown): number | undefined {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return undefined;
+  }
+  return numeric;
+}
+
+function mapImpactEntry(
+  entry: InternalHomeRawImpactEvent,
+  index: number
+): InternalHomeImpactEntry {
+  const eventType = String(entry.type || '').toLowerCase();
+  const timestamp = String(entry.timestamp || '') || null;
+
+  if (eventType === 'ban_keyword_hit') {
+    const target = String(entry.target_login || '').trim();
+    const moderator = String(entry.moderator_login || '').trim();
+    const reason = String(entry.reason || '').trim();
+    return {
+      id: `ban-${index}`,
+      timestamp,
+      title: target ? `Ban gegen ${target}` : 'Bot-relevanter Ban',
+      description: reason || (moderator ? `Mod: ${moderator}` : 'Ban-Reason nicht gesetzt'),
+      metric: moderator ? `Moderator: ${moderator}` : null,
+      severity: 'warning',
+    };
+  }
+
+  if (eventType === 'raid_history') {
+    const target = String(entry.target_login || '').trim();
+    const viewers = toFiniteNumber(entry.viewer_count);
+    const reason = String(entry.reason || '').trim();
+    const success = entry.success !== false;
+    return {
+      id: `raid-${index}`,
+      timestamp,
+      title: target ? `Raid zu ${target}` : 'Raid-Aktivität',
+      description: reason || (success ? 'Raid erfolgreich ausgeführt' : 'Raid nicht erfolgreich'),
+      metric: viewers !== undefined ? `${viewers.toLocaleString('de-DE')} Viewer` : null,
+      severity: success ? 'info' : 'warning',
+    };
+  }
+
+  return {
+    id: `event-${index}`,
+    timestamp,
+    title: 'Bot Update',
+    description: 'Neues Bot-Ereignis',
+    severity: 'info',
+  };
+}
+
+export async function fetchInternalHome(): Promise<InternalHomeData> {
+  const raw = await fetchApi<InternalHomeRawResponse>('/internal-home');
+  const profile = raw.profile || {};
+  const status = raw.status || {};
+  const oauth = status.oauth || {};
+  const raidStatus = status.raid_status || {};
+  const kpis = raw.kpis || {};
+  const links = raw.links || {};
+  const loginUrl = sanitizeInternalRedirectUrl(
+    links.oauth_reconnect || null,
+    '/twitch/auth/login?next=%2Ftwitch%2Fdashboard'
+  );
+  const reconnectUrl = sanitizeInternalRedirectUrl(
+    oauth.reconnect_url || links.oauth_reconnect || null,
+    '/twitch/raid/auth'
+  );
+  const profileUrl = sanitizeInternalRedirectUrl(
+    oauth.profile_url || links.profile_status || null,
+    '/twitch/raid/requirements'
+  );
+
+  const impactEvents = (raw.bot_impact?.events || []).map(mapImpactEntry);
+  const note = String(raw.bot_impact?.note || '').trim();
+  if (note) {
+    impactEvents.push({
+      id: 'impact-note',
+      timestamp: raw.generated_at || null,
+      title: 'Hinweis',
+      description: note,
+      severity: 'info',
+    });
+  }
+
+  const missingScopes = oauth.missing_scopes || [];
+  const connected = Boolean(oauth.connected);
+  const oauthStatus = String(oauth.status || '').toLowerCase();
+  const normalizedOauthStatus: InternalHomeOAuthStatus['status'] =
+    oauthStatus === 'connected' || oauthStatus === 'partial' || oauthStatus === 'missing'
+      ? oauthStatus
+      : connected
+        ? 'connected'
+        : missingScopes.length > 0
+          ? 'missing'
+          : 'partial';
+
+  return {
+    greeting: profile.display_name
+      ? `Willkommen zurück, ${profile.display_name}`
+      : profile.twitch_login
+        ? `Willkommen zurück, ${profile.twitch_login}`
+        : null,
+    twitchLogin: profile.twitch_login || null,
+    displayName: profile.display_name || profile.twitch_login || null,
+    loginUrl,
+    oauth: {
+      connected,
+      status: normalizedOauthStatus,
+      grantedScopes: oauth.granted_scopes || [],
+      missingScopes,
+      reconnectUrl,
+      profileUrl,
+      lastCheckedAt: oauth.last_checked_at || raw.generated_at || null,
+    },
+    raid: {
+      active: String(raidStatus.state || '').toLowerCase() === 'active',
+      statusText: String(raidStatus.state || '').toLowerCase() === 'active' ? 'Auto-Raid: Aktiv' : 'Auto-Raid: Unbekannt',
+      note: raidStatus.read_only ? 'Raid-Status ist schreibgeschützt (read-only).' : null,
+      lastEventAt: impactEvents[0]?.timestamp || null,
+    },
+    kpis30d: {
+      streams: toFiniteNumber(kpis.streams_count),
+      avgViewers: toFiniteNumber(kpis.avg_viewers),
+      followerDelta: toFiniteNumber(kpis.follower_delta),
+      banKpi: toFiniteNumber(kpis.bot_bans_keyword_count),
+    },
+    recentStreams: (raw.recent_streams || []).map((stream, index) => ({
+      id: `stream-${index}`,
+      startedAt: stream.started_at || null,
+      endedAt: stream.ended_at || null,
+      durationMinutes:
+        stream.duration_seconds === null || stream.duration_seconds === undefined
+          ? null
+          : Math.round(Number(stream.duration_seconds) / 60),
+      avgViewers: toFiniteNumber(stream.avg_viewers),
+      peakViewers: toFiniteNumber(stream.peak_viewers),
+      title: stream.title || null,
+      category: null,
+      followerDelta: toFiniteNumber(stream.follower_delta),
+    })),
+    impactFeed: impactEvents,
+    generatedAt: raw.generated_at || null,
+  };
 }
 
 // Category Comparison

@@ -31,9 +31,9 @@ from .billing_plans import (
 )
 from .live import DashboardLiveMixin, _REQUIRED_SCOPES, _CRITICAL_SCOPES, _SCOPE_COLUMN_LABELS
 
-TWITCH_DASHBOARDS_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboards"
+TWITCH_DASHBOARDS_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard"
 TWITCH_DASHBOARD_V2_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
-TWITCH_DASHBOARDS_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboards"
+TWITCH_DASHBOARDS_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard"
 TWITCH_ABBO_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fabbo"
 TWITCH_ABBO_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fabbo"
 
@@ -278,23 +278,38 @@ class _DashboardRoutesMixin:
         """Entrypoint with local-first admin behavior.
 
         Local requests should land directly in the legacy stats/admin UI.
-        Public/proxied requests keep the dashboard selection page.
+        Public/proxied requests land on the canonical dashboard entry page.
         """
         if self._is_local_request(request) or self._is_discord_admin_request(request):
             destination = "/twitch/admin"
             fallback = "/twitch/admin"
         else:
-            destination = "/twitch/dashboards"
-            fallback = "/twitch/dashboards"
+            destination = "/twitch/dashboard"
+            fallback = "/twitch/dashboard"
         if request.query_string:
             destination = f"{destination}?{request.query_string}"
         safe_destination = self._safe_internal_redirect(destination, fallback=fallback)
         raise web.HTTPFound(safe_destination)
 
     async def public_home(self, request: web.Request) -> web.StreamResponse:
-        """Root entrypoint redirects to the historical dashboards typo path."""
-        destination = "/dashboads"
-        safe_destination = self._safe_internal_redirect(destination, fallback="/dashboads")
+        """Root entrypoint redirects to admin (local) or canonical dashboard landing."""
+        if self._is_local_request(request) or self._is_discord_admin_request(request):
+            destination = "/twitch/admin"
+            fallback = "/twitch/admin"
+        else:
+            destination = "/twitch/dashboard"
+            fallback = "/twitch/dashboard"
+        if request.query_string:
+            destination = f"{destination}?{request.query_string}"
+        safe_destination = self._safe_internal_redirect(destination, fallback=fallback)
+        raise web.HTTPFound(safe_destination)
+
+    async def legacy_dashboard_redirect(self, request: web.Request) -> web.StreamResponse:
+        """Redirect legacy dashboard paths to the canonical dashboard landing."""
+        destination = "/twitch/dashboard"
+        if request.query_string:
+            destination = f"{destination}?{request.query_string}"
+        safe_destination = self._safe_internal_redirect(destination, fallback="/twitch/dashboard")
         raise web.HTTPFound(safe_destination)
 
     async def admin(self, request: web.Request) -> web.StreamResponse:
@@ -2807,8 +2822,8 @@ class _DashboardRoutesMixin:
         app.add_routes(
             [
                 web.get("/", self.public_home),
-                web.get("/dashboads", self.stats_entry),
-                web.get("/dashboards", self.stats_entry),
+                web.get("/dashboads", self.legacy_dashboard_redirect),
+                web.get("/dashboards", self.legacy_dashboard_redirect),
                 web.get("/twitch", self.index),
                 web.get("/twitch/", self.index),
                 web.get("/twitch/admin", self.admin),
@@ -2824,8 +2839,8 @@ class _DashboardRoutesMixin:
                 web.post("/twitch/discord_flag", self.discord_flag),
                 web.get("/twitch/stats", self.stats),
                 web.get("/twitch/partners", self.partner_stats),
-                web.get("/twitch/dashboads", self.stats_entry),
-                web.get("/twitch/dashboards", self.stats_entry),
+                web.get("/twitch/dashboads", self.legacy_dashboard_redirect),
+                web.get("/twitch/dashboards", self.legacy_dashboard_redirect),
                 web.get("/twitch/abo", self.abbo_entry),
                 web.get("/twitch/abbo", self.abbo_entry),
                 web.get("/twitch/abos", self.abbo_entry),

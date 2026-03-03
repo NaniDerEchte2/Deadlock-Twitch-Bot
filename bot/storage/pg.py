@@ -1312,6 +1312,10 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_twitch_ban_events_user ON twitch_ban_events(twitch_user_id, received_at)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_twitch_ban_events_user_type_received "
+        "ON twitch_ban_events(twitch_user_id, event_type, received_at)"
+    )
 
     conn.execute(
         """
@@ -1638,4 +1642,3 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_streamer_plans_login ON streamer_plans(twitch_login)"
     )
-

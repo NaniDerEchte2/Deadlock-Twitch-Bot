@@ -7,6 +7,8 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 from aiohttp import web
@@ -23,11 +25,29 @@ from .api_raids import _AnalyticsRaidsMixin
 from .api_viewers import _AnalyticsViewersMixin
 
 log = logging.getLogger("TwitchStreams.AnalyticsV2")
+INTERNAL_HOME_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard"
 DASHBOARD_V2_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
 
 # Twitch logins that receive admin-level access (same as Discord admin / localhost)
 _TWITCH_ADMIN_LOGINS: frozenset[str] = frozenset({"earlysalty"})
 DASHBOARD_V2_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard-v2"
+_INTERNAL_HOME_DEFAULT_DAYS = 30
+_INTERNAL_HOME_BAN_REASON_KEYWORDS: tuple[str, ...] = (
+    "bot",
+    "spam",
+    "scam",
+    "phish",
+    "link",
+    "promo",
+    "werbung",
+)
+_INTERNAL_HOME_REQUIRED_SCOPES: tuple[str, ...] = (
+    "channel:manage:raids",
+    "moderator:read:followers",
+    "moderator:manage:banned_users",
+    "moderator:manage:chat_messages",
+    "moderator:read:chatters",
+)
 
 
 def _is_loopback_host(raw_value: str) -> bool:
@@ -397,6 +417,375 @@ class AnalyticsV2Mixin(
             return "partner"
 
         return "none"
+
+    @staticmethod
+    def _internal_home_keyword_clause(column_expr: str) -> tuple[str, list[str]]:
+        if not _INTERNAL_HOME_BAN_REASON_KEYWORDS:
+            return "1=0", []
+        like_parts = [f"LOWER(COALESCE({column_expr}, '')) LIKE ?" for _ in _INTERNAL_HOME_BAN_REASON_KEYWORDS]
+        like_params = [f"%{keyword}%" for keyword in _INTERNAL_HOME_BAN_REASON_KEYWORDS]
+        return f"({' OR '.join(like_parts)})", like_params
+
+    @staticmethod
+    def _internal_home_iso(value: Any) -> str:
+        if value is None:
+            return ""
+        if hasattr(value, "isoformat"):
+            return str(value.isoformat())
+        return str(value)
+
+    def _raise_internal_home_unauthorized(self, code: str, message: str) -> None:
+        payload = {
+            "error": code,
+            "message": message,
+            "loginUrl": self._safe_internal_login_redirect(INTERNAL_HOME_LOGIN_URL),
+        }
+        raise web.HTTPUnauthorized(text=json.dumps(payload), content_type="application/json")
+
+    def _resolve_internal_home_identity(self, request: web.Request) -> tuple[str, str, str]:
+        session = self._get_dashboard_session(request)
+        if not isinstance(session, dict):
+            self._raise_internal_home_unauthorized(
+                "auth_required",
+                "A valid dashboard session is required.",
+            )
+        assert isinstance(session, dict)
+        twitch_login = str(session.get("twitch_login") or "").strip().lower()
+        twitch_user_id = str(session.get("twitch_user_id") or "").strip()
+        display_name = str(session.get("display_name") or twitch_login).strip() or twitch_login
+        if not twitch_login and not twitch_user_id:
+            self._raise_internal_home_unauthorized(
+                "streamer_session_required",
+                "The dashboard session must be bound to a Twitch streamer account.",
+            )
+        return twitch_login, twitch_user_id, display_name
+
+    def _build_internal_home_payload(
+        self,
+        *,
+        twitch_login: str,
+        twitch_user_id: str,
+        display_name: str,
+        days: int,
+    ) -> dict[str, Any]:
+        from ..storage import pg as storage
+
+        generated_at = datetime.now(UTC).isoformat()
+        since_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        resolved_login = twitch_login
+        resolved_user_id = twitch_user_id
+
+        streams_count = 0
+        avg_viewers = 0.0
+        follower_delta = 0
+        bot_bans_keyword_count = 0
+        granted_scopes: list[str] = []
+        missing_scopes: list[str] = []
+        oauth_status = "missing"
+        recent_streams: list[dict[str, Any]] = []
+        raid_events: list[dict[str, Any]] = []
+        bot_events: list[dict[str, Any]] = []
+
+        with storage.get_conn() as conn:
+            identity_row = conn.execute(
+                """
+                SELECT LOWER(twitch_login), COALESCE(twitch_user_id, '')
+                FROM twitch_streamers
+                WHERE (COALESCE(?, '') != '' AND LOWER(twitch_login) = ?)
+                   OR (COALESCE(?, '') != '' AND twitch_user_id = ?)
+                ORDER BY CASE
+                    WHEN (COALESCE(?, '') != '' AND LOWER(twitch_login) = ?) THEN 0
+                    ELSE 1
+                END
+                LIMIT 1
+                """,
+                [
+                    twitch_login,
+                    twitch_login,
+                    twitch_user_id,
+                    twitch_user_id,
+                    twitch_login,
+                    twitch_login,
+                ],
+            ).fetchone()
+            if identity_row:
+                resolved_login = str(identity_row[0] or resolved_login or "").strip().lower()
+                resolved_user_id = str(identity_row[1] or resolved_user_id or "").strip()
+
+            if resolved_login:
+                oauth_row = conn.execute(
+                    """
+                    SELECT scopes
+                    FROM twitch_raid_auth
+                    WHERE LOWER(twitch_login) = ?
+                    LIMIT 1
+                    """,
+                    [resolved_login],
+                ).fetchone()
+                if oauth_row:
+                    scope_set = {
+                        str(scope or "").strip().lower()
+                        for scope in str(oauth_row[0] or "").split()
+                        if str(scope or "").strip()
+                    }
+                    granted_scopes = sorted(scope_set)
+                    missing_scopes = [
+                        scope for scope in _INTERNAL_HOME_REQUIRED_SCOPES if scope not in scope_set
+                    ]
+                    oauth_status = "connected" if not missing_scopes else "partial"
+                else:
+                    missing_scopes = list(_INTERNAL_HOME_REQUIRED_SCOPES)
+                    oauth_status = "missing"
+
+            if resolved_login:
+                kpi_row = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS streams_count,
+                        COALESCE(AVG(s.avg_viewers), 0) AS avg_viewers,
+                        COALESCE(SUM(CASE
+                            WHEN s.follower_delta IS NOT NULL
+                                 AND NOT (s.followers_end = 0 AND s.followers_start > 0)
+                            THEN s.follower_delta
+                            ELSE 0
+                        END), 0) AS follower_delta
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ?
+                      AND s.ended_at IS NOT NULL
+                      AND LOWER(s.streamer_login) = ?
+                    """,
+                    [since_date, resolved_login],
+                ).fetchone()
+                if kpi_row:
+                    streams_count = int(kpi_row[0] or 0)
+                    avg_viewers = float(kpi_row[1] or 0.0)
+                    follower_delta = int(kpi_row[2] or 0)
+
+                recent_rows = conn.execute(
+                    """
+                    SELECT
+                        s.started_at,
+                        s.ended_at,
+                        s.duration_seconds,
+                        s.avg_viewers,
+                        s.peak_viewers,
+                        CASE
+                            WHEN s.follower_delta IS NOT NULL
+                                 AND NOT (s.followers_end = 0 AND s.followers_start > 0)
+                            THEN s.follower_delta
+                            ELSE 0
+                        END AS follower_delta,
+                        s.stream_title
+                    FROM twitch_stream_sessions s
+                    WHERE s.started_at >= ?
+                      AND s.ended_at IS NOT NULL
+                      AND LOWER(s.streamer_login) = ?
+                    ORDER BY s.started_at DESC
+                    LIMIT 5
+                    """,
+                    [since_date, resolved_login],
+                ).fetchall()
+                for row in recent_rows:
+                    started_iso = self._internal_home_iso(row[0])
+                    recent_streams.append(
+                        {
+                            "date": started_iso[:10] if started_iso else "",
+                            "started_at": started_iso,
+                            "ended_at": self._internal_home_iso(row[1]),
+                            "duration_seconds": int(row[2] or 0),
+                            "avg_viewers": round(float(row[3] or 0.0), 1),
+                            "peak_viewers": int(row[4] or 0),
+                            "follower_delta": int(row[5] or 0),
+                            "title": str(row[6] or ""),
+                        }
+                    )
+
+            ban_clause, ban_params = self._internal_home_keyword_clause("b.reason")
+            if resolved_user_id:
+                ban_count_row = conn.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM twitch_ban_events b
+                    WHERE b.received_at >= ?
+                      AND b.twitch_user_id = ?
+                      AND LOWER(COALESCE(b.event_type, '')) = 'ban'
+                      AND {ban_clause}
+                    """,
+                    [since_date, resolved_user_id, *ban_params],
+                ).fetchone()
+                bot_bans_keyword_count = int((ban_count_row[0] if ban_count_row else 0) or 0)
+
+                ban_event_rows = conn.execute(
+                    f"""
+                    SELECT b.received_at, b.target_login, b.moderator_login, b.reason
+                    FROM twitch_ban_events b
+                    WHERE b.received_at >= ?
+                      AND b.twitch_user_id = ?
+                      AND LOWER(COALESCE(b.event_type, '')) = 'ban'
+                      AND {ban_clause}
+                    ORDER BY b.received_at DESC
+                    LIMIT 5
+                    """,
+                    [since_date, resolved_user_id, *ban_params],
+                ).fetchall()
+                for row in ban_event_rows:
+                    bot_events.append(
+                        {
+                            "type": "ban_keyword_hit",
+                            "timestamp": self._internal_home_iso(row[0]),
+                            "target_login": str(row[1] or ""),
+                            "moderator_login": str(row[2] or ""),
+                            "reason": str(row[3] or ""),
+                        }
+                    )
+
+            if resolved_user_id or resolved_login:
+                raid_rows = conn.execute(
+                    """
+                    SELECT
+                        r.executed_at,
+                        r.to_broadcaster_login,
+                        r.viewer_count,
+                        r.reason,
+                        r.success
+                    FROM twitch_raid_history r
+                    WHERE r.executed_at >= ?
+                      AND (
+                          (COALESCE(?, '') != '' AND r.from_broadcaster_id = ?)
+                          OR (COALESCE(?, '') != '' AND LOWER(r.from_broadcaster_login) = ?)
+                      )
+                    ORDER BY r.executed_at DESC
+                    LIMIT 5
+                    """,
+                    [since_date, resolved_user_id, resolved_user_id, resolved_login, resolved_login],
+                ).fetchall()
+                for row in raid_rows:
+                    raid_event = {
+                        "type": "raid_history",
+                        "timestamp": self._internal_home_iso(row[0]),
+                        "target_login": str(row[1] or ""),
+                        "viewer_count": int(row[2] or 0),
+                        "reason": str(row[3] or ""),
+                        "success": bool(row[4]) if row[4] is not None else True,
+                    }
+                    raid_events.append(raid_event)
+                    bot_events.append(raid_event)
+
+        bot_events.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
+        bot_events = bot_events[:10]
+
+        overview_query = {"days": days}
+        if resolved_login:
+            overview_query["streamer"] = resolved_login
+
+        return {
+            "profile": {
+                "twitch_login": resolved_login,
+                "twitch_user_id": resolved_user_id,
+                "display_name": display_name or resolved_login,
+            },
+            "status": {
+                "authenticated": True,
+                "streamer_bound": bool(resolved_login or resolved_user_id),
+                "period_days": days,
+                "oauth": {
+                    "connected": oauth_status != "missing",
+                    "status": oauth_status,
+                    "granted_scopes": granted_scopes,
+                    "missing_scopes": missing_scopes,
+                    "reconnect_url": "/twitch/raid/auth",
+                    "profile_url": "/twitch/raid/requirements",
+                    "last_checked_at": generated_at,
+                },
+                "raid_status": {
+                    "state": "active",
+                    "read_only": True,
+                },
+            },
+            "kpis": {
+                "streams_count": streams_count,
+                "avg_viewers": round(avg_viewers, 1),
+                "follower_delta": follower_delta,
+                "bot_bans_keyword_count": bot_bans_keyword_count,
+            },
+            "recent_streams": recent_streams,
+            "bot_impact": {
+                "events": bot_events,
+                "summary": {
+                    "ban_keyword_hits_30d": bot_bans_keyword_count,
+                    "recent_raid_events": len(raid_events),
+                },
+                "note": (
+                    "Raid automation is active in read-only mode. "
+                    "Bot impact events are informational and no write action is triggered here."
+                ),
+            },
+            "links": {
+                "dashboard": "/twitch/dashboard",
+                "dashboard_v2": "/twitch/dashboard-v2",
+                "raid_history": "/twitch/raid/history",
+                "raid_requirements": "/twitch/raid/requirements",
+                "billing": "/twitch/abbo",
+                "oauth_reconnect": "/twitch/raid/auth",
+                "profile_status": "/twitch/raid/requirements",
+                "internal_home_api": f"/twitch/api/v2/internal-home?{urlencode({'days': days})}",
+                "overview_api": f"/twitch/api/v2/overview?{urlencode(overview_query)}",
+            },
+            "generated_at": generated_at,
+        }
+
+    async def _api_v2_internal_home(self, request: web.Request) -> web.Response:
+        """Bundled internal dashboard payload for the logged-in streamer."""
+        check_rate_limit = getattr(self, "_check_rate_limit", None)
+        if callable(check_rate_limit):
+            allowed = True
+            try:
+                allowed = bool(
+                    check_rate_limit(
+                        request,
+                        max_requests=30,
+                        window_seconds=60.0,
+                    )
+                )
+            except TypeError:
+                try:
+                    allowed = bool(check_rate_limit(request))
+                except Exception:
+                    log.debug("internal-home rate-limit hook failed", exc_info=True)
+            except Exception:
+                log.debug("internal-home rate-limit hook failed", exc_info=True)
+
+            if not allowed:
+                return web.json_response(
+                    {
+                        "error": "rate_limit_exceeded",
+                        "message": "Too many requests. Please retry shortly.",
+                    },
+                    status=429,
+                    headers={"Retry-After": "60"},
+                )
+
+        raw_days = (request.query.get("days") or "").strip() if request.query else ""
+        try:
+            days = int(raw_days) if raw_days else _INTERNAL_HOME_DEFAULT_DAYS
+        except ValueError:
+            days = _INTERNAL_HOME_DEFAULT_DAYS
+        days = min(max(days, 1), 365)
+
+        try:
+            twitch_login, twitch_user_id, display_name = self._resolve_internal_home_identity(request)
+            payload = self._build_internal_home_payload(
+                twitch_login=twitch_login,
+                twitch_user_id=twitch_user_id,
+                display_name=display_name,
+                days=days,
+            )
+            return web.json_response(payload)
+        except web.HTTPException:
+            raise
+        except Exception:
+            log.exception("Error in internal-home API")
+            return web.json_response({"error": "internal_home_failed"}, status=500)
 
     async def _api_v2_streamers(self, request: web.Request) -> web.Response:
         """Get list of streamers for dropdown."""

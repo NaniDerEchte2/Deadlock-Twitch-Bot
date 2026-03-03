@@ -71,6 +71,40 @@ class _DummyOverviewAssetsAuth(_AnalyticsOverviewMixin):
         return False
 
 
+class _DummyInternalHomeApi(AnalyticsV2Mixin):
+    def __init__(self, dashboard_session=None, discord_admin_session=None) -> None:
+        self.dashboard_session = dashboard_session
+        self.discord_admin_session = discord_admin_session
+        self.payload_args = None
+
+    def _get_dashboard_auth_session(self, request):
+        return self.dashboard_session
+
+    def _get_discord_admin_session(self, request):
+        return self.discord_admin_session
+
+    def _build_internal_home_payload(self, *, twitch_login, twitch_user_id, display_name, days):
+        self.payload_args = {
+            "twitch_login": twitch_login,
+            "twitch_user_id": twitch_user_id,
+            "display_name": display_name,
+            "days": days,
+        }
+        return {
+            "profile": {"twitch_login": twitch_login, "twitch_user_id": twitch_user_id},
+            "status": {"raid_status": {"state": "active", "read_only": True}},
+            "kpis": {
+                "streams_count": 0,
+                "avg_viewers": 0.0,
+                "follower_delta": 0,
+                "bot_bans_keyword_count": 0,
+            },
+            "recent_streams": [],
+            "bot_impact": {"events": [], "summary": {}, "note": "ok"},
+            "links": {"dashboard": "/twitch/dashboard"},
+        }
+
+
 class _DummyLiveActions(DashboardLiveMixin):
     def __init__(self) -> None:
         self.add_calls: list[str] = []
@@ -734,6 +768,62 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(web.HTTPFound) as ctx:
             await handler._serve_dashboard_v2_assets(request)
         self.assertEqual(ctx.exception.location, "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2")
+
+    async def test_dashboard_redirect_when_unauthenticated_uses_dashboard_next(self) -> None:
+        handler = _DummyOverviewAssetsAuth()
+        request = SimpleNamespace()
+
+        with self.assertRaises(web.HTTPFound) as ctx:
+            await handler._serve_dashboard(request)
+        self.assertEqual(ctx.exception.location, "/twitch/auth/login?next=%2Ftwitch%2Fdashboard")
+
+    async def test_internal_home_requires_streamer_dashboard_session(self) -> None:
+        handler = _DummyInternalHomeApi(dashboard_session=None)
+        request = SimpleNamespace(query={})
+
+        with self.assertRaises(web.HTTPUnauthorized) as ctx:
+            await handler._api_v2_internal_home(request)
+        payload = json.loads(ctx.exception.text)
+        self.assertEqual(payload.get("error"), "auth_required")
+        self.assertEqual(payload.get("loginUrl"), "/twitch/auth/login?next=%2Ftwitch%2Fdashboard")
+
+    async def test_internal_home_returns_stable_shape_for_session(self) -> None:
+        handler = _DummyInternalHomeApi(
+            dashboard_session={
+                "twitch_login": "Partner_One",
+                "twitch_user_id": "1001",
+                "display_name": "Partner One",
+            }
+        )
+        request = SimpleNamespace(query={})
+
+        response = await handler._api_v2_internal_home(request)
+        payload = json.loads(response.text)
+
+        self.assertEqual(response.status, 200)
+        self.assertIn("profile", payload)
+        self.assertIn("status", payload)
+        self.assertIn("kpis", payload)
+        self.assertIn("recent_streams", payload)
+        self.assertIn("bot_impact", payload)
+        self.assertIn("links", payload)
+        self.assertEqual(payload["status"]["raid_status"]["state"], "active")
+        self.assertTrue(payload["status"]["raid_status"]["read_only"])
+        self.assertEqual(handler.payload_args["twitch_login"], "partner_one")
+        self.assertEqual(handler.payload_args["days"], 30)
+
+    async def test_internal_home_rejects_discord_admin_without_twitch_binding(self) -> None:
+        handler = _DummyInternalHomeApi(
+            dashboard_session=None,
+            discord_admin_session={"user_id": 77, "display_name": "Admin User"},
+        )
+        request = SimpleNamespace(query={})
+
+        with self.assertRaises(web.HTTPUnauthorized) as ctx:
+            await handler._api_v2_internal_home(request)
+        payload = json.loads(ctx.exception.text)
+        self.assertEqual(payload.get("error"), "streamer_session_required")
+        self.assertNotIn("profile", payload)
 
     async def test_demo_dashboard_v2_assets_do_not_redirect_when_unauthenticated(self) -> None:
         handler = _DummyOverviewAssetsAuth()

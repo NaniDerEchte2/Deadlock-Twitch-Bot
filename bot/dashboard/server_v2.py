@@ -396,7 +396,7 @@ class DashboardV2Server(
         self, request: web.Request, *, next_path: str | None = None
     ) -> str:
         if not self._discord_admin_required:
-            return "/twitch/dashboards"
+            return "/twitch/dashboard"
         normalized_next = self._normalize_discord_admin_next_path(
             next_path or (request.rel_url.path_qs if request.rel_url else "/twitch/admin")
         )
@@ -437,9 +437,11 @@ class DashboardV2Server(
         if normalized_path == "/twitch/abbo/kündigen":
             return "/twitch/abbo/kündigen"
         if normalized_path == "/twitch/dashboads":
-            return "/twitch/dashboards"
+            return "/twitch/dashboard"
         if normalized_path == "/twitch/dashboards":
-            return "/twitch/dashboards"
+            return "/twitch/dashboard"
+        if normalized_path == "/twitch/dashboard":
+            return "/twitch/dashboard"
         return "/twitch/admin"
 
     def _normalized_discord_admin_redirect_uri(self) -> str | None:

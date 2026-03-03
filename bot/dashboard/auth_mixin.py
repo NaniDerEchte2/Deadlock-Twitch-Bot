@@ -92,7 +92,7 @@ class _DashboardAuthMixin:
         )
 
     def _normalize_next_path(self, raw_path: str | None) -> str:
-        fallback = "/twitch/dashboard-v2"
+        fallback = "/twitch/dashboard"
         candidate = (raw_path or "").strip()
         if not candidate:
             return fallback
@@ -138,7 +138,7 @@ class _DashboardAuthMixin:
 
     @staticmethod
     def _canonical_post_login_destination(next_path: str | None) -> str:
-        fallback = "/twitch/dashboard-v2"
+        fallback = "/twitch/dashboard"
         candidate = (next_path or "").strip()
         if not candidate:
             return fallback
@@ -165,18 +165,20 @@ class _DashboardAuthMixin:
         if normalized_path == "/twitch/abbo/kündigen":
             return "/twitch/abbo/kündigen"
         if normalized_path == "/twitch/dashboads":
-            return "/twitch/dashboards"
+            return "/twitch/dashboard"
         if normalized_path == "/twitch/stats":
             return "/twitch/stats"
         if normalized_path == "/twitch/dashboards":
-            return "/twitch/dashboards"
+            return "/twitch/dashboard"
+        if normalized_path == "/twitch/dashboard":
+            return "/twitch/dashboard"
         if normalized_path == "/twitch/dashboard-v2":
             return "/twitch/dashboard-v2"
         return fallback
 
     def _build_dashboard_login_url(self, request: web.Request) -> str:
         next_path = self._normalize_next_path(
-            request.rel_url.path_qs if request.rel_url else "/twitch/dashboard-v2"
+            request.rel_url.path_qs if request.rel_url else "/twitch/dashboard"
         )
         if self._should_use_discord_admin_login(request):
             return self._build_discord_admin_login_url(request, next_path=next_path)
@@ -716,8 +718,10 @@ class _DashboardAuthMixin:
             self._sanitize_log_value(self._peer_host(request)),
         )
         destination = self._safe_internal_redirect(
-            self._normalize_next_path(state_data.get("next_path")),
-            fallback="/twitch/dashboard-v2",
+            self._canonical_post_login_destination(
+                self._normalize_next_path(state_data.get("next_path"))
+            ),
+            fallback="/twitch/dashboard",
         )
         response = web.HTTPFound(destination)
         self._set_session_cookie(response, request, session_id)
@@ -891,7 +895,7 @@ class _DashboardAuthMixin:
             except Exception as _exc:
                 log.debug("Could not delete discord admin session from DB: %s", _exc)
         login_url = (
-            TWITCH_ADMIN_DISCORD_LOGIN_URL if self._discord_admin_required else "/twitch/dashboards"
+            TWITCH_ADMIN_DISCORD_LOGIN_URL if self._discord_admin_required else "/twitch/dashboard"
         )
         response = web.HTTPFound(login_url)
         self._clear_discord_admin_cookie(response, request)
