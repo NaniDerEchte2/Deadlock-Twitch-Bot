@@ -6,6 +6,18 @@ import {
   buildTwitchBotAuthUrl,
 } from "@/data/externalLinks";
 
+const HERO_STATS = [
+  {
+    title: "1900+ Mitglieder - in der deutschen Deadlock-Community"
+  },
+  {
+    title: "Automatisierung für Raids, Analytics, Clips und Moderation",
+  },
+  {
+    title: "Größtes Deadlock-Raid-Netzwerk - auf Twitch im deutschsprachigen Raum",
+  },
+];
+
 export function Hero() {
   return (
     <section
@@ -109,40 +121,28 @@ export function Hero() {
             </BrowserMockup>
           </motion.div>
 
-          {/* Floating badges — hidden on mobile */}
-          <motion.div
-            className="hidden md:block absolute -left-6 top-1/4 panel-card rounded-full px-4 py-2 text-sm font-medium text-[var(--color-text-primary)]"
-            animate={{ y: [0, -10, 0] }}
-            transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
-          >
-            280+ Streamer
-          </motion.div>
-
-          <motion.div
-            className="hidden md:block absolute -right-4 top-1/3 panel-card rounded-full px-4 py-2 text-sm font-medium text-[var(--color-text-primary)]"
-            animate={{ y: [0, -10, 0] }}
-            transition={{
-              duration: 4,
-              repeat: Infinity,
-              ease: "easeInOut",
-              delay: 0.6,
-            }}
-          >
-            24/7 Online
-          </motion.div>
-
-          <motion.div
-            className="hidden md:block absolute left-1/4 -bottom-4 panel-card rounded-full px-4 py-2 text-sm font-medium text-[var(--color-text-primary)]"
-            animate={{ y: [0, -10, 0] }}
-            transition={{
-              duration: 3.5,
-              repeat: Infinity,
-              ease: "easeInOut",
-              delay: 1.1,
-            }}
-          >
-            15s Echtzeit
-          </motion.div>
+          <div className="mt-6 flex w-full flex-col gap-3">
+            {HERO_STATS.map((stat, index) => (
+              <motion.div
+                key={stat.title}
+                initial={{ opacity: 0, y: 16 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true, amount: 0.55 }}
+                transition={{
+                  duration: 0.45,
+                  delay: index * 0.08,
+                  ease: "easeOut",
+                }}
+                className="panel-card w-full rounded-xl px-4 py-3 text-center"
+              >
+                <p className="text-base font-semibold text-[var(--color-text-primary)]">
+                  {stat.title}
+                </p>
+                <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+                </p>
+              </motion.div>
+            ))}
+          </div>
         </div>
       </div>
     </section>

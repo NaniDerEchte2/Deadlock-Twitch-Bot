@@ -7,8 +7,13 @@ export interface Stat {
 export const stats: Stat[] = [
   {
     label: "Streamer",
-    value: 280,
+    value: 30,
     suffix: "+",
+  },
+  {
+    label: "Module",
+    value: 7,
+    suffix: "",
   },
   {
     label: "Analytics-Tabs",
@@ -24,10 +29,5 @@ export const stats: Stat[] = [
     label: "Online",
     value: 24,
     suffix: "/7",
-  },
-  {
-    label: "Module",
-    value: 7,
-    suffix: "",
   },
 ];

@@ -11,7 +11,7 @@ export const features: Feature[] = [
     icon: "Swords",
     title: "Auto-Raid",
     description:
-      "Intelligentes Raid-System mit fairem Algorithmus – verteilt Raids automatisch an aktive Community-Mitglieder und berücksichtigt Aktivität, Größe und gegenseitige Unterstützung.",
+      "Intelligentes Raid-System mit fairem Algorithmus – verteilt Raids automatisch an aktive Streamer für gegenseitige Unterstützung.",
   },
   {
     id: "analytics",
@@ -23,16 +23,16 @@ export const features: Feature[] = [
   {
     id: "clip-manager",
     icon: "Clapperboard",
-    title: "Clip Manager",
+    title: "Clip Manager (Coming Soon)",
     description:
-      "Multi-Plattform Upload für YouTube, TikTok und Instagram – schneide, betexte und veröffentliche Clips direkt aus dem Chat heraus mit einem einzigen Befehl.",
+      "Multi-Plattform Upload für YouTube, TikTok und Instagram – Clips aus dem Chat erstellen und künftig automatisch auf YouTube, TikTok und Instagram verteilen.",
   },
   {
     id: "community",
     icon: "Users",
     title: "Community",
     description:
-      "Leaderboard, Discord-Link und Rollen-Management – belohne treue Zuschauer automatisch, verwalte Subscriber-Rollen und verknüpfe deinen Discord nahtlos.",
+      "Belohne treue Zuschauer automatisch, und sprich deine Lurker direkt im Chat automatisier an.",
   },
   {
     id: "monitoring",
