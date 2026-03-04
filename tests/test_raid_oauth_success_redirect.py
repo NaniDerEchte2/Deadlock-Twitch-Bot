@@ -68,6 +68,20 @@ class _DummyRaidCallback(_DashboardRaidMixin):
         return f"{title}: {body_html}"
 
 
+class _DummyRaidCallbackProxy(_DashboardRaidMixin):
+    def __init__(self, payload: dict) -> None:
+        self._raid_bot = None
+        self._payload = payload
+
+    async def _raid_oauth_callback_cb(self, *, code: str, state: str, error: str) -> dict:
+        del code, state, error
+        return dict(self._payload)
+
+    @staticmethod
+    def _render_oauth_page(title: str, body_html: str) -> str:
+        return f"{title}: {body_html}"
+
+
 class RaidOAuthSuccessRedirectTests(unittest.IsolatedAsyncioTestCase):
     def test_success_redirect_default(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
@@ -100,6 +114,38 @@ class RaidOAuthSuccessRedirectTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_raid_callback_redirects_to_dashboard_on_success(self) -> None:
         handler = _DummyRaidCallback()
+        request = SimpleNamespace(query={"code": "oauth-code", "state": "valid-state"})
+
+        with self.assertRaises(web.HTTPFound) as ctx:
+            await handler.raid_oauth_callback(request)
+
+        self.assertEqual(ctx.exception.location, DEFAULT_RAID_OAUTH_SUCCESS_REDIRECT_URL)
+
+    async def test_raid_callback_proxy_payload_redirects_to_dashboard(self) -> None:
+        handler = _DummyRaidCallbackProxy(
+            {
+                "status": 200,
+                "title": "Autorisierung erfolgreich",
+                "body_html": "<p>ok</p>",
+                "redirect_url": "https://twitch.earlysalty.com/twitch/dashboard",
+            }
+        )
+        request = SimpleNamespace(query={"code": "oauth-code", "state": "valid-state"})
+
+        with self.assertRaises(web.HTTPFound) as ctx:
+            await handler.raid_oauth_callback(request)
+
+        self.assertEqual(ctx.exception.location, DEFAULT_RAID_OAUTH_SUCCESS_REDIRECT_URL)
+
+    async def test_raid_callback_proxy_redirect_uses_safe_fallback_for_invalid_url(self) -> None:
+        handler = _DummyRaidCallbackProxy(
+            {
+                "status": 200,
+                "title": "Autorisierung erfolgreich",
+                "body_html": "<p>ok</p>",
+                "redirect_url": "javascript:alert(1)",
+            }
+        )
         request = SimpleNamespace(query={"code": "oauth-code", "state": "valid-state"})
 
         with self.assertRaises(web.HTTPFound) as ctx:

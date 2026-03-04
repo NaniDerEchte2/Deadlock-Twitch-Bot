@@ -363,8 +363,10 @@ new Chart(ctx, {{
 </html>"""
 
     @staticmethod
-    def _raid_oauth_success_redirect_url() -> str:
-        configured = (os.getenv("TWITCH_RAID_SUCCESS_REDIRECT_URL") or "").strip()
+    def _raid_oauth_success_redirect_url(candidate: str | None = None) -> str:
+        configured = (candidate or "").strip()
+        if not configured:
+            configured = (os.getenv("TWITCH_RAID_SUCCESS_REDIRECT_URL") or "").strip()
         candidate = configured or DEFAULT_RAID_OAUTH_SUCCESS_REDIRECT_URL
         fallback = DEFAULT_RAID_OAUTH_SUCCESS_REDIRECT_URL
 
@@ -733,9 +735,15 @@ new Chart(ctx, {{
                     status_code = int(payload.get("status", 200))
                 except (TypeError, ValueError):
                     status_code = 200
+                status_code = max(200, min(status_code, 599))
+                redirect_candidate = str(payload.get("redirect_url") or "").strip()
+                if redirect_candidate and status_code < 400:
+                    raise web.HTTPFound(
+                        location=self._raid_oauth_success_redirect_url(redirect_candidate)
+                    )
                 return web.Response(
                     text=self._render_oauth_page(title, body_html),
-                    status=max(200, min(status_code, 599)),
+                    status=status_code,
                     content_type="text/html",
                 )
 

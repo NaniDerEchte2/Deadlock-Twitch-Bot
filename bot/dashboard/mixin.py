@@ -33,6 +33,7 @@ STREAMER_ROLE_ID = _parse_env_int("STREAMER_ROLE_ID", 1313624729466441769)
 STREAMER_GUILD_ID = _parse_env_int("STREAMER_GUILD_ID", 0)
 FALLBACK_MAIN_GUILD_ID = _parse_env_int("MAIN_GUILD_ID", 0)
 TWITCH_HELIX_USERS_URL = "https://api.twitch.tv/helix/users"
+RAID_OAUTH_SUCCESS_REDIRECT_URL = "https://twitch.earlysalty.com/twitch/dashboard"
 
 
 VERIFICATION_SUCCESS_DM_MESSAGE = (
@@ -375,6 +376,10 @@ class TwitchDashboardMixin:
                 )
 
             log.info("Raid auth successful for %s", twitch_login)
+            redirect_url = (
+                (os.getenv("TWITCH_RAID_SUCCESS_REDIRECT_URL") or "").strip()
+                or RAID_OAUTH_SUCCESS_REDIRECT_URL
+            )
             return {
                 "status": 200,
                 "title": "Autorisierung erfolgreich",
@@ -382,6 +387,7 @@ class TwitchDashboardMixin:
                     "<p>Der Raid-Bot wurde erfolgreich autorisiert.</p>"
                     "<p>Du kannst dieses Fenster jetzt schließen.</p>"
                 ),
+                "redirect_url": redirect_url,
             }
         except Exception:
             log.exception("Raid OAuth callback failed for state login=%s", login)
