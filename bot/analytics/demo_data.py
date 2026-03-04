@@ -1646,3 +1646,681 @@ def get_audience_sharing() -> dict:
         "totalUniqueViewers": 483,
         "dataQuality": {"months": 4, "minSharedFilter": 3},
     }
+
+
+# ---------------------------------------------------------------------------
+# Viewer directory + detail + segments (Demo-only endpoints)
+# ---------------------------------------------------------------------------
+
+_VIEWER_CHANNEL_POOL = [
+    "deadlock_de_top1",
+    "fps_king_de",
+    "ranked_master_de",
+    "casual_fps_de",
+    "pro_gamer_de",
+    "late_night_deadlock",
+    "stratlab_live",
+    "scrim_hub_de",
+    "aimcoach_tv",
+    "duoq_lounge",
+    "meta_patchtalk",
+]
+
+
+def _checksum(value: str) -> int:
+    return sum(ord(ch) for ch in value)
+
+
+def _viewer_timestamp(days_ago: int, hour: int = 20) -> str:
+    dt = datetime.now(UTC) - timedelta(days=max(0, days_ago))
+    dt = dt.replace(hour=hour, minute=0, second=0, microsecond=0)
+    return dt.isoformat()
+
+
+def _viewer_category(
+    total_sessions: int,
+    total_messages: int,
+    first_seen_days: int,
+    last_seen_days: int,
+) -> str:
+    if first_seen_days <= 14 and total_sessions <= 3:
+        return "new"
+    if total_messages <= 0:
+        return "lurker"
+    msgs_per_session = total_messages / max(1, total_sessions)
+    if total_sessions >= 18 and msgs_per_session >= 20 and last_seen_days <= 14:
+        return "dedicated"
+    if total_sessions >= 8 and msgs_per_session >= 6:
+        return "regular"
+    return "casual"
+
+
+def _make_top_channels(login: str, other_channels: int) -> list[str]:
+    if other_channels <= 0:
+        return []
+    start = _checksum(login) % len(_VIEWER_CHANNEL_POOL)
+    out: list[str] = []
+    for i in range(other_channels):
+        candidate = _VIEWER_CHANNEL_POOL[(start + i) % len(_VIEWER_CHANNEL_POOL)]
+        if candidate not in out:
+            out.append(candidate)
+    return out
+
+
+def _make_viewer_entry(
+    *,
+    login: str,
+    total_sessions: int,
+    total_messages: int,
+    first_seen_days: int,
+    last_seen_days: int,
+    other_channels: int,
+    top_other_channels: list[str] | None = None,
+) -> dict[str, Any]:
+    first_seen_days = max(first_seen_days, last_seen_days + 2)
+    first_seen = _viewer_timestamp(first_seen_days, hour=18)
+    last_seen = _viewer_timestamp(last_seen_days, hour=20)
+    category = _viewer_category(total_sessions, total_messages, first_seen_days, last_seen_days)
+    top_channels = top_other_channels if top_other_channels is not None else _make_top_channels(login, other_channels)
+    avg_messages = (
+        round(total_messages / max(1, total_sessions), 1) if total_messages > 0 else 0
+    )
+    return {
+        "login": login,
+        "totalSessions": total_sessions,
+        "totalMessages": total_messages,
+        "firstSeen": first_seen,
+        "lastSeen": last_seen,
+        "daysSinceLastSeen": last_seen_days,
+        "otherChannels": max(0, other_channels),
+        "topOtherChannels": top_channels,
+        "category": category,
+        "avgMessagesPerSession": avg_messages,
+        "isLurker": total_messages <= 0,
+    }
+
+
+def _seed_viewers() -> list[dict[str, Any]]:
+    return [
+        _make_viewer_entry(
+            login="alpha_shotcaller",
+            total_sessions=42,
+            total_messages=2210,
+            first_seen_days=310,
+            last_seen_days=1,
+            other_channels=4,
+        ),
+        _make_viewer_entry(
+            login="patchnotes_pete",
+            total_sessions=36,
+            total_messages=1740,
+            first_seen_days=280,
+            last_seen_days=0,
+            other_channels=3,
+        ),
+        _make_viewer_entry(
+            login="fragqueen_de",
+            total_sessions=29,
+            total_messages=1265,
+            first_seen_days=250,
+            last_seen_days=2,
+            other_channels=5,
+        ),
+        _make_viewer_entry(
+            login="duoq_daniel",
+            total_sessions=22,
+            total_messages=742,
+            first_seen_days=190,
+            last_seen_days=5,
+            other_channels=2,
+        ),
+        _make_viewer_entry(
+            login="silent_observer77",
+            total_sessions=17,
+            total_messages=0,
+            first_seen_days=220,
+            last_seen_days=12,
+            other_channels=1,
+        ),
+        _make_viewer_entry(
+            login="rerun_lurker",
+            total_sessions=14,
+            total_messages=0,
+            first_seen_days=205,
+            last_seen_days=33,
+            other_channels=0,
+        ),
+        _make_viewer_entry(
+            login="newcomer_fps",
+            total_sessions=2,
+            total_messages=8,
+            first_seen_days=7,
+            last_seen_days=1,
+            other_channels=1,
+        ),
+        _make_viewer_entry(
+            login="latequeue_mia",
+            total_sessions=19,
+            total_messages=356,
+            first_seen_days=132,
+            last_seen_days=17,
+            other_channels=4,
+        ),
+        _make_viewer_entry(
+            login="coach_clipper",
+            total_sessions=11,
+            total_messages=289,
+            first_seen_days=94,
+            last_seen_days=4,
+            other_channels=2,
+        ),
+        _make_viewer_entry(
+            login="prime_subber",
+            total_sessions=27,
+            total_messages=1118,
+            first_seen_days=188,
+            last_seen_days=6,
+            other_channels=3,
+        ),
+        _make_viewer_entry(
+            login="bg_music_only",
+            total_sessions=9,
+            total_messages=0,
+            first_seen_days=144,
+            last_seen_days=41,
+            other_channels=2,
+        ),
+        _make_viewer_entry(
+            login="scrimcaller_neo",
+            total_sessions=31,
+            total_messages=1330,
+            first_seen_days=212,
+            last_seen_days=3,
+            other_channels=4,
+        ),
+    ]
+
+
+def _generated_viewers() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for i in range(1, 61):
+        login = f"demo_viewer_{i:02d}"
+        total_sessions = 1 + (i * 7) % 42
+        last_seen_days = (i * 3) % 57
+        first_seen_days = min(360, last_seen_days + 20 + (i * 5) % 180)
+        if i % 10 == 0:
+            total_sessions = 1 + (i % 3)
+            first_seen_days = 2 + (i % 8)
+            last_seen_days = i % 5
+        if i % 9 == 0:
+            total_messages = 0
+        else:
+            total_messages = total_sessions * (2 + (i * 5) % 22)
+        other_channels = (i * 2 + 1) % 6
+        rows.append(
+            _make_viewer_entry(
+                login=login,
+                total_sessions=total_sessions,
+                total_messages=total_messages,
+                first_seen_days=first_seen_days,
+                last_seen_days=last_seen_days,
+                other_channels=other_channels,
+            )
+        )
+    return rows
+
+
+def _all_demo_viewers() -> list[dict[str, Any]]:
+    return _seed_viewers() + _generated_viewers()
+
+
+def get_viewer_directory(
+    sort: str = "sessions",
+    order: str = "desc",
+    filter_type: str = "all",
+    search: str = "",
+    page: int = 1,
+    per_page: int = 50,
+) -> dict[str, Any]:
+    page = max(1, int(page))
+    per_page = min(100, max(10, int(per_page)))
+    search = (search or "").strip().lower()
+
+    viewers = _all_demo_viewers()
+    total_viewers = len(viewers)
+    total_active = sum(1 for v in viewers if v["daysSinceLastSeen"] <= 14)
+    total_lurkers = sum(1 for v in viewers if v["isLurker"])
+    total_exclusive = sum(1 for v in viewers if v["otherChannels"] == 0)
+    total_shared = total_viewers - total_exclusive
+    avg_sessions = (
+        round(sum(v["totalSessions"] for v in viewers) / total_viewers, 1)
+        if total_viewers
+        else 0
+    )
+    avg_other = (
+        round(sum(v["otherChannels"] for v in viewers) / total_viewers, 1)
+        if total_viewers
+        else 0
+    )
+
+    if filter_type == "active":
+        viewers = [v for v in viewers if v["daysSinceLastSeen"] <= 14]
+    elif filter_type == "lurker":
+        viewers = [v for v in viewers if v["isLurker"]]
+    elif filter_type == "exclusive":
+        viewers = [v for v in viewers if v["otherChannels"] == 0]
+    elif filter_type == "shared":
+        viewers = [v for v in viewers if v["otherChannels"] > 0]
+    elif filter_type == "new":
+        viewers = [v for v in viewers if v["category"] == "new"]
+    elif filter_type == "churned":
+        viewers = [v for v in viewers if v["daysSinceLastSeen"] > 30]
+
+    if search:
+        viewers = [v for v in viewers if search in str(v["login"]).lower()]
+
+    sort_map = {
+        "sessions": "totalSessions",
+        "messages": "totalMessages",
+        "last_seen": "daysSinceLastSeen",
+        "other_channels": "otherChannels",
+        "first_seen": "firstSeen",
+    }
+    sort_key = sort_map.get(sort, "totalSessions")
+    reverse = order == "desc"
+    if sort == "last_seen":
+        reverse = order == "asc"
+    viewers = sorted(viewers, key=lambda item: item.get(sort_key, 0), reverse=reverse)
+
+    filtered_total = len(viewers)
+    start = (page - 1) * per_page
+    end = start + per_page
+    return {
+        "viewers": viewers[start:end],
+        "total": filtered_total,
+        "page": page,
+        "perPage": per_page,
+        "summary": {
+            "totalViewers": total_viewers,
+            "activeViewers": total_active,
+            "lurkers": total_lurkers,
+            "exclusiveViewers": total_exclusive,
+            "sharedViewers": total_shared,
+            "avgSessionsPerViewer": avg_sessions,
+            "avgOtherChannels": avg_other,
+        },
+    }
+
+
+def _fallback_viewer(login: str) -> dict[str, Any]:
+    seed = _checksum(login)
+    total_sessions = 4 + (seed % 18)
+    total_messages = total_sessions * (3 + (seed % 13))
+    return _make_viewer_entry(
+        login=login,
+        total_sessions=total_sessions,
+        total_messages=total_messages,
+        first_seen_days=70 + (seed % 220),
+        last_seen_days=seed % 21,
+        other_channels=seed % 4,
+    )
+
+
+def _resolve_viewer(login: str) -> dict[str, Any]:
+    login_l = login.strip().lower()
+    for v in _all_demo_viewers():
+        if str(v["login"]).lower() == login_l:
+            return v
+    return _fallback_viewer(login_l or "unknown_viewer")
+
+
+def get_viewer_detail(login: str) -> dict[str, Any]:
+    viewer = _resolve_viewer(login)
+    seed = _checksum(str(viewer["login"]))
+
+    activity: list[dict[str, Any]] = []
+    for idx in range(30):
+        days_ago = (30 - idx) * 3
+        sessions = 1 if (idx + seed) % 4 != 0 else 0
+        if viewer["totalSessions"] >= 20 and idx % 5 == 0:
+            sessions += 1
+        if viewer["isLurker"]:
+            messages = 0
+        else:
+            drift = ((seed // 3 + idx * 7) % 9) - 2
+            base_msgs = max(2.0, float(viewer["avgMessagesPerSession"]) * 0.65)
+            messages = max(0, int(sessions * base_msgs + drift))
+        activity.append({"date": _date(days_ago), "sessions": sessions, "messages": messages})
+
+    cross_channel: list[dict[str, Any]] = []
+    for i, channel in enumerate(viewer["topOtherChannels"][:6]):
+        sessions = max(1, int(viewer["totalSessions"] * (0.45 - 0.06 * i)))
+        if viewer["isLurker"]:
+            messages = 0
+        else:
+            messages = int(sessions * max(1.4, float(viewer["avgMessagesPerSession"]) * (0.75 - 0.08 * i)))
+        overlap = "before" if i % 3 == 0 else ("after" if i % 3 == 1 else "unknown")
+        cross_channel.append(
+            {
+                "streamer": channel,
+                "sessions": sessions,
+                "messages": max(0, messages),
+                "firstSeen": _viewer_timestamp(min(360, viewer["daysSinceLastSeen"] + 90 + i * 9), hour=18),
+                "lastSeen": _viewer_timestamp(min(60, viewer["daysSinceLastSeen"] + i * 4), hour=20),
+                "overlap": overlap,
+            }
+        )
+
+    base_hour = 16 + (seed % 7)
+    peak_hours = sorted(
+        {
+            base_hour % 24,
+            (base_hour + 2 + seed % 3) % 24,
+            (base_hour + 5) % 24,
+        }
+    )
+    weekday_names = [
+        "Sonntag",
+        "Montag",
+        "Dienstag",
+        "Mittwoch",
+        "Donnerstag",
+        "Freitag",
+        "Samstag",
+    ]
+    most_active_day = weekday_names[seed % 7]
+
+    if viewer["totalSessions"] < 4:
+        trend = "insufficient_data"
+    else:
+        trend = ("increasing", "decreasing", "stable")[seed % 3]
+
+    personality: dict[str, Any] | None = None
+    if not viewer["isLurker"]:
+        base = max(3, int(float(viewer["avgMessagesPerSession"])))
+        distribution = {
+            "Game-Related": base * 3 + seed % 12,
+            "Reaction": base * 2 + (seed // 2) % 9,
+            "Question": base + seed % 7,
+            "Greeting": base // 2 + 2 + seed % 5,
+            "Engagement": base * 2 + (seed // 5) % 8,
+            "Command": base + (seed // 7) % 6,
+            "Other": max(1, base // 2 + seed % 4),
+        }
+        personality = {"primary": max(distribution, key=distribution.get), "distribution": distribution}
+
+    payload: dict[str, Any] = {
+        "login": viewer["login"],
+        "overview": {
+            "totalSessions": viewer["totalSessions"],
+            "totalMessages": viewer["totalMessages"],
+            "firstSeen": viewer["firstSeen"],
+            "lastSeen": viewer["lastSeen"],
+            "category": viewer["category"],
+            "isLurker": viewer["isLurker"],
+        },
+        "activityTimeline": activity,
+        "crossChannelPresence": cross_channel,
+        "chatPatterns": {
+            "peakHours": peak_hours,
+            "avgMessagesPerSession": viewer["avgMessagesPerSession"],
+            "mostActiveDay": most_active_day,
+            "messagesTrend": trend,
+        },
+    }
+    if personality:
+        payload["personality"] = personality
+    return payload
+
+
+def get_viewer_segments() -> dict[str, Any]:
+    viewers = _all_demo_viewers()
+    total = len(viewers)
+    segment_names = ("dedicated", "regular", "casual", "lurker", "new")
+    buckets: dict[str, list[dict[str, Any]]] = {name: [] for name in segment_names}
+    for viewer in viewers:
+        cat = str(viewer["category"])
+        if cat not in buckets:
+            cat = "casual"
+        buckets[cat].append(viewer)
+
+    segments: dict[str, Any] = {}
+    for name in segment_names:
+        chunk = buckets[name]
+        count = len(chunk)
+        segments[name] = {
+            "count": count,
+            "pct": round((count / total) * 100, 1) if total else 0,
+            "avgMessages": round(sum(v["totalMessages"] for v in chunk) / max(1, count), 1)
+            if count
+            else 0,
+            "avgSessions": round(sum(v["totalSessions"] for v in chunk) / max(1, count), 1)
+            if count
+            else 0,
+        }
+
+    at_risk = []
+    recently_churned = 0
+    for viewer in viewers:
+        engaged = viewer["totalSessions"] >= 3 and viewer["totalMessages"] > 0
+        last_seen = viewer["daysSinceLastSeen"]
+        if engaged and 14 < last_seen <= 45:
+            at_risk.append(
+                {
+                    "login": viewer["login"],
+                    "sessions": viewer["totalSessions"],
+                    "messages": viewer["totalMessages"],
+                    "daysSinceLastSeen": last_seen,
+                    "category": viewer["category"],
+                    "recentlySeenAt": viewer["topOtherChannels"][:2],
+                }
+            )
+        elif engaged and last_seen > 45:
+            recently_churned += 1
+
+    at_risk.sort(key=lambda v: (v["sessions"] * 2 + v["messages"]), reverse=True)
+
+    exclusive = sum(1 for v in viewers if v["otherChannels"] == 0)
+    avg_other = round(sum(v["otherChannels"] for v in viewers) / max(1, total), 1)
+    top_shared_counts: dict[str, int] = {}
+    for viewer in viewers:
+        for channel in viewer["topOtherChannels"][:3]:
+            top_shared_counts[channel] = top_shared_counts.get(channel, 0) + 1
+    top_shared = sorted(top_shared_counts.items(), key=lambda item: item[1], reverse=True)[:10]
+    top_shared_payload = []
+    for i, (channel, count) in enumerate(top_shared):
+        if i < 3:
+            direction = "bidirectional"
+        else:
+            direction = "outgoing" if i % 2 == 0 else "incoming"
+        top_shared_payload.append(
+            {"streamer": channel, "sharedCount": count, "direction": direction}
+        )
+
+    return {
+        "segments": segments,
+        "churnRisk": {
+            "atRisk": len(at_risk),
+            "recentlyChurned": recently_churned,
+            "atRiskViewers": at_risk[:20],
+        },
+        "crossChannelStats": {
+            "exclusiveViewersPct": round((exclusive / total) * 100, 1) if total else 0,
+            "avgOtherChannels": avg_other,
+            "topSharedChannels": top_shared_payload,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Labor / Experimental demo data
+# ---------------------------------------------------------------------------
+
+_EXP_GAME_BASE = [
+    {
+        "game": "Deadlock",
+        "sessions30": 24,
+        "avgViewers": 388.0,
+        "peakViewers": 1087,
+        "avgDurationMin": 196.0,
+        "avgFollowerDelta": 12.9,
+    },
+    {
+        "game": "Just Chatting",
+        "sessions30": 13,
+        "avgViewers": 344.0,
+        "peakViewers": 612,
+        "avgDurationMin": 74.0,
+        "avgFollowerDelta": 5.8,
+    },
+    {
+        "game": "Counter-Strike 2",
+        "sessions30": 11,
+        "avgViewers": 312.0,
+        "peakViewers": 702,
+        "avgDurationMin": 138.0,
+        "avgFollowerDelta": 7.1,
+    },
+    {
+        "game": "VALORANT",
+        "sessions30": 9,
+        "avgViewers": 286.0,
+        "peakViewers": 650,
+        "avgDurationMin": 152.0,
+        "avgFollowerDelta": 6.4,
+    },
+    {
+        "game": "Apex Legends",
+        "sessions30": 7,
+        "avgViewers": 254.0,
+        "peakViewers": 574,
+        "avgDurationMin": 161.0,
+        "avgFollowerDelta": 5.0,
+    },
+    {
+        "game": "Marvel Rivals",
+        "sessions30": 6,
+        "avgViewers": 302.0,
+        "peakViewers": 588,
+        "avgDurationMin": 126.0,
+        "avgFollowerDelta": 6.9,
+    },
+    {
+        "game": "The Finals",
+        "sessions30": 5,
+        "avgViewers": 228.0,
+        "peakViewers": 470,
+        "avgDurationMin": 118.0,
+        "avgFollowerDelta": 4.1,
+    },
+    {
+        "game": "Helldivers 2",
+        "sessions30": 4,
+        "avgViewers": 214.0,
+        "peakViewers": 451,
+        "avgDurationMin": 109.0,
+        "avgFollowerDelta": 3.6,
+    },
+]
+
+
+def _exp_scale(days: int) -> float:
+    return max(0.25, min(2.4, max(1, days) / 30.0))
+
+
+def get_exp_game_breakdown(days: int = 30) -> list[dict[str, Any]]:
+    scale = _exp_scale(days)
+    rows = []
+    for idx, game in enumerate(_EXP_GAME_BASE):
+        sessions = max(1, int(round(game["sessions30"] * scale)))
+        viewer_bias = ((idx * 7 + days) % 9) - 4
+        rows.append(
+            {
+                "game": game["game"],
+                "sessions": sessions,
+                "avgViewers": round(game["avgViewers"] + viewer_bias * 1.6, 1),
+                "peakViewers": int(round(game["peakViewers"] + viewer_bias * 9)),
+                "avgDurationMin": round(game["avgDurationMin"] + (((days + idx * 5) % 11) - 5) * 1.2, 1),
+                "avgFollowerDelta": round(game["avgFollowerDelta"] + (((idx + days) % 5) - 2) * 0.3, 1),
+            }
+        )
+    rows.sort(key=lambda r: r["avgViewers"], reverse=True)
+    return rows
+
+
+def get_exp_overview(days: int = 30) -> dict[str, Any]:
+    rows = get_exp_game_breakdown(days)
+    total_sessions = sum(int(r["sessions"]) for r in rows)
+    games_played = len([r for r in rows if int(r["sessions"]) > 0])
+    weighted_viewers = sum(float(r["avgViewers"]) * int(r["sessions"]) for r in rows)
+    avg_viewers = round(weighted_viewers / max(1, total_sessions), 1)
+    best_game = max(rows, key=lambda r: r["avgViewers"]) if rows else None
+    return {
+        "totalSessions": total_sessions,
+        "gamesPlayed": games_played,
+        "avgViewers": avg_viewers,
+        "bestGame": best_game["game"] if best_game else "",
+        "bestGameAvgViewers": best_game["avgViewers"] if best_game else 0.0,
+    }
+
+
+def get_exp_game_transitions(days: int = 30) -> list[dict[str, Any]]:
+    scale = _exp_scale(days)
+    base = [
+        ("Deadlock", "Just Chatting", 9, 402.0, -48.0),
+        ("Just Chatting", "Deadlock", 8, 336.0, 62.0),
+        ("Deadlock", "Counter-Strike 2", 6, 391.0, -23.0),
+        ("Counter-Strike 2", "Deadlock", 6, 318.0, 44.0),
+        ("Deadlock", "Marvel Rivals", 5, 384.0, -17.0),
+        ("Marvel Rivals", "Deadlock", 4, 303.0, 31.0),
+        ("Deadlock", "VALORANT", 4, 377.0, -35.0),
+        ("VALORANT", "Just Chatting", 3, 279.0, 22.0),
+        ("Apex Legends", "Deadlock", 3, 248.0, 58.0),
+        ("Helldivers 2", "Deadlock", 2, 206.0, 41.0),
+    ]
+    rows = []
+    for from_game, to_game, count30, before, delta in base:
+        count = max(1, int(round(count30 * scale)))
+        rows.append(
+            {
+                "fromGame": from_game,
+                "toGame": to_game,
+                "count": count,
+                "avgViewersBefore": round(before, 1),
+                "avgViewersAfter": round(before + delta, 1),
+                "viewerDelta": round(delta, 1),
+            }
+        )
+    rows.sort(key=lambda r: r["count"], reverse=True)
+    return rows
+
+
+def get_exp_growth_curves(days: int = 30) -> list[dict[str, Any]]:
+    rows = get_exp_game_breakdown(days)[:6]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        game = str(row["game"])
+        avg = float(row["avgViewers"])
+        peak = max(avg * 1.08, float(row["peakViewers"]) * 0.72)
+        peak_minute = 45 + (_checksum(game) % 35)
+        decay = max(0.18, avg / 520.0)
+        for minute in range(0, 241, 15):
+            if minute <= peak_minute:
+                progress = minute / max(1, peak_minute)
+                viewers = avg * 0.68 + (peak - avg * 0.68) * progress
+            else:
+                viewers = peak - (minute - peak_minute) * decay
+            viewers = max(avg * 0.55, viewers)
+            wobble = ((_checksum(game) + minute) % 9) - 4
+            viewers = round(viewers + wobble * 0.7, 1)
+            sample_count = max(6, int(row["sessions"]) * (1 + max(0, 240 - minute) // 60))
+            out.append(
+                {
+                    "game": game,
+                    "minuteFromStart": minute,
+                    "avgViewers": viewers,
+                    "sampleCount": sample_count,
+                }
+            )
+    out.sort(key=lambda r: (r["game"], r["minuteFromStart"]))
+    return out

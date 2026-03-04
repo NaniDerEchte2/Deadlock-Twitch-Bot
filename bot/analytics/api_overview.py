@@ -111,6 +111,10 @@ class _AnalyticsOverviewMixin:
             get_category_timings,
             get_chat_analytics,
             get_coaching,
+            get_exp_game_breakdown,
+            get_exp_game_transitions,
+            get_exp_growth_curves,
+            get_exp_overview,
             get_follower_funnel,
             get_hourly_heatmap,
             get_lurker_analysis,
@@ -123,8 +127,11 @@ class _AnalyticsOverviewMixin:
             get_tag_analysis,
             get_tag_analysis_extended,
             get_title_performance,
+            get_viewer_detail,
+            get_viewer_directory,
             get_viewer_overlap,
             get_viewer_profiles,
+            get_viewer_segments,
             get_viewer_timeline,
             get_watch_time_distribution,
             get_weekday_stats,
@@ -150,6 +157,47 @@ class _AnalyticsOverviewMixin:
             async def _handler(request: web.Request) -> web.Response:
                 metric = request.query.get("metric", "viewers")
                 return web.json_response(fn(metric))
+
+            return _handler
+
+        def _exp_days_j(fn):
+            async def _handler(request: web.Request) -> web.Response:
+                try:
+                    days = int(request.query.get("days", "30"))
+                except ValueError:
+                    days = 30
+                return web.json_response(fn(days))
+
+            return _handler
+
+        def _viewer_directory_j(fn):
+            async def _handler(request: web.Request) -> web.Response:
+                try:
+                    page = int(request.query.get("page", "1"))
+                except ValueError:
+                    page = 1
+                try:
+                    per_page = int(request.query.get("per_page", "50"))
+                except ValueError:
+                    per_page = 50
+                payload = fn(
+                    sort=request.query.get("sort", "sessions"),
+                    order=request.query.get("order", "desc"),
+                    filter_type=request.query.get("filter", "all"),
+                    search=request.query.get("search", ""),
+                    page=page,
+                    per_page=per_page,
+                )
+                return web.json_response(payload)
+
+            return _handler
+
+        def _viewer_detail_j(fn):
+            async def _handler(request: web.Request) -> web.Response:
+                login = request.query.get("login", "").strip()
+                if not login:
+                    return web.json_response({"error": "login required"}, status=400)
+                return web.json_response(fn(login))
 
             return _handler
 
@@ -180,8 +228,15 @@ class _AnalyticsOverviewMixin:
         router.add_get(f"{base}/category-activity-series", _j(get_category_activity_series))
         router.add_get(f"{base}/lurker-analysis", _j(get_lurker_analysis))
         router.add_get(f"{base}/raid-retention", _j(get_raid_retention))
+        router.add_get(f"{base}/viewer-directory", _viewer_directory_j(get_viewer_directory))
+        router.add_get(f"{base}/viewer-detail", _viewer_detail_j(get_viewer_detail))
+        router.add_get(f"{base}/viewer-segments", _j(get_viewer_segments))
         router.add_get(f"{base}/viewer-profiles", _j(get_viewer_profiles))
         router.add_get(f"{base}/audience-sharing", _j(get_audience_sharing))
+        router.add_get(f"{base}/exp/overview", _exp_days_j(get_exp_overview))
+        router.add_get(f"{base}/exp/game-breakdown", _exp_days_j(get_exp_game_breakdown))
+        router.add_get(f"{base}/exp/game-transitions", _exp_days_j(get_exp_game_transitions))
+        router.add_get(f"{base}/exp/growth-curves", _exp_days_j(get_exp_growth_curves))
         # Demo dashboard HTML
         router.add_get("/twitch/demo/", self._serve_demo_dashboard)
         router.add_get("/twitch/demo", self._serve_demo_dashboard)
