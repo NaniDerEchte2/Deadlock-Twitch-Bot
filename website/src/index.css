@@ -98,6 +98,19 @@ body::before {
   z-index: 1;
 }
 
+/* Responsive downscaling for non-mobile demo dashboards inside iframe */
+.hero-demo-frame {
+  --demo-iframe-scale: 0.75;
+}
+
+.hero-demo-frame__iframe {
+  width: calc(100% / var(--demo-iframe-scale));
+  height: calc(100% / var(--demo-iframe-scale));
+  transform: scale(var(--demo-iframe-scale));
+  transform-origin: top left;
+  display: block;
+}
+
 h1, h2, h3, h4, .display-font {
   font-family: var(--font-display);
   letter-spacing: -0.02em;

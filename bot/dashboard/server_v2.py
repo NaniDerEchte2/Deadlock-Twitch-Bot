@@ -46,6 +46,33 @@ TWITCH_ADMIN_DISCORD_REDIRECT_URI = (
 ).strip()
 
 
+def _normalize_frame_ancestor_origin(raw_origin: str) -> str | None:
+    candidate = (raw_origin or "").strip()
+    if not candidate:
+        return None
+    parsed = urlsplit(candidate)
+    if parsed.scheme not in {"https", "http"}:
+        return None
+    if not parsed.netloc or parsed.path not in {"", "/"}:
+        return None
+    if parsed.query or parsed.fragment or "@" in parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+_DEMO_EMBED_ALLOWED_ANCESTORS: tuple[str, ...] = tuple(
+    origin
+    for origin in (
+        _normalize_frame_ancestor_origin(item)
+        for item in os.getenv(
+            "TWITCH_DEMO_EMBED_ORIGINS",
+            "https://twitch.earlysalty.com,https://earlysalty.de,https://www.earlysalty.de",
+        ).split(",")
+    )
+    if origin
+)
+
+
 class DashboardV2Server(
     _DashboardAuthMixin,
     _DashboardRaidMixin,
@@ -687,7 +714,13 @@ class DashboardV2Server(
 async def _security_headers_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
     """Attach minimal security headers to every response."""
     response = await handler(request)
-    response.headers.setdefault("X-Frame-Options", "DENY")
+    is_demo_embed_path = request.path == "/twitch/demo" or request.path.startswith("/twitch/demo/")
+    if is_demo_embed_path and _DEMO_EMBED_ALLOWED_ANCESTORS:
+        frame_ancestors = " ".join(["'self'", *_DEMO_EMBED_ALLOWED_ANCESTORS])
+        response.headers["Content-Security-Policy"] = f"frame-ancestors {frame_ancestors}"
+        response.headers.pop("X-Frame-Options", None)
+    else:
+        response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-XSS-Protection", "1; mode=block")
     return response

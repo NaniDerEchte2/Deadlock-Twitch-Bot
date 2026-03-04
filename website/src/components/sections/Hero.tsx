@@ -12,7 +12,7 @@ export function Hero() {
       id="hero"
       className="relative min-h-screen flex flex-col justify-center overflow-hidden"
     >
-      <div className="max-w-7xl mx-auto px-6 pt-32 pb-20 w-full">
+      <div className="max-w-[96rem] mx-auto px-6 pt-32 pb-20 w-full">
         {/* Centered content */}
         <div className="text-center">
           {/* Badge */}
@@ -79,17 +79,32 @@ export function Hero() {
         </div>
 
         {/* Browser Mockup */}
-        <div className="relative mt-16">
+        <div className="relative mt-16 mx-auto w-full max-w-[1375px]">
           <motion.div
             initial={{ opacity: 0, y: 40 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.8, delay: 0.3 }}
           >
             <BrowserMockup>
-              <div className="aspect-video bg-gradient-to-br from-[var(--color-card)] to-[var(--color-bg)] rounded flex items-center justify-center">
-                <span className="text-[var(--color-text-secondary)]">
-                  Dashboard Preview
+              <div className="hero-demo-frame relative aspect-video overflow-hidden rounded bg-gradient-to-br from-[var(--color-card)] to-[var(--color-bg)]">
+                <iframe
+                  src="https://demo.earlysalty.com/twitch/demo/"
+                  title="Twitch Analyse Demo Live View"
+                  className="hero-demo-frame__iframe border-0"
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                />
+                <span className="pointer-events-none absolute left-3 top-3 rounded-full border border-[var(--color-border)] bg-[rgba(7,21,29,0.78)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--color-accent)]">
+                  Live View
                 </span>
+                <a
+                  href="https://demo.earlysalty.com/twitch/demo/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="absolute bottom-3 right-3 rounded-md border border-[var(--color-border)] bg-[rgba(7,21,29,0.8)] px-2.5 py-1 text-[11px] font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-border-hover)]"
+                >
+                  Vollansicht
+                </a>
               </div>
             </BrowserMockup>
           </motion.div>
