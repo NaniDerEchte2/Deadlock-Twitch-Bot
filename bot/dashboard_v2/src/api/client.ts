@@ -365,6 +365,7 @@ export interface InternalHomeActionEntry {
   viewerCount?: number | null;
   success?: boolean | null;
   severity?: 'success' | 'info' | 'warning' | 'critical' | string;
+  source?: string | null;
 }
 
 export type InternalHomeImpactEntry = InternalHomeActionEntry;
@@ -441,6 +442,7 @@ interface InternalHomeRawImpactEvent {
   event_type?: string | null;
   timestamp?: string | null;
   title?: string | null;
+  summary?: string | null;
   status_label?: string | null;
   description?: string | null;
   metric?: string | null;
@@ -452,6 +454,7 @@ interface InternalHomeRawImpactEvent {
   viewer_count?: number | null;
   success?: boolean | null;
   severity?: string | null;
+  source?: string | null;
 }
 
 interface InternalHomeRawChangelogEntry {
@@ -513,9 +516,11 @@ function mapImpactEntry(
   const reason = String(entry.reason || '').trim();
   const metric = String(entry.metric || '').trim();
   const description = String(entry.description || '').trim();
+  const summary = String(entry.summary || '').trim();
   const title = String(entry.title || '').trim();
   const viewers = toFiniteNumber(entry.viewer_count);
   const severity = String(entry.severity || '').trim().toLowerCase();
+  const source = String(entry.source || '').trim().toLowerCase() || null;
   const normalizedSeverity =
     severity === 'critical' || severity === 'warning' || severity === 'success' || severity === 'info'
       ? severity
@@ -531,11 +536,12 @@ function mapImpactEntry(
       targetId,
       actorLogin,
       reason: reason || null,
-      summary: reason || (actorLogin ? `Mod: @${actorLogin}` : 'Ban ausgeführt'),
+      summary: summary || reason || (actorLogin ? `Mod: @${actorLogin}` : 'Ban ausgeführt'),
       title: title || (target ? `Ban gegen @${target}` : 'Ban ausgeführt'),
       description: description || null,
       metric: metric || null,
       severity: normalizedSeverity || 'warning',
+      source,
     };
   }
 
@@ -549,11 +555,12 @@ function mapImpactEntry(
       targetId,
       actorLogin,
       reason: reason || null,
-      summary: reason || (actorLogin ? `Unban durch @${actorLogin}` : 'Unban ausgeführt'),
+      summary: summary || reason || (actorLogin ? `Unban durch @${actorLogin}` : 'Unban ausgeführt'),
       title: title || (target ? `Unban für @${target}` : 'Unban ausgeführt'),
       description: description || null,
       metric: metric || null,
       severity: normalizedSeverity || 'success',
+      source,
     };
   }
 
@@ -569,7 +576,7 @@ function mapImpactEntry(
       actorLogin,
       reason: reason || null,
       summary:
-        reason || (success ? 'Raid erfolgreich ausgeführt' : 'Raid nicht erfolgreich'),
+        summary || reason || (success ? 'Raid erfolgreich ausgeführt' : 'Raid nicht erfolgreich'),
       title: title || (target ? `Raid zu @${target}` : 'Raid-Aktivität'),
       description: description || null,
       metric:
@@ -577,6 +584,7 @@ function mapImpactEntry(
       viewerCount: viewers ?? null,
       success,
       severity: success ? 'info' : 'warning',
+      source,
     };
   }
 
@@ -589,13 +597,14 @@ function mapImpactEntry(
     targetId,
     actorLogin,
     reason: reason || null,
-    summary: description || reason || 'Neues Bot-Ereignis',
+    summary: summary || description || reason || 'Neues Bot-Ereignis',
     title: title || 'Bot Update',
     description: description || null,
     metric: metric || null,
     viewerCount: viewers ?? null,
     success: entry.success ?? null,
     severity: normalizedSeverity || 'info',
+    source,
   };
 }
 

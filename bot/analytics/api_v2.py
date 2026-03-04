@@ -7,7 +7,9 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+from collections import deque
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
@@ -55,6 +57,16 @@ _INTERNAL_HOME_RATE_LIMIT_MAX_REQUESTS = 30
 _INTERNAL_HOME_RATE_LIMIT_WINDOW_SECONDS = 60.0
 _INTERNAL_HOME_CHANGELOG_WRITE_RATE_LIMIT_MAX_REQUESTS = 10
 _INTERNAL_HOME_CHANGELOG_WRITE_RATE_LIMIT_WINDOW_SECONDS = 60.0
+_INTERNAL_HOME_SERVICE_WARNING_LOG_FILENAME = "twitch_service_warnings.log"
+_INTERNAL_HOME_SERVICE_WARNING_MAX_SCAN_LINES = 5000
+_INTERNAL_HOME_SERVICE_WARNING_MAX_EVENTS = 20
+_INTERNAL_HOME_AUTOBAN_LOG_FILENAME = "twitch_autobans.log"
+_INTERNAL_HOME_AUTOBAN_MAX_SCAN_LINES = 5000
+_INTERNAL_HOME_AUTOBAN_MAX_EVENTS = 20
+_INTERNAL_HOME_ACTIVITY_MAX_EVENTS = 10
+_INTERNAL_HOME_ACTIVITY_PRIORITY_TYPES: frozenset[str] = frozenset(
+    {"ban", "ban_keyword_hit", "unban", "service_pitch_warning"}
+)
 
 
 def _is_loopback_host(raw_value: str) -> bool:
@@ -452,6 +464,354 @@ class AnalyticsV2Mixin(
         return str(value)
 
     @staticmethod
+    def _internal_home_parse_iso_datetime(value: Any) -> datetime | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        normalized = text.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+    @staticmethod
+    def _internal_home_parse_prefixed_int(token: str, prefix: str) -> int | None:
+        normalized = str(token or "").strip()
+        if not normalized.lower().startswith(prefix.lower()):
+            return None
+        raw_value = normalized[len(prefix):].strip()
+        if raw_value in {"", "-"}:
+            return None
+        try:
+            return int(raw_value)
+        except ValueError:
+            return None
+
+    @classmethod
+    def _internal_home_service_warning_log_candidates(cls) -> tuple[Path, ...]:
+        local_path = Path("logs") / _INTERNAL_HOME_SERVICE_WARNING_LOG_FILENAME
+        project_root = Path(__file__).resolve().parents[2]
+        project_path = project_root / "logs" / _INTERNAL_HOME_SERVICE_WARNING_LOG_FILENAME
+        if project_path == local_path:
+            return (local_path,)
+        return local_path, project_path
+
+    @classmethod
+    def _internal_home_autoban_log_candidates(cls) -> tuple[Path, ...]:
+        local_path = Path("logs") / _INTERNAL_HOME_AUTOBAN_LOG_FILENAME
+        project_root = Path(__file__).resolve().parents[2]
+        project_path = project_root / "logs" / _INTERNAL_HOME_AUTOBAN_LOG_FILENAME
+        if project_path == local_path:
+            return (local_path,)
+        return local_path, project_path
+
+    @staticmethod
+    def _internal_home_service_warning_title(severity_code: str) -> str:
+        normalized = str(severity_code or "").strip().upper()
+        if normalized == "ESCALATED_TIMEOUT":
+            return "Service-Pitch eskaliert (Timeout)"
+        if normalized == "WARNING_STRONG":
+            return "Service-Pitch Warnung (stark)"
+        if normalized == "WARNING_PUBLIC":
+            return "Service-Pitch Warnung"
+        if normalized == "HINT":
+            return "Service-Pitch Hinweis"
+        return "Service-Pitch Ereignis"
+
+    @staticmethod
+    def _internal_home_service_warning_severity(severity_code: str) -> str:
+        normalized = str(severity_code or "").strip().upper()
+        if normalized == "ESCALATED_TIMEOUT":
+            return "critical"
+        if normalized == "WARNING_STRONG":
+            return "warning"
+        if normalized == "WARNING_PUBLIC":
+            return "warning"
+        if normalized == "HINT":
+            return "info"
+        return "warning"
+
+    def _parse_internal_home_service_warning_line(
+        self,
+        raw_line: str,
+    ) -> dict[str, Any] | None:
+        line = str(raw_line or "").strip()
+        if not line:
+            return None
+        parts = line.split("\t", 10)
+        if len(parts) < 10:
+            return None
+        if len(parts) == 10:
+            parts.append("")
+
+        timestamp_raw = parts[0].strip()
+        severity_code = parts[1].strip().upper()
+        channel_login = parts[2].strip().lower()
+        chatter_login = parts[3].strip().lower()
+        chatter_id = parts[4].strip()
+        age_days = self._internal_home_parse_prefixed_int(parts[5], "age_days=")
+        follower_count = self._internal_home_parse_prefixed_int(parts[6], "followers=")
+        score = self._internal_home_parse_prefixed_int(parts[7], "score=")
+        message_count = self._internal_home_parse_prefixed_int(parts[8], "msgs=")
+        reasons_text = parts[9].strip()
+        content_text = parts[10].strip()
+
+        parsed_ts = self._internal_home_parse_iso_datetime(timestamp_raw)
+        timestamp = (
+            parsed_ts.isoformat()
+            if parsed_ts is not None
+            else self._internal_home_iso(timestamp_raw)
+        )
+
+        metric_parts: list[str] = []
+        if score is not None:
+            metric_parts.append(f"Score {score}")
+        if message_count is not None:
+            metric_parts.append(f"Msgs {message_count}")
+        if age_days is not None and age_days >= 0:
+            metric_parts.append(f"Account {age_days}d")
+        if follower_count is not None:
+            metric_parts.append(f"Followers {follower_count}")
+        metric = " | ".join(metric_parts)
+
+        reason = "" if reasons_text in {"", "-"} else reasons_text
+        description_parts: list[str] = []
+        if reason:
+            description_parts.append(f"Signale: {reason}")
+        if content_text:
+            description_parts.append(f"Nachricht: {content_text}")
+        description = " | ".join(description_parts)
+
+        chatter_label = f"@{chatter_login}" if chatter_login and chatter_login != "-" else "Unbekannt"
+        summary_parts: list[str] = [chatter_label]
+        if metric:
+            summary_parts.append(metric)
+        summary = " | ".join(summary_parts)
+
+        return {
+            "type": "service_pitch_warning",
+            "event_type": "service_pitch_warning",
+            "timestamp": timestamp,
+            "target_login": "" if chatter_login == "-" else chatter_login,
+            "target_id": "" if chatter_id == "-" else chatter_id,
+            "actor_login": channel_login,
+            "status_label": f"[{severity_code or 'WARNING'}]",
+            "title": self._internal_home_service_warning_title(severity_code),
+            "summary": summary,
+            "description": description,
+            "reason": reason,
+            "metric": metric,
+            "severity": self._internal_home_service_warning_severity(severity_code),
+            "source": "service_warning_log",
+        }
+
+    def _load_internal_home_service_warning_events(
+        self,
+        *,
+        streamer_login: str,
+        since_date: str,
+        max_events: int = _INTERNAL_HOME_SERVICE_WARNING_MAX_EVENTS,
+    ) -> list[dict[str, Any]]:
+        channel_key = str(streamer_login or "").strip().lower()
+        if not channel_key:
+            return []
+
+        log_path: Path | None = None
+        for candidate in self._internal_home_service_warning_log_candidates():
+            try:
+                if candidate.exists():
+                    log_path = candidate
+                    break
+            except OSError:
+                continue
+        if log_path is None:
+            return []
+
+        since_dt = self._internal_home_parse_iso_datetime(since_date)
+        recent_lines: deque[str] = deque(maxlen=_INTERNAL_HOME_SERVICE_WARNING_MAX_SCAN_LINES)
+        try:
+            with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if line:
+                        recent_lines.append(line.rstrip("\n"))
+        except OSError:
+            log.debug(
+                "Could not read service warning log for internal-home: %s",
+                log_path,
+                exc_info=True,
+            )
+            return []
+
+        events: list[dict[str, Any]] = []
+        for raw_line in reversed(recent_lines):
+            parsed = self._parse_internal_home_service_warning_line(raw_line)
+            if not parsed:
+                continue
+
+            severity_label = str(parsed.get("status_label") or "").upper()
+            if "HINT" in severity_label:
+                continue
+
+            event_channel = str(parsed.get("actor_login") or "").strip().lower()
+            if event_channel != channel_key:
+                continue
+
+            if since_dt is not None:
+                event_dt = self._internal_home_parse_iso_datetime(parsed.get("timestamp"))
+                if event_dt is None or event_dt < since_dt:
+                    continue
+
+            events.append(parsed)
+            if len(events) >= int(max_events):
+                break
+
+        return events
+
+    def _parse_internal_home_autoban_line(
+        self,
+        raw_line: str,
+    ) -> dict[str, Any] | None:
+        line = str(raw_line or "").strip()
+        if not line:
+            return None
+        parts = line.split("\t", 6)
+        if len(parts) < 6:
+            return None
+        if len(parts) == 6:
+            parts.append("")
+
+        timestamp_raw = parts[0].strip()
+        status_raw = parts[1].strip()
+        channel_login = parts[2].strip().lower()
+        chatter_login = parts[3].strip().lower()
+        chatter_id = parts[4].strip()
+        reason_text = parts[5].strip()
+        content_text = parts[6].strip()
+
+        normalized_status = status_raw.strip().strip("[]").upper()
+        if normalized_status != "BANNED":
+            return None
+
+        parsed_ts = self._internal_home_parse_iso_datetime(timestamp_raw)
+        timestamp = (
+            parsed_ts.isoformat()
+            if parsed_ts is not None
+            else self._internal_home_iso(timestamp_raw)
+        )
+
+        reason = "" if reason_text in {"", "-"} else reason_text
+        content = "" if content_text in {"", "-"} else content_text
+        target_login = "" if chatter_login in {"", "-"} else chatter_login
+        target_id = "" if chatter_id in {"", "-"} else chatter_id
+        status_label = (
+            status_raw
+            if status_raw.startswith("[") and status_raw.endswith("]")
+            else "[BANNED]"
+        )
+
+        summary_parts: list[str] = []
+        if reason:
+            summary_parts.append(reason)
+        if content:
+            summary_parts.append(content)
+        if channel_login:
+            summary_parts.append(f"Mod: @{channel_login}")
+        summary = " | ".join(summary_parts) if summary_parts else "Ban ausgeführt"
+
+        description_parts: list[str] = []
+        if reason:
+            description_parts.append(f"Signale: {reason}")
+        if content:
+            description_parts.append(f"Nachricht: {content}")
+        description = " | ".join(description_parts)
+
+        return {
+            "type": "ban",
+            "event_type": "ban",
+            "timestamp": timestamp,
+            "target_login": target_login,
+            "target_id": target_id,
+            "moderator_login": channel_login,
+            "actor_login": channel_login,
+            "reason": reason,
+            "status_label": status_label,
+            "title": (
+                f"Ban gegen @{target_login}"
+                if target_login
+                else "Ban ausgeführt"
+            ),
+            "summary": summary,
+            "description": description,
+            "severity": "warning",
+            "source": "autoban_log",
+        }
+
+    def _load_internal_home_autoban_events(
+        self,
+        *,
+        streamer_login: str,
+        since_date: str,
+        max_events: int = _INTERNAL_HOME_AUTOBAN_MAX_EVENTS,
+    ) -> list[dict[str, Any]]:
+        channel_key = str(streamer_login or "").strip().lower()
+        if not channel_key:
+            return []
+
+        log_path: Path | None = None
+        for candidate in self._internal_home_autoban_log_candidates():
+            try:
+                if candidate.exists():
+                    log_path = candidate
+                    break
+            except OSError:
+                continue
+        if log_path is None:
+            return []
+
+        since_dt = self._internal_home_parse_iso_datetime(since_date)
+        recent_lines: deque[str] = deque(maxlen=_INTERNAL_HOME_AUTOBAN_MAX_SCAN_LINES)
+        try:
+            with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if line:
+                        recent_lines.append(line.rstrip("\n"))
+        except OSError:
+            log.debug(
+                "Could not read autoban log for internal-home: %s",
+                log_path,
+                exc_info=True,
+            )
+            return []
+
+        events: list[dict[str, Any]] = []
+        for raw_line in reversed(recent_lines):
+            parsed = self._parse_internal_home_autoban_line(raw_line)
+            if not parsed:
+                continue
+
+            event_channel = str(
+                parsed.get("actor_login") or parsed.get("moderator_login") or ""
+            ).strip().lower()
+            if event_channel != channel_key:
+                continue
+
+            if since_dt is not None:
+                event_dt = self._internal_home_parse_iso_datetime(parsed.get("timestamp"))
+                if event_dt is None or event_dt < since_dt:
+                    continue
+
+            events.append(parsed)
+            if len(events) >= int(max_events):
+                break
+
+        return events
+
+    @staticmethod
     def _internal_home_entry_date_iso(value: Any) -> str:
         if value is None:
             return ""
@@ -816,6 +1176,8 @@ class AnalyticsV2Mixin(
         oauth_status = "missing"
         recent_streams: list[dict[str, Any]] = []
         raid_events: list[dict[str, Any]] = []
+        autoban_events: list[dict[str, Any]] = []
+        service_warning_events: list[dict[str, Any]] = []
         bot_events: list[dict[str, Any]] = []
 
         with storage.get_conn() as conn:
@@ -948,28 +1310,47 @@ class AnalyticsV2Mixin(
                 bot_bans_keyword_count = int((ban_count_row[0] if ban_count_row else 0) or 0)
 
                 ban_event_rows = conn.execute(
-                    f"""
+                    """
                     SELECT b.received_at, b.target_login, b.target_id, b.moderator_login, b.reason
                     FROM twitch_ban_events b
                     WHERE b.received_at >= ?
                       AND b.twitch_user_id = ?
                       AND LOWER(COALESCE(b.event_type, '')) = 'ban'
-                      AND {ban_clause}
                     ORDER BY b.received_at DESC
-                    LIMIT 10
+                    LIMIT 20
                     """,
-                    [since_date, resolved_user_id, *ban_params],
+                    [since_date, resolved_user_id],
                 ).fetchall()
                 for row in ban_event_rows:
+                    target_login = str(row[1] or "").strip()
+                    moderator_login = str(row[3] or "").strip()
+                    reason_text = str(row[4] or "").strip()
+                    summary_parts: list[str] = []
+                    if reason_text:
+                        summary_parts.append(reason_text)
+                    if moderator_login:
+                        summary_parts.append(f"Mod: @{moderator_login}")
                     bot_events.append(
                         {
-                            "type": "ban_keyword_hit",
+                            "type": "ban",
+                            "event_type": "ban",
                             "timestamp": self._internal_home_iso(row[0]),
-                            "target_login": str(row[1] or ""),
+                            "target_login": target_login,
                             "target_id": str(row[2] or ""),
-                            "moderator_login": str(row[3] or ""),
-                            "reason": str(row[4] or ""),
+                            "moderator_login": moderator_login,
+                            "reason": reason_text,
                             "status_label": "[BANNED]",
+                            "title": (
+                                f"Ban gegen @{target_login}"
+                                if target_login
+                                else "Ban ausgeführt"
+                            ),
+                            "summary": (
+                                " | ".join(summary_parts)
+                                if summary_parts
+                                else "Ban ausgeführt"
+                            ),
+                            "severity": "warning",
                         }
                     )
 
@@ -1008,8 +1389,29 @@ class AnalyticsV2Mixin(
                     raid_events.append(raid_event)
                     bot_events.append(raid_event)
 
+        if resolved_login:
+            autoban_events = self._load_internal_home_autoban_events(
+                streamer_login=resolved_login,
+                since_date=since_date,
+            )
+            bot_events.extend(autoban_events)
+
+            service_warning_events = self._load_internal_home_service_warning_events(
+                streamer_login=resolved_login,
+                since_date=since_date,
+            )
+            bot_events.extend(service_warning_events)
+
         bot_events.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
-        bot_events = bot_events[:10]
+        prioritized_events: list[dict[str, Any]] = []
+        regular_events: list[dict[str, Any]] = []
+        for event in bot_events:
+            event_type = str(event.get("event_type") or event.get("type") or "").strip().lower()
+            if event_type in _INTERNAL_HOME_ACTIVITY_PRIORITY_TYPES:
+                prioritized_events.append(event)
+            else:
+                regular_events.append(event)
+        bot_events = (prioritized_events + regular_events)[:_INTERNAL_HOME_ACTIVITY_MAX_EVENTS]
 
         overview_query = {"days": days}
         if resolved_login:
@@ -1053,6 +1455,8 @@ class AnalyticsV2Mixin(
                 "summary": {
                     "ban_keyword_hits_30d": bot_bans_keyword_count,
                     "recent_raid_events": len(raid_events),
+                    "recent_autoban_events": len(autoban_events),
+                    "recent_service_warnings": len(service_warning_events),
                 },
                 "note": (
                     "Raid automation is active in read-only mode. "

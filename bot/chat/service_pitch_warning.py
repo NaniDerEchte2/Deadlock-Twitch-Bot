@@ -107,6 +107,11 @@ _SERVICE_WARNING_SHORT_MSG_MAX_CHARS = _env_int(
     32,
     minimum=8,
 )
+_SERVICE_WARNING_OBSERVED_MSG_CACHE_TTL_SEC = _env_int(
+    "TWITCH_SERVICE_WARNING_OBSERVED_MSG_CACHE_TTL_SEC",
+    24 * 60 * 60,
+    minimum=300,
+)
 
 if _SERVICE_WARNING_PUBLIC_THRESHOLD < _SERVICE_WARNING_LIGHT_THRESHOLD:
     _SERVICE_WARNING_PUBLIC_THRESHOLD = _SERVICE_WARNING_LIGHT_THRESHOLD
@@ -276,6 +281,15 @@ _LINK_RE = re.compile(
     re.IGNORECASE,
 )
 _HANDLE_RE = re.compile(r"(?:^|\s)@[A-Za-z0-9_.]{3,}\b")
+_TWITCH_COLLAB_INVITE_RE = re.compile(
+    r"https?://(?:www\.)?twitch\.tv/collab/invite/[A-Za-z0-9_-]+",
+    re.IGNORECASE,
+)
+_DISCORD_HANDLE_DROP_RE = re.compile(r"\bdiscord\s*[:：]\s*[A-Za-z0-9_.-]{3,}\b", re.IGNORECASE)
+_DISCORD_TEAMUP_RE = re.compile(
+    r"\b(?:let'?s|lets)\s+team\s+up(?:\s+on\s+discord)?\b",
+    re.IGNORECASE,
+)
 
 
 class ServicePitchWarningMixin:
@@ -291,6 +305,7 @@ class ServicePitchWarningMixin:
         self._service_warning_hint_cd: dict[tuple[str, str], float] = {}
         self._service_warning_account_age_cache: dict[str, tuple[float, int | None]] = {}
         self._service_warning_follower_cache: dict[str, tuple[float, int | None]] = {}
+        self._service_warning_seen_messages: dict[tuple[str, str], tuple[float, int]] = {}
 
     @staticmethod
     def _normalize_text(content: str) -> str:
@@ -323,15 +338,32 @@ class ServicePitchWarningMixin:
             matched_features.add("generic_praise")
             reasons.append(f"feature:generic_praise({praise_score})")
 
+        has_discord_teamup = bool(_DISCORD_TEAMUP_RE.search(raw))
+        if has_discord_teamup:
+            score += 3
+            matched_features.add("discord_teamup_pitch")
+            reasons.append("feature:discord_teamup_pitch")
+
+        has_discord_handle_drop = bool(_DISCORD_HANDLE_DROP_RE.search(raw))
+        if has_discord_handle_drop:
+            score += 4
+            matched_features.add("discord_handle_drop")
+            reasons.append("feature:discord_handle_drop")
+
         has_link = bool(_LINK_RE.search(raw))
+        has_twitch_collab_invite = bool(_TWITCH_COLLAB_INVITE_RE.search(raw))
         has_platform_ref = bool(
             re.search(r"\b(?:discord|instagram|tiktok|youtube|yt|ig)\b", lowered)
         )
         has_handle = bool(_HANDLE_RE.search(raw))
-        if has_link or (has_platform_ref and has_handle):
+        has_external_profile_drop = has_platform_ref and (has_handle or has_discord_handle_drop)
+        if (has_link and not has_twitch_collab_invite) or has_external_profile_drop:
             score += 4
             matched_features.add("external_link_or_handle")
             reasons.append("feature:external_link_or_handle")
+        elif has_twitch_collab_invite:
+            matched_features.add("trusted_twitch_collab_invite")
+            reasons.append("feature:trusted_twitch_collab_invite")
 
         return score, reasons, matched_features
 
@@ -353,6 +385,64 @@ class ServicePitchWarningMixin:
         if not content:
             return 0
         return len([part for part in re.split(r"\s+", content) if part])
+
+    def _observe_service_message_position(
+        self,
+        channel_login: str,
+        chatter_key: str,
+        now: float,
+    ) -> tuple[int, bool]:
+        key = (channel_login, chatter_key)
+        observed_count = 1
+
+        cached = self._service_warning_seen_messages.get(key)
+        if isinstance(cached, tuple) and len(cached) == 2:
+            cache_ts, cache_count = cached
+            if (now - float(cache_ts)) <= float(_SERVICE_WARNING_OBSERVED_MSG_CACHE_TTL_SEC):
+                try:
+                    observed_count = max(0, int(cache_count)) + 1
+                except Exception:
+                    observed_count = 1
+
+        self._service_warning_seen_messages[key] = (now, observed_count)
+        self._prune_simple_monotonic_cache(
+            self._service_warning_seen_messages,
+            now,
+            max_len=32768,
+            max_age_sec=float(_SERVICE_WARNING_OBSERVED_MSG_CACHE_TTL_SEC) * 2.0,
+        )
+        return observed_count, observed_count == 1
+
+    @staticmethod
+    def _is_quick_action_eligible(*, is_new_account: bool, is_first_observed_message: bool) -> bool:
+        return bool(is_new_account and is_first_observed_message)
+
+    @staticmethod
+    def _has_high_confidence_single_message_signal(features: set[str]) -> bool:
+        if "crew_threat" in features or "discord_handle_drop" in features:
+            return True
+        if {"offplatform", "external_link_or_handle"}.issubset(features):
+            return True
+        if {"offplatform", "discord_teamup_pitch"}.issubset(features):
+            return True
+        if {"growth_pitch", "external_link_or_handle"}.issubset(features):
+            return True
+        return False
+
+    def _is_benign_social_checkin(self, content: str, features: set[str]) -> bool:
+        if not features or not features.issubset({"greeting", "wellbeing"}):
+            return False
+        if _LINK_RE.search(content):
+            return False
+        if _HANDLE_RE.search(content):
+            normalized = self._normalize_text(content)
+            starts_with_mention = bool(re.match(r"^@[A-Za-z0-9_.]{3,}\b", normalized))
+            has_platform_ref = bool(
+                re.search(r"\b(?:discord|instagram|tiktok|youtube|yt|ig)\b", normalized.casefold())
+            )
+            if not starts_with_mention or has_platform_ref:
+                return False
+        return self._token_count(content) <= 14
 
     def _score_sequence_signals(
         self,
@@ -606,14 +696,19 @@ class ServicePitchWarningMixin:
         if bool(getattr(author, "moderator", False)) or bool(getattr(author, "broadcaster", False)):
             return False
 
-        score, reasons, features = self._score_service_pitch_message(raw_content)
-        if score <= 0:
-            return False
-
         chatter_login = (getattr(author, "name", "") or "").strip().lower()
         chatter_id = str(getattr(author, "id", "") or "").strip()
         chatter_key = chatter_login or chatter_id or "unknown"
         now = time.monotonic()
+        _, is_first_observed_message = self._observe_service_message_position(
+            channel_login, chatter_key, now
+        )
+
+        score, reasons, features = self._score_service_pitch_message(raw_content)
+        if score <= 0:
+            return False
+        if is_first_observed_message:
+            reasons.append("timing:first_observed_message")
 
         account_age_days = await self._get_account_age_days(chatter_id, chatter_login)
         account_age_safe = -1 if account_age_days is None else int(account_age_days)
@@ -630,6 +725,9 @@ class ServicePitchWarningMixin:
                 reasons.append("account:unknown_age")
             else:
                 reasons.append("account:older_than_3_months")
+
+        if not is_new_account and self._is_benign_social_checkin(raw_content, features):
+            return False
 
         is_low_target, follower_count = self._is_low_follower_target(channel_login)
         if not is_low_target:
@@ -668,7 +766,14 @@ class ServicePitchWarningMixin:
 
         total_score = int(sum(int(item[1]) for item in bucket))
         msg_count = len(bucket)
-        force_single_warning = "crew_threat" in features
+        quick_action_eligible = self._is_quick_action_eligible(
+            is_new_account=is_new_account,
+            is_first_observed_message=is_first_observed_message,
+        )
+        force_single_warning = "crew_threat" in features or (
+            quick_action_eligible
+            and self._has_high_confidence_single_message_signal(features)
+        )
         if total_score < int(_SERVICE_WARNING_MIN_SCORE) or (
             msg_count < int(_SERVICE_WARNING_MIN_MESSAGES) and not force_single_warning
         ):
@@ -688,6 +793,12 @@ class ServicePitchWarningMixin:
             severity = "WARNING_STRONG"
         elif total_score >= int(_SERVICE_WARNING_PUBLIC_THRESHOLD):
             severity = "WARNING_PUBLIC"
+
+        if severity != "HINT" and not quick_action_eligible:
+            severity = "HINT"
+            reasons.append("quick_action:deferred_requires_new_account_first_message")
+        elif quick_action_eligible:
+            reasons.append("quick_action:eligible")
 
         if severity == "HINT":
             hint_cd_until = float(self._service_warning_hint_cd.get(bucket_key, 0.0))

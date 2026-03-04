@@ -82,6 +82,27 @@ function isBanAction(entry: InternalHomeActionEntry): boolean {
   return haystack.includes('ban') || haystack.includes('banned') || haystack.includes('gebannt');
 }
 
+function isServicePitchWarningAction(entry: InternalHomeActionEntry): boolean {
+  const haystack = [
+    entry.eventType,
+    entry.statusLabel,
+    entry.title,
+    entry.summary,
+    entry.reason,
+    entry.description,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  return (
+    haystack.includes('service_pitch_warning')
+    || haystack.includes('service-pitch')
+    || haystack.includes('service pitch')
+    || haystack.includes('pitch warn')
+  );
+}
+
 function stripActionNoise(value: string): string {
   const cleaned = value
     .replace(/auto[_\s-]*raid[_\s-]*on[_\s-]*offline/gi, '')
@@ -100,6 +121,93 @@ function actionKey(entry: InternalHomeActionEntry, index: number): string {
 function changelogKey(entry: InternalHomeChangelogEntry, index: number): string {
   if (entry.id !== null && entry.id !== undefined) return String(entry.id);
   return `changelog-${index}`;
+}
+
+function splitActionDetailSegments(value: string | null | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split('|')
+    .map((segment) => stripActionNoise(segment.trim()))
+    .filter(Boolean);
+}
+
+function normalizeActionEventType(entry: InternalHomeActionEntry): string {
+  return String(entry.eventType || '').trim().toLowerCase();
+}
+
+function formatActionSourceLabel(source: string | null | undefined): string {
+  const normalized = String(source || '').trim().toLowerCase();
+  if (!normalized) return '';
+  if (normalized === 'autoban_log') return 'Auto-Ban Log';
+  if (normalized === 'service_warning_log') return 'Service-Warning Log';
+  return normalized.replace(/[_-]+/g, ' ');
+}
+
+function isVisibleChannelAction(
+  entry: InternalHomeActionEntry,
+  channelLogin: string
+): boolean {
+  const eventType = normalizeActionEventType(entry);
+  if (!eventType) return false;
+
+  if (eventType === 'ban' || eventType === 'ban_keyword_hit' || eventType === 'unban') {
+    return true;
+  }
+  if (eventType === 'raid' || eventType === 'raid_history') {
+    return true;
+  }
+  if (eventType === 'service_pitch_warning') {
+    if (!channelLogin) return true;
+    const actorLogin = String(entry.actorLogin || '').trim().toLowerCase();
+    if (!actorLogin) return true;
+    return actorLogin === channelLogin;
+  }
+  return false;
+}
+
+function buildPriorityActionDetails(
+  entry: InternalHomeActionEntry,
+  isServicePitchWarning: boolean
+): string[] {
+  const detailLines: string[] = [];
+  const summary = stripActionNoise(entry.summary?.trim() || '');
+  const targetLogin = entry.targetLogin?.trim() || '';
+  const targetId = entry.targetId?.trim() || '';
+  const actorLogin = entry.actorLogin?.trim() || '';
+  const metric = stripActionNoise(entry.metric?.trim() || '');
+  const reason = stripActionNoise(entry.reason?.trim() || '');
+  const statusLabel = entry.statusLabel?.trim() || '';
+  const sourceLabel = formatActionSourceLabel(entry.source);
+
+  if (summary) detailLines.push(summary);
+  if (statusLabel) detailLines.push(`Status: ${statusLabel}`);
+  if (targetLogin) detailLines.push(`Nutzer: @${targetLogin}`);
+  if (targetId) detailLines.push(`Nutzer-ID: ${targetId}`);
+  if (actorLogin) detailLines.push(`${isServicePitchWarning ? 'Kanal' : 'Moderator'}: @${actorLogin}`);
+  if (metric) detailLines.push(`Metrik: ${metric}`);
+  if (reason) detailLines.push(`Grund: ${reason}`);
+  if (sourceLabel) detailLines.push(`Quelle: ${sourceLabel}`);
+  detailLines.push(...splitActionDetailSegments(entry.description));
+
+  const seen = new Set<string>();
+  return detailLines.filter((line) => {
+    const normalized = line.trim().toLowerCase();
+    if (!normalized || seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
+}
+
+function prioritizeActionLog(entries: InternalHomeActionEntry[], limit: number): InternalHomeActionEntry[] {
+  if (limit <= 0 || entries.length === 0) return [];
+  const banEvents = entries.filter((entry) => isBanAction(entry));
+  const serviceWarningEvents = entries.filter(
+    (entry) => !isBanAction(entry) && isServicePitchWarningAction(entry)
+  );
+  const regularEvents = entries.filter(
+    (entry) => !isBanAction(entry) && !isServicePitchWarningAction(entry)
+  );
+  return [...banEvents, ...serviceWarningEvents, ...regularEvents].slice(0, limit);
 }
 
 export function InternalHomeLanding() {
@@ -190,7 +298,11 @@ export function InternalHomeLanding() {
   const raidStatusText = home.raid?.statusText?.trim() || (home.raid?.active === false ? 'Auto-Raid inaktiv' : 'Auto-Raid aktiv');
   const rawActionLog = home.actionLog ?? [];
   const activityFeedNote = rawActionLog.find((entry) => String(entry.id || '').trim() === 'impact-note')?.summary?.trim() || '';
-  const actionLog = rawActionLog.filter((entry) => String(entry.id || '').trim() !== 'impact-note').slice(0, 6);
+  const channelScopeLogin = (normalizedSelectedStreamer || twitchLogin || '').trim().toLowerCase();
+  const baseActionLog = rawActionLog
+    .filter((entry) => String(entry.id || '').trim() !== 'impact-note')
+    .filter((entry) => isVisibleChannelAction(entry, channelScopeLogin));
+  const actionLog = prioritizeActionLog(baseActionLog, 8);
   const changelogEntries = (home.changelog?.entries ?? []).slice(0, 3);
 
   const quickActions: Array<{ id: string; title: string; description: string; href: string; icon: LucideIcon }> = [
@@ -408,7 +520,7 @@ export function InternalHomeLanding() {
             <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
               <div>
                 <h2 className="text-lg font-bold text-white">Letzte Aktionen</h2>
-                <p className="text-xs text-text-secondary">Kompakte Übersicht der letzten 6 Bot-Events.</p>
+                <p className="text-xs text-text-secondary">Kanalbezogene, sichtbare Aktionen (Ban/Unban/Raid/Service-Pitch) mit Priorität auf Ban und Service-Pitch.</p>
               </div>
               <span className="inline-flex items-center rounded-full border border-border bg-background/70 px-3 py-1 text-[11px] font-semibold tracking-wider text-text-secondary uppercase">{actionLog.length} Einträge</span>
             </div>
@@ -420,19 +532,28 @@ export function InternalHomeLanding() {
               <ul className="space-y-2.5">
                 {actionLog.map((entry, index) => {
                   const isBan = isBanAction(entry);
+                  const isServicePitchWarning = isServicePitchWarningAction(entry);
+                  const isPriorityWarning = isBan || isServicePitchWarning;
                   const tone = actionLogTone(entry);
                   const rawTitle = entry.title?.trim() || entry.eventType?.trim() || 'Bot Aktion';
                   const title = stripActionNoise(rawTitle) || 'Bot Aktion';
                   const rawSummary = entry.summary?.trim() || entry.description?.trim() || entry.reason?.trim() || entry.metric?.trim() || '';
                   const summaryText = stripActionNoise(rawSummary);
-                  const statusText = isBan ? 'BAN' : entry.statusLabel?.trim() || tone.label;
+                  const statusText = isBan
+                    ? 'BAN'
+                    : isServicePitchWarning
+                      ? 'SERVICE-PITCH'
+                      : entry.statusLabel?.trim() || tone.label;
                   const accountText = formatActionUser(entry);
-                  const statusBadgeClass = isBan
+                  const statusBadgeClass = isPriorityWarning
                     ? 'border-warning/35 bg-warning/10 text-warning'
                     : tone.badgeClass;
-                  const cardClass = isBan
+                  const cardClass = isPriorityWarning
                     ? 'internal-home-action-item rounded-xl border border-warning/35 bg-warning/10 p-3.5'
                     : 'internal-home-action-item rounded-xl border border-border bg-background/55 p-3.5';
+                  const detailLines = isPriorityWarning
+                    ? buildPriorityActionDetails(entry, isServicePitchWarning)
+                    : [];
 
                   return (
                     <li key={actionKey(entry, index)} className={cardClass}>
@@ -441,12 +562,18 @@ export function InternalHomeLanding() {
                         <span className="rounded-full border border-border/70 bg-background/70 px-2.5 py-1 font-semibold text-text-secondary">{accountText}</span>
                         <span className={`rounded-full border px-2.5 py-1 font-semibold uppercase tracking-wider ${statusBadgeClass}`}>{statusText}</span>
                       </div>
-                      {isBan ? (
+                      {isPriorityWarning ? (
                         <>
-                          <p className="mt-2 text-sm font-semibold text-white">Ban erkannt</p>
-                          <p className="mt-1 text-xs leading-5 text-text-primary">
-                            {summaryText || 'Keine Nachricht gespeichert'}
-                          </p>
+                          <p className="mt-2 text-sm font-semibold text-white">{title || (isBan ? 'Ban erkannt' : 'Service-Pitch Warnung')}</p>
+                          {detailLines.length === 0 ? (
+                            <p className="mt-1 text-xs leading-5 text-text-primary">Keine Details gespeichert.</p>
+                          ) : (
+                            <div className="mt-1.5 space-y-1 text-xs leading-5 text-text-primary">
+                              {detailLines.map((line, detailIndex) => (
+                                <p key={`detail-${detailIndex}`}>{line}</p>
+                              ))}
+                            </div>
+                          )}
                         </>
                       ) : (
                         <p className="mt-2 text-sm leading-5 text-text-secondary">
