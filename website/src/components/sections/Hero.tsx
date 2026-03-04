@@ -85,9 +85,20 @@ export function Hero() {
               className="gradient-accent rounded-xl px-7 py-3.5 font-semibold text-white inline-flex items-center gap-2 transition-all duration-200 hover:brightness-110 hover:shadow-[0_0_24px_4px_rgba(255,122,24,0.3)]"
             >
               <ExternalLink size={18} />
-              Bot autorisieren
+              Partner werden
             </a>
           </motion.div>
+
+          <motion.p
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, delay: 0.4 }}
+            className="mt-6 text-xl md:text-2xl font-semibold display-font"
+          >
+            <span className="bg-gradient-to-r from-[var(--color-primary)] to-[var(--color-accent)] bg-clip-text text-transparent">
+              Na? Sneak Peek gefällig?
+            </span>
+          </motion.p>
         </div>
 
         {/* Browser Mockup */}
@@ -137,8 +148,6 @@ export function Hero() {
               >
                 <p className="text-base font-semibold text-[var(--color-text-primary)]">
                   {stat.title}
-                </p>
-                <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
                 </p>
               </motion.div>
             ))}

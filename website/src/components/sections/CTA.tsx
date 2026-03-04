@@ -41,7 +41,7 @@ export function CTA() {
               className="gradient-accent rounded-xl px-8 py-4 font-semibold text-white text-lg inline-flex items-center gap-2"
             >
               <ExternalLink size={20} />
-              Bot autorisieren
+              Partner werden
             </a>
           </div>
         </ScrollReveal>
