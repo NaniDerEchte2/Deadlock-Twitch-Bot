@@ -17,7 +17,10 @@ from datetime import UTC, datetime, timedelta
 
 from discord.ext import commands
 
-from service.field_crypto import get_crypto
+try:
+    from service.field_crypto import get_crypto
+except ModuleNotFoundError:  # pragma: no cover - split runtime fallback
+    from ..compat.field_crypto import get_crypto
 
 from ..storage import get_conn
 from .oauth_manager import SocialMediaOAuthManager

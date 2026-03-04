@@ -150,30 +150,30 @@ class _DashboardAuthMixin:
             return fallback
 
         normalized_path = (parts.path or "").rstrip("/") or "/"
+        mapped_path = normalized_path
         if normalized_path == "/twitch/abo":
-            return "/twitch/abbo"
-        if normalized_path == "/twitch/abbo":
-            return "/twitch/abbo"
-        if normalized_path == "/twitch/abos":
-            return "/twitch/abbo"
-        if normalized_path == "/twitch/abbo/stripe-settings":
-            return "/twitch/abbo/stripe-settings"
-        if normalized_path == "/twitch/abbo/rechnungen":
-            return "/twitch/abbo/rechnungen"
-        if normalized_path == "/twitch/abbo/rechnung":
-            return "/twitch/abbo/rechnung"
-        if normalized_path == "/twitch/abbo/kündigen":
-            return "/twitch/abbo/kündigen"
-        if normalized_path == "/twitch/dashboads":
-            return "/twitch/dashboard"
-        if normalized_path == "/twitch/stats":
-            return "/twitch/stats"
-        if normalized_path == "/twitch/dashboards":
-            return "/twitch/dashboard"
-        if normalized_path == "/twitch/dashboard":
-            return "/twitch/dashboard"
-        if normalized_path == "/twitch/dashboard-v2":
-            return "/twitch/dashboard-v2"
+            mapped_path = "/twitch/abbo"
+        elif normalized_path == "/twitch/abos":
+            mapped_path = "/twitch/abbo"
+        elif normalized_path == "/twitch/dashboads":
+            mapped_path = "/twitch/dashboard"
+        elif normalized_path == "/twitch/dashboards":
+            mapped_path = "/twitch/dashboard"
+
+        if mapped_path in {
+            "/twitch/abbo",
+            "/twitch/abbo/stripe-settings",
+            "/twitch/abbo/rechnungen",
+            "/twitch/abbo/rechnung",
+            "/twitch/abbo/kündigen",
+            "/twitch/stats",
+            "/twitch/dashboard",
+            "/twitch/dashboard-v2",
+            "/twitch/raid/auth",
+            "/twitch/live-announcement",
+        }:
+            query_suffix = f"?{parts.query}" if parts.query else ""
+            return f"{mapped_path}{query_suffix}"
         return fallback
 
     def _build_dashboard_login_url(self, request: web.Request) -> str:
@@ -182,7 +182,64 @@ class _DashboardAuthMixin:
         )
         if self._should_use_discord_admin_login(request):
             return self._build_discord_admin_login_url(request, next_path=next_path)
+        if not self._is_twitch_oauth_ready() and self._discord_admin_required:
+            return self._build_discord_admin_login_url(request, next_path=next_path)
         return f"/twitch/auth/login?{urlencode({'next': next_path})}"
+
+    def _is_twitch_oauth_ready(self) -> bool:
+        """Return True when Twitch OAuth login can be started safely."""
+        if not self._is_oauth_configured():
+            return False
+        return bool(self._build_oauth_redirect_uri())
+
+    @staticmethod
+    def _oauth_unavailable_response() -> web.Response:
+        return web.Response(
+            text=(
+                "Twitch OAuth ist aktuell nicht konfiguriert oder die Redirect-URI ist ungültig. "
+                "Bitte OAuth-Einstellungen prüfen."
+            ),
+            status=503,
+        )
+
+    def _dashboard_auth_challenge(
+        self,
+        request: web.Request,
+        *,
+        next_path: str | None = None,
+        allow_discord_admin_login: bool = True,
+    ) -> web.StreamResponse:
+        """Return redirect to login or 503 when OAuth is unavailable."""
+        normalized_next = self._normalize_next_path(
+            next_path or (request.rel_url.path_qs if request.rel_url else "/twitch/dashboard")
+        )
+
+        if allow_discord_admin_login and self._should_use_discord_admin_login(request):
+            if self._discord_admin_required:
+                discord_login_url = self._build_discord_admin_login_url(
+                    request,
+                    next_path=normalized_next,
+                )
+                safe_discord_login_url = self._safe_discord_admin_login_redirect(discord_login_url)
+                return web.HTTPFound(safe_discord_login_url)
+            return web.Response(
+                text=(
+                    "Discord Admin OAuth ist nicht konfiguriert. "
+                    "Bitte Client ID, Client Secret und Redirect URI setzen."
+                ),
+                status=503,
+            )
+
+        if self._is_twitch_oauth_ready():
+            return web.HTTPFound(f"/twitch/auth/login?{urlencode({'next': normalized_next})}")
+        if allow_discord_admin_login and self._discord_admin_required:
+            discord_login_url = self._build_discord_admin_login_url(
+                request,
+                next_path=normalized_next,
+            )
+            safe_discord_login_url = self._safe_discord_admin_login_redirect(discord_login_url)
+            return web.HTTPFound(safe_discord_login_url)
+        return self._oauth_unavailable_response()
 
     # ------------------------------------------------------------------ #
     # Twitch OAuth session management                                      #

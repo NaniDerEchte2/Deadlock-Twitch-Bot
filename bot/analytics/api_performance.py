@@ -766,7 +766,12 @@ class _AnalyticsPerformanceMixin:
         self._require_v2_auth(request)
 
         streamer = request.query.get("streamer", "").strip()
-        days = min(max(int(request.query.get("days", "7")), 1), 365)
+        days_raw = (request.query.get("days", "7") or "7").strip()
+        try:
+            days = int(days_raw)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "days must be an integer"}, status=400)
+        days = min(max(days, 1), 365)
 
         if not streamer:
             return web.json_response({"error": "Streamer required"}, status=400)
@@ -847,8 +852,18 @@ class _AnalyticsPerformanceMixin:
         self._require_v2_auth(request)
 
         streamer = request.query.get("streamer", "").strip()
-        days = min(max(int(request.query.get("days", "30")), 1), 365)
-        limit = min(max(int(request.query.get("limit", "25")), 5), 100)
+        days_raw = (request.query.get("days", "30") or "30").strip()
+        limit_raw = (request.query.get("limit", "25") or "25").strip()
+        try:
+            days = int(days_raw)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "days must be an integer"}, status=400)
+        try:
+            limit = int(limit_raw)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "limit must be an integer"}, status=400)
+        days = min(max(days, 1), 365)
+        limit = min(max(limit, 5), 100)
         sort_mode = request.query.get("sort", "avg")  # avg or peak
         exclude_external = request.query.get("exclude_external", "0") == "1"
         threshold: float | None = EXTERNAL_REACH_AVG_THRESHOLD if exclude_external else None

@@ -138,6 +138,9 @@ def _compat_row_factory(cursor: psycopg.Cursor) -> psycopg.rows.RowMaker[RowComp
 
 
 def _load_dsn() -> str:
+    env_dsn = (os.getenv(ENV_DSN) or "").strip()
+    if env_dsn:
+        return env_dsn
     try:
         import keyring  # type: ignore
 
@@ -525,6 +528,24 @@ def ensure_schema(conn) -> None:
         except Exception:
             return False
 
+    def _timescale_dimension_columns(table: str) -> set[str]:
+        """Return Timescale dimension columns for a hypertable (lowercase)."""
+        try:
+            rows = conn.execute(
+                "SELECT column_name "
+                "FROM timescaledb_information.dimensions "
+                "WHERE hypertable_name = %s",
+                (table,),
+            ).fetchall()
+            dims: set[str] = set()
+            for row in rows or []:
+                col = str((row[0] if not hasattr(row, "keys") else row["column_name"]) or "").strip()
+                if col:
+                    dims.add(col.lower())
+            return dims
+        except Exception:
+            return set()
+
     def _index_exists(index_name: str) -> bool:
         """Check for an index in the current schema."""
         try:
@@ -659,20 +680,78 @@ def ensure_schema(conn) -> None:
             raid_bot_enabled           INTEGER DEFAULT 0,
             silent_ban                 INTEGER DEFAULT 0,
             silent_raid                INTEGER DEFAULT 0,
-            is_monitored_only          INTEGER DEFAULT 0
+            is_monitored_only          INTEGER DEFAULT 0,
+            live_ping_role_id          BIGINT,
+            live_ping_enabled          INTEGER DEFAULT 1
         )
         """
     )
+    _pg_add_col_if_missing(conn, "twitch_streamers", "live_ping_role_id", "BIGINT")
+    _pg_add_col_if_missing(conn, "twitch_streamers", "live_ping_enabled", "INTEGER DEFAULT 1")
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_streamers_user_id ON twitch_streamers(twitch_user_id)"
     )
 
     # View: partner state (single source of truth)
+    # NOTE: Drop/recreate avoids PostgreSQL CREATE OR REPLACE restrictions when
+    # existing columns were reordered by previous s.* expansions.
+    conn.execute("DROP VIEW IF EXISTS twitch_streamers_partner_state")
     conn.execute(
         """
-        CREATE OR REPLACE VIEW twitch_streamers_partner_state AS
+        CREATE VIEW twitch_streamers_partner_state AS
+        WITH base AS (
+            SELECT
+                s.twitch_login,
+                s.twitch_user_id,
+                s.require_discord_link,
+                s.next_link_check_at,
+                s.discord_user_id,
+                s.discord_display_name,
+                s.is_on_discord,
+                s.manual_verified_permanent,
+                s.manual_verified_until,
+                s.manual_verified_at,
+                s.manual_partner_opt_out,
+                s.created_at,
+                s.archived_at,
+                s.raid_bot_enabled,
+                s.silent_ban,
+                s.silent_raid,
+                s.is_monitored_only,
+                CASE
+                    WHEN (
+                        COALESCE(s.manual_verified_permanent, 0) = 1
+                        OR (
+                            s.manual_verified_until IS NOT NULL
+                            AND s.manual_verified_until::timestamptz >= NOW()
+                        )
+                        OR s.manual_verified_at IS NOT NULL
+                    )
+                    THEN 1 ELSE 0
+                END AS is_verified,
+                s.live_ping_role_id,
+                COALESCE(s.live_ping_enabled, 1) AS live_ping_enabled
+            FROM twitch_streamers s
+        )
         SELECT
-            base.*,
+            base.twitch_login,
+            base.twitch_user_id,
+            base.require_discord_link,
+            base.next_link_check_at,
+            base.discord_user_id,
+            base.discord_display_name,
+            base.is_on_discord,
+            base.manual_verified_permanent,
+            base.manual_verified_until,
+            base.manual_verified_at,
+            base.manual_partner_opt_out,
+            base.created_at,
+            base.archived_at,
+            base.raid_bot_enabled,
+            base.silent_ban,
+            base.silent_raid,
+            base.is_monitored_only,
+            base.is_verified,
             CASE
                 WHEN base.is_verified = 1
                      AND COALESCE(base.manual_partner_opt_out, 0) = 0
@@ -684,23 +763,10 @@ def ensure_schema(conn) -> None:
                      AND COALESCE(base.manual_partner_opt_out, 0) = 0
                      AND COALESCE(base.is_monitored_only, 0) = 0
                 THEN 1 ELSE 0
-            END AS is_partner_active
-        FROM (
-            SELECT
-                s.*,
-                CASE
-                    WHEN (
-                        COALESCE(s.manual_verified_permanent, 0) = 1
-                        OR (
-                            s.manual_verified_until IS NOT NULL
-                            AND s.manual_verified_until::timestamptz >= NOW()
-                        )
-                        OR s.manual_verified_at IS NOT NULL
-                    )
-                    THEN 1 ELSE 0
-                END AS is_verified
-            FROM twitch_streamers s
-        ) AS base
+            END AS is_partner_active,
+            base.live_ping_role_id,
+            base.live_ping_enabled
+        FROM base
         """
     )
 
@@ -788,6 +854,22 @@ def ensure_schema(conn) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_twitch_link_clicks_streamer ON twitch_link_clicks(streamer_login)"
+    )
+
+    # 4b) Per-streamer live-announcement builder config
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS twitch_live_announcement_configs (
+            streamer_login          TEXT PRIMARY KEY,
+            config_json             TEXT NOT NULL,
+            allowed_editor_role_ids TEXT,
+            updated_at              TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_by              TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_live_announce_configs_updated_at ON twitch_live_announcement_configs(updated_at)"
     )
 
     # 5) Stream sessions & engagement
@@ -961,19 +1043,28 @@ def ensure_schema(conn) -> None:
     # Ältere Deployments hatten auf twitch_raid_history kein Primary/Unique-Key.
     # Der FK von twitch_raid_retention -> twitch_raid_history(id) schlägt dann fehl.
     raid_history_has_unique_index = _has_unique_constraint("twitch_raid_history", ["id"])
+    raid_history_dimensions = _timescale_dimension_columns("twitch_raid_history")
+    raid_history_is_timescale_time_partitioned = "executed_at" in raid_history_dimensions
     if not raid_history_has_unique_index:
-        created_unique_index = _create_index_allowing_compressed_hypertable(
-            "twitch_raid_history",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_raid_history_id ON twitch_raid_history(id)",
-        )
-        # Re-check to ensure the constraint is actually unique (IF NOT EXISTS may keep a legacy non-unique index).
-        raid_history_has_unique_index = _has_unique_constraint("twitch_raid_history", ["id"]) if created_unique_index else False
-        if _index_exists("idx_twitch_raid_history_id") and not raid_history_has_unique_index:
-            log.warning(
-                "Index idx_twitch_raid_history_id already exists but is not UNIQUE; "
-                "twitch_raid_retention will be created without a foreign key. "
-                "Consider decompressing old chunks and recreating the unique index."
+        if raid_history_is_timescale_time_partitioned:
+            log.info(
+                "twitch_raid_history ist Timescale-time-partitioned (executed_at). "
+                "Eine UNIQUE-Constraint nur auf id ist dort nicht möglich; "
+                "twitch_raid_retention bleibt ohne FK auf raid_history."
             )
+        else:
+            created_unique_index = _create_index_allowing_compressed_hypertable(
+                "twitch_raid_history",
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_raid_history_id ON twitch_raid_history(id)",
+            )
+            # Re-check to ensure the constraint is actually unique (IF NOT EXISTS may keep a legacy non-unique index).
+            raid_history_has_unique_index = _has_unique_constraint("twitch_raid_history", ["id"]) if created_unique_index else False
+            if _index_exists("idx_twitch_raid_history_id") and not raid_history_has_unique_index:
+                log.warning(
+                    "Index idx_twitch_raid_history_id already exists but is not UNIQUE; "
+                    "twitch_raid_retention will be created without a foreign key. "
+                    "Consider decompressing old chunks and recreating the unique index."
+                )
 
     conn.execute(
         """
@@ -988,10 +1079,16 @@ def ensure_schema(conn) -> None:
 
     # 6b) Raid retention rollup (computed)
     if not raid_history_has_unique_index:
-        log.warning(
-            "twitch_raid_history(id) is still missing a unique index; twitch_raid_retention will be created without FK. "
-            "Consider manually decompressing old chunks and adding the unique index to restore cascading deletes."
-        )
+        if raid_history_is_timescale_time_partitioned:
+            log.info(
+                "twitch_raid_retention wird ohne FK zu twitch_raid_history erstellt "
+                "(Timescale-Partitionierung auf executed_at verhindert UNIQUE(id))."
+            )
+        else:
+            log.warning(
+                "twitch_raid_history(id) is still missing a unique index; twitch_raid_retention will be created without FK. "
+                "Consider manually decompressing old chunks and adding the unique index to restore cascading deletes."
+            )
 
     raid_id_fk_sql = (
         "raid_id                INTEGER PRIMARY KEY REFERENCES twitch_raid_history(id) ON DELETE CASCADE"

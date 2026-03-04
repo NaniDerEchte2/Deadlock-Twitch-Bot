@@ -225,7 +225,8 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
             with storage.get_conn() as c:
                 rows = c.execute(
                     "SELECT twitch_login, twitch_user_id, require_discord_link, "
-                    "       archived_at, is_partner "
+                    "       archived_at, is_partner, discord_user_id, live_ping_role_id, "
+                    "       COALESCE(live_ping_enabled, 1) AS live_ping_enabled "
                     "FROM twitch_streamers_partner_state"
                 ).fetchall()
             tracked: list[dict[str, object]] = []
@@ -254,6 +255,9 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                         "is_verified": is_verified,
                         "archived_at": archived_at_raw,
                         "is_archived": is_archived,
+                        "discord_user_id": row_dict.get("discord_user_id"),
+                        "live_ping_role_id": row_dict.get("live_ping_role_id"),
+                        "live_ping_enabled": row_dict.get("live_ping_enabled", 1),
                     }
                 )
                 login_lower = login.lower()
@@ -541,35 +545,50 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
             )
 
             if should_post:
-                referral_url = self._build_referral_url(login)
-                display_name = stream.get("user_name") or login
-                message_prefix: list[str] = []
+                content, embed, view, allowed_mentions, new_tracking_token = (
+                    await self._build_live_announcement_message(
+                        login=login,
+                        stream=stream,
+                        streamer_entry=entry,
+                        notify_channel=notify_ch,
+                    )
+                )
                 if self._alert_mention:
-                    message_prefix.append(self._alert_mention)
-                stream_title = (stream.get("title") or "").strip()
-                live_announcement = (
-                    f"**{display_name}** ist live! Schau ueber den Button unten rein."
-                )
-                if stream_title:
-                    live_announcement = f"{live_announcement} - {stream_title}"
-                message_prefix.append(live_announcement)
-                content = " ".join(part for part in message_prefix if part).strip()
-
-                embed = self._build_live_embed(login, stream)
-                new_tracking_token = self._generate_tracking_token()
-                view = self._build_live_view(
-                    login,
-                    referral_url,
-                    new_tracking_token,
-                )
+                    prefix = self._sanitize_live_content(str(self._alert_mention).strip())
+                    if prefix:
+                        content = f"{prefix} {content}".strip()
+                        alert_role_id = self._extract_role_id_from_mention(prefix)
+                        if alert_role_id:
+                            role_ids: list[int] = []
+                            current_roles = allowed_mentions.roles
+                            if isinstance(current_roles, (list, tuple, set)):
+                                for role_obj in current_roles:
+                                    role_id = getattr(role_obj, "id", None)
+                                    if role_id:
+                                        role_ids.append(int(role_id))
+                            if alert_role_id not in role_ids:
+                                role_ids.append(alert_role_id)
+                            allowed_mentions = discord.AllowedMentions(
+                                everyone=False,
+                                users=False,
+                                roles=[discord.Object(id=role_id) for role_id in role_ids]
+                                if role_ids
+                                else False,
+                                replied_user=False,
+                            )
 
                 try:
-                    message = await notify_ch.send(content=content or None, embed=embed, view=view)
+                    message = await notify_ch.send(
+                        content=content or None,
+                        embed=embed,
+                        view=view,
+                        allowed_mentions=allowed_mentions,
+                    )
                 except Exception:
                     log.exception("Konnte Go-Live-Posting nicht senden: %s", login)
                 else:
                     message_id_to_store = str(message.id)
-                    tracking_token_to_store = new_tracking_token
+                    tracking_token_to_store = new_tracking_token if view is not None else None
                     if view is not None:
                         view.bind_to_message(
                             channel_id=getattr(notify_ch, "id", None),

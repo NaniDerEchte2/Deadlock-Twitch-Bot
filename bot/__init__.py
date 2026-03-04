@@ -28,6 +28,13 @@ def _command_payload_hash(bot: commands.Bot, guild: discord.Object) -> str:
 log = logging.getLogger("TwitchStreams")
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _parse_sync_guild_ids(raw: str) -> list[int]:
     """Parse a comma/space separated guild-id list from env."""
     ids: list[int] = []
@@ -57,10 +64,12 @@ async def _sync_app_commands_after_ready(bot: commands.Bot) -> None:
     if not guild_ids:
         guild_ids = [int(g.id) for g in getattr(bot, "guilds", []) if getattr(g, "id", 0)]
 
+    copy_global_to_guild = _env_bool("TWITCH_COMMAND_COPY_GLOBAL_TO_GUILD", default=False)
     for guild_id in guild_ids:
         guild = discord.Object(id=guild_id)
         try:
-            bot.tree.copy_global_to(guild=guild)
+            if copy_global_to_guild:
+                bot.tree.copy_global_to(guild=guild)
             current_hash = _command_payload_hash(bot, guild)
             if _last_sync_hash.get(guild_id) == current_hash:
                 log.debug("App commands unchanged for guild %s — skipping sync", guild_id)
@@ -149,8 +158,15 @@ async def setup(bot: commands.Bot):
     cog.set_prefix_command(prefix_command)
     log.debug("Registered !twl prefix command via setup hook")
 
-    # Hybrid/App-Commands nach jedem (Re)Load synchronisieren.
-    asyncio.create_task(_sync_app_commands_after_ready(bot), name="twitch.sync_app_commands")
+    # Integriert in den MasterBot: dort übernimmt der zentrale Sync-Orchestrator.
+    # Standalone-Betrieb: Fallback bleibt aktiv.
+    managed_sync = callable(getattr(bot, "sync_app_commands", None))
+    default_sync_on_load = not managed_sync
+    sync_on_load = _env_bool("TWITCH_EXTENSION_SYNC_ON_LOAD", default=default_sync_on_load)
+    if sync_on_load:
+        asyncio.create_task(_sync_app_commands_after_ready(bot), name="twitch.sync_app_commands")
+    else:
+        log.info("Skipping twitch extension self-sync (managed centrally or disabled by env).")
 
 
 async def teardown(bot: commands.Bot):

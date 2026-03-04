@@ -7,12 +7,14 @@ import json
 import os
 from datetime import UTC, datetime, timedelta
 
+import aiohttp
 import discord
 from aiohttp import web
 
 from ..storage import pg as storage
 from ..analytics.backend_extended import AnalyticsBackendExtended
 from ..core.constants import TWITCH_TARGET_GAME_NAME, log
+from ..raid.views import RaidAuthGenerateView, build_raid_requirements_embed
 from .server_v2 import build_v2_app
 
 
@@ -30,6 +32,7 @@ def _parse_env_int(var_name: str, default: int = 0) -> int:
 STREAMER_ROLE_ID = _parse_env_int("STREAMER_ROLE_ID", 1313624729466441769)
 STREAMER_GUILD_ID = _parse_env_int("STREAMER_GUILD_ID", 0)
 FALLBACK_MAIN_GUILD_ID = _parse_env_int("MAIN_GUILD_ID", 0)
+TWITCH_HELIX_USERS_URL = "https://api.twitch.tv/helix/users"
 
 
 VERIFICATION_SUCCESS_DM_MESSAGE = (
@@ -130,6 +133,272 @@ class TwitchDashboardMixin:
                     raise
                 await asyncio.sleep(0.3 * (attempt + 1))
         return []
+
+    async def _dashboard_raid_auth_url(self, login: str) -> str:
+        raw = str(login or "").strip()
+        if not raw:
+            raise ValueError("invalid or missing login")
+
+        normalized: str
+        use_discord_button_url = False
+        if raw.lower().startswith("discord:"):
+            discord_id = raw.split(":", 1)[1].strip()
+            if not discord_id.isdigit():
+                raise ValueError("invalid discord user id")
+            normalized = f"discord:{discord_id}"
+            use_discord_button_url = True
+        else:
+            normalized = self._normalize_login(raw)
+            if not normalized:
+                raise ValueError("invalid or missing login")
+
+        auth_manager = getattr(getattr(self, "_raid_bot", None), "auth_manager", None)
+        if not auth_manager:
+            raise RuntimeError("Raid bot not initialized")
+
+        if use_discord_button_url:
+            return str(auth_manager.generate_discord_button_url(normalized))
+        return str(auth_manager.generate_auth_url(normalized))
+
+    async def _dashboard_raid_go_url(self, state: str) -> str | None:
+        state_clean = str(state or "").strip()
+        if not state_clean:
+            raise ValueError("missing state parameter")
+
+        auth_manager = getattr(getattr(self, "_raid_bot", None), "auth_manager", None)
+        if not auth_manager:
+            raise RuntimeError("Raid bot not initialized")
+
+        full_url = auth_manager.get_pending_auth_url(state_clean)
+        return str(full_url).strip() if full_url else None
+
+    async def _dashboard_raid_requirements(self, login: str) -> str:
+        normalized = self._normalize_login(login)
+        if not normalized:
+            raise ValueError("Missing login parameter")
+
+        auth_manager = getattr(getattr(self, "_raid_bot", None), "auth_manager", None)
+        if not auth_manager:
+            raise RuntimeError("Raid bot not initialized")
+
+        try:
+            with storage.get_conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT discord_user_id
+                    FROM twitch_streamers
+                    WHERE lower(twitch_login) = lower(?)
+                    """,
+                    (normalized,),
+                ).fetchone()
+        except Exception as exc:
+            raise RuntimeError("Failed to load Discord link") from exc
+
+        if not row:
+            raise LookupError("Streamer not found")
+
+        discord_user_id = str(
+            row["discord_user_id"] if hasattr(row, "keys") else row[0] or ""
+        ).strip()
+        if not discord_user_id:
+            raise LookupError("No Discord user linked for this streamer")
+
+        try:
+            user_id_int = int(discord_user_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid Discord user id") from exc
+
+        discord_bot = getattr(auth_manager, "_discord_bot", None)
+        if not discord_bot:
+            raise RuntimeError("Discord bot not available")
+
+        user = discord_bot.get_user(user_id_int)
+        if user is None:
+            try:
+                user = await discord_bot.fetch_user(user_id_int)
+            except discord.NotFound:
+                user = None
+            except discord.HTTPException as exc:
+                raise RuntimeError("Failed to fetch Discord user") from exc
+
+        if user is None:
+            raise LookupError("Discord user not found")
+
+        embed = build_raid_requirements_embed(normalized)
+        view = RaidAuthGenerateView(auth_manager=auth_manager, twitch_login=normalized)
+
+        try:
+            await user.send(embed=embed, view=view)
+        except discord.Forbidden as exc:
+            raise PermissionError("Discord DM blocked") from exc
+        except discord.HTTPException as exc:
+            raise RuntimeError("Failed to send Discord DM") from exc
+
+        return f"Anforderungen per Discord an @{normalized} gesendet"
+
+    async def _dashboard_raid_oauth_callback(
+        self,
+        *,
+        code: str,
+        state: str,
+        error: str,
+    ) -> dict:
+        raid_bot = self._raid_bot
+        auth_manager = getattr(raid_bot, "auth_manager", None) if raid_bot else None
+        code_clean = str(code or "").strip()
+        state_clean = str(state or "").strip()
+        error_clean = str(error or "").strip()
+
+        if error_clean:
+            expected_uri = (getattr(auth_manager, "redirect_uri", "") or "").strip()
+            expected_html = (
+                f"<p><code>{expected_uri}</code></p>"
+                if expected_uri
+                else ""
+            )
+            if error_clean == "redirect_mismatch":
+                message = (
+                    "<p>Twitch hat die Redirect-URI abgelehnt (redirect_mismatch).</p>"
+                    "<p>Bitte trage diese URL exakt in der Twitch Application unter "
+                    "<strong>OAuth Redirect URLs</strong> ein und starte die Autorisierung neu:</p>"
+                    f"{expected_html}"
+                )
+            else:
+                message = (
+                    "<p>OAuth-Fehler beim Autorisieren.</p>"
+                    "<p>Bitte die Autorisierung erneut starten.</p>"
+                )
+            return {
+                "status": 400,
+                "title": "Autorisierung fehlgeschlagen",
+                "body_html": message,
+            }
+
+        if not code_clean or not state_clean:
+            return {
+                "status": 400,
+                "title": "Ungültige Anfrage",
+                "body_html": "<p>Fehlender OAuth Code oder State.</p>",
+            }
+
+        if not raid_bot or not auth_manager:
+            return {
+                "status": 503,
+                "title": "Raid-Bot nicht verfügbar",
+                "body_html": (
+                    "<p>Der Raid-Bot ist aktuell nicht initialisiert. "
+                    "Bitte später erneut versuchen.</p>"
+                ),
+            }
+
+        login = auth_manager.verify_state(state_clean)
+        if not login:
+            return {
+                "status": 400,
+                "title": "Ungültiger State",
+                "body_html": (
+                    "<p>Der OAuth-State ist ungültig oder abgelaufen. "
+                    "Bitte den Link neu erzeugen.</p>"
+                ),
+            }
+
+        state_discord_user_id: str | None = None
+        if login.lower().startswith("discord:"):
+            candidate_discord_id = login.split(":", 1)[1].strip()
+            if candidate_discord_id.isdigit():
+                state_discord_user_id = candidate_discord_id
+
+        session = getattr(raid_bot, "session", None)
+        owns_session = False
+        if session is None:
+            session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
+            owns_session = True
+
+        try:
+            token_data = await auth_manager.exchange_code_for_token(code_clean, session)
+
+            access_token = str(token_data.get("access_token") or "").strip()
+            refresh_token = str(token_data.get("refresh_token") or "").strip()
+            if not access_token:
+                raise RuntimeError("Missing access_token in Twitch OAuth response")
+            if not refresh_token:
+                raise RuntimeError("Missing refresh_token in Twitch OAuth response")
+
+            headers = {
+                "Client-ID": str(auth_manager.client_id),
+                "Authorization": f"Bearer {access_token}",
+            }
+            async with session.get(TWITCH_HELIX_USERS_URL, headers=headers) as user_resp:
+                if user_resp.status != 200:
+                    body = await user_resp.text()
+                    raise RuntimeError(
+                        f"Failed to fetch Twitch user info ({user_resp.status}): {body[:300]}"
+                    )
+                user_payload = await user_resp.json()
+
+            users = user_payload.get("data") if isinstance(user_payload, dict) else None
+            if not isinstance(users, list) or not users:
+                raise RuntimeError("Missing Twitch user data in OAuth callback")
+            user_info = users[0] or {}
+
+            twitch_user_id = str(user_info.get("id") or "").strip()
+            twitch_login = str(user_info.get("login") or "").strip().lower()
+            if not twitch_user_id or not twitch_login:
+                raise RuntimeError("Invalid Twitch user payload in OAuth callback")
+
+            scopes_raw = token_data.get("scope", [])
+            if isinstance(scopes_raw, str):
+                scopes = [scope for scope in scopes_raw.split() if scope]
+            elif isinstance(scopes_raw, list):
+                scopes = [str(scope).strip() for scope in scopes_raw if str(scope).strip()]
+            else:
+                scopes = []
+
+            auth_manager.save_auth(
+                twitch_user_id=twitch_user_id,
+                twitch_login=twitch_login,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                expires_in=int(token_data.get("expires_in", 3600) or 3600),
+                scopes=scopes,
+            )
+
+            post_setup = getattr(raid_bot, "complete_setup_for_streamer", None)
+            if callable(post_setup):
+                asyncio.create_task(
+                    post_setup(
+                        twitch_user_id,
+                        twitch_login,
+                        state_discord_user_id=state_discord_user_id,
+                    ),
+                    name="twitch.raid.complete_setup",
+                )
+
+            log.info("Raid auth successful for %s", twitch_login)
+            return {
+                "status": 200,
+                "title": "Autorisierung erfolgreich",
+                "body_html": (
+                    "<p>Der Raid-Bot wurde erfolgreich autorisiert.</p>"
+                    "<p>Du kannst dieses Fenster jetzt schließen.</p>"
+                ),
+            }
+        except Exception:
+            log.exception("Raid OAuth callback failed for state login=%s", login)
+            return {
+                "status": 500,
+                "title": "Autorisierung fehlgeschlagen",
+                "body_html": (
+                    "<p>Autorisierung fehlgeschlagen.</p>"
+                    "<p>Bitte erneut versuchen oder Admin kontaktieren.</p>"
+                ),
+            }
+        finally:
+            if owns_session:
+                try:
+                    await session.close()
+                except Exception:
+                    log.debug("Could not close temporary OAuth callback session", exc_info=True)
 
     async def _dashboard_analytics_suggestions(
         self,

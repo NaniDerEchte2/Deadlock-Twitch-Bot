@@ -43,6 +43,7 @@ class SocialMediaDashboard:
         auth_checker=None,
         auth_session_getter=None,
         auth_level_getter=None,
+        oauth_ready_checker=None,
         public_base_url: str | None = None,
     ):
         """
@@ -51,12 +52,14 @@ class SocialMediaDashboard:
             auth_checker: Callable that checks authentication (from parent dashboard server)
             auth_session_getter: Callable that resolves dashboard OAuth session (dict)
             auth_level_getter: Callable that returns auth level (admin/partner/localhost/none)
+            oauth_ready_checker: Callable that reports whether Twitch OAuth login is usable
             public_base_url: Trusted public dashboard base URL for OAuth callbacks
         """
         self.clip_manager = clip_manager
         self.auth_checker = auth_checker
         self.auth_session_getter = auth_session_getter
         self.auth_level_getter = auth_level_getter
+        self.oauth_ready_checker = oauth_ready_checker
         self.public_base_url = str(public_base_url or "").strip()
 
     def _require_auth(self, request: web.Request) -> None:
@@ -67,6 +70,19 @@ class SocialMediaDashboard:
 
         # Use parent's auth checker (supports Twitch OAuth, localhost, tokens)
         if not self.auth_checker(request):
+            oauth_ready_checker = self.oauth_ready_checker
+            if callable(oauth_ready_checker):
+                try:
+                    oauth_ready = bool(oauth_ready_checker())
+                except Exception:
+                    oauth_ready = True
+                if not oauth_ready:
+                    raise web.HTTPServiceUnavailable(
+                        text=(
+                            "Twitch OAuth ist aktuell nicht konfiguriert oder die Redirect-URI ist ungültig. "
+                            "Bitte OAuth-Einstellungen prüfen."
+                        )
+                    )
             raise web.HTTPUnauthorized(
                 text="Bitte melde dich mit deinem Twitch-Partner-Account an.",
                 headers={"Location": "/twitch/auth/login?next=/social-media"},
@@ -1980,6 +1996,7 @@ def create_social_media_app(
     auth_checker=None,
     auth_session_getter=None,
     auth_level_getter=None,
+    oauth_ready_checker=None,
     public_base_url: str | None = None,
 ) -> web.Application:
     """
@@ -1990,6 +2007,7 @@ def create_social_media_app(
         auth_checker: Callable that checks authentication (from parent dashboard server)
         auth_session_getter: Callable that resolves dashboard OAuth session
         auth_level_getter: Callable that resolves auth level for token/session enforcement
+        oauth_ready_checker: Callable that reports whether Twitch OAuth login is usable
         public_base_url: Trusted public dashboard base URL for OAuth callback construction
 
     Returns:
@@ -2000,6 +2018,7 @@ def create_social_media_app(
         auth_checker=auth_checker,
         auth_session_getter=auth_session_getter,
         auth_level_getter=auth_level_getter,
+        oauth_ready_checker=oauth_ready_checker,
         public_base_url=public_base_url,
     )
     return dashboard._build_app()

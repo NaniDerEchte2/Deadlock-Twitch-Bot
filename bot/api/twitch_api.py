@@ -4,7 +4,10 @@ import time
 
 import aiohttp
 
-from service.http_client import build_resilient_connector
+try:
+    from service.http_client import build_resilient_connector
+except ModuleNotFoundError:  # pragma: no cover - split runtime fallback
+    from ..compat.http_client import build_resilient_connector
 
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"  # noqa: S105
 TWITCH_API_BASE = "https://api.twitch.tv/helix"

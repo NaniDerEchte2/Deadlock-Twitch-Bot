@@ -187,6 +187,27 @@ class _AnalyticsOverviewMixin:
         router.add_get("/twitch/demo", self._serve_demo_dashboard)
         router.add_get("/twitch/demo/dashboard-v2/{path:.*}", self._serve_demo_dashboard_assets)
 
+    def _dashboard_auth_redirect_or_unavailable(
+        self,
+        request: web.Request,
+        *,
+        next_path: str,
+        fallback_login_url: str,
+    ) -> web.StreamResponse:
+        challenge_builder = getattr(self, "_dashboard_auth_challenge", None)
+        if callable(challenge_builder):
+            try:
+                response = challenge_builder(
+                    request,
+                    next_path=next_path,
+                    allow_discord_admin_login=True,
+                )
+                if isinstance(response, web.StreamResponse):
+                    return response
+            except Exception:
+                log.debug("Could not build dashboard auth challenge; fallback to login redirect", exc_info=True)
+        return web.HTTPFound(fallback_login_url)
+
     async def _serve_demo_dashboard(self, request: web.Request) -> web.Response:
         """Serve the demo dashboard HTML without authentication."""
         import pathlib
@@ -245,7 +266,14 @@ class _AnalyticsOverviewMixin:
                 login_url = DASHBOARD_V2_DISCORD_LOGIN_URL
             else:
                 login_url = DASHBOARD_V2_LOGIN_URL
-            raise web.HTTPFound(login_url)
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/dashboard-v2",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
         import pathlib
 
         dist_path = pathlib.Path(__file__).parent / "dashboard_v2" / "dist" / "index.html"
@@ -263,7 +291,14 @@ class _AnalyticsOverviewMixin:
                 login_url = DASHBOARD_DISCORD_LOGIN_URL
             else:
                 login_url = DASHBOARD_LOGIN_URL
-            raise web.HTTPFound(login_url)
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/dashboard",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
         import pathlib
 
         dist_path = pathlib.Path(__file__).parent / "dashboard_v2" / "dist" / "index.html"
@@ -281,7 +316,14 @@ class _AnalyticsOverviewMixin:
                 login_url = DASHBOARD_V2_DISCORD_LOGIN_URL
             else:
                 login_url = DASHBOARD_V2_LOGIN_URL
-            raise web.HTTPFound(login_url)
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/dashboard-v2",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
         return self._resolve_dashboard_v2_asset_response(request.match_info.get("path", ""))
 
     async def _serve_demo_dashboard_assets(self, request: web.Request) -> web.Response:

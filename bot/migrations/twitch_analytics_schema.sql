@@ -39,26 +39,66 @@ CREATE TABLE IF NOT EXISTS twitch_streamers (
     archived_at              TIMESTAMPTZ,
     silent_ban               INTEGER DEFAULT 0,
     silent_raid              INTEGER DEFAULT 0,
-    is_monitored_only        INTEGER DEFAULT 0
+    is_monitored_only        INTEGER DEFAULT 0,
+    live_ping_role_id        BIGINT,
+    live_ping_enabled        INTEGER DEFAULT 1
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_streamers_login_lower
     ON twitch_streamers (LOWER(twitch_login));
 
 -- Companion view: calculated partner flags (mirrors SQLite view)
-CREATE OR REPLACE VIEW twitch_streamers_partner_state AS
+-- Drop/recreate avoids CREATE OR REPLACE failures when prior versions used s.*
+-- and later table columns changed order.
+DROP VIEW IF EXISTS twitch_streamers_partner_state;
+CREATE VIEW twitch_streamers_partner_state AS
 WITH base AS (
     SELECT
-        s.*,
+        s.twitch_login,
+        s.twitch_user_id,
+        s.require_discord_link,
+        s.next_link_check_at,
+        s.discord_user_id,
+        s.discord_display_name,
+        s.is_on_discord,
+        s.manual_verified_permanent,
+        s.manual_verified_until,
+        s.manual_verified_at,
+        s.manual_partner_opt_out,
+        s.created_at,
+        s.archived_at,
+        s.raid_bot_enabled,
+        s.silent_ban,
+        s.silent_raid,
+        s.is_monitored_only,
         CASE
             WHEN COALESCE(s.manual_verified_permanent, 0) = 1
                  OR (s.manual_verified_until IS NOT NULL AND s.manual_verified_until >= NOW())
                  OR s.manual_verified_at IS NOT NULL
             THEN 1 ELSE 0
-        END AS is_verified
+        END AS is_verified,
+        s.live_ping_role_id,
+        COALESCE(s.live_ping_enabled, 1) AS live_ping_enabled
     FROM twitch_streamers s
 )
 SELECT
-    base.*,
+    base.twitch_login,
+    base.twitch_user_id,
+    base.require_discord_link,
+    base.next_link_check_at,
+    base.discord_user_id,
+    base.discord_display_name,
+    base.is_on_discord,
+    base.manual_verified_permanent,
+    base.manual_verified_until,
+    base.manual_verified_at,
+    base.manual_partner_opt_out,
+    base.created_at,
+    base.archived_at,
+    base.raid_bot_enabled,
+    base.silent_ban,
+    base.silent_raid,
+    base.is_monitored_only,
+    base.is_verified,
     CASE
         WHEN base.is_verified = 1
              AND COALESCE(base.manual_partner_opt_out, 0) = 0
@@ -70,7 +110,9 @@ SELECT
              AND COALESCE(base.manual_partner_opt_out, 0) = 0
              AND COALESCE(base.is_monitored_only, 0) = 0
         THEN 1 ELSE 0
-    END AS is_partner_active
+    END AS is_partner_active,
+    base.live_ping_role_id,
+    base.live_ping_enabled
 FROM base;
 
 -- ========= Live State (mirrors legacy sqlite schema) =========
@@ -587,6 +629,17 @@ SELECT create_hypertable('twitch_link_clicks', 'clicked_at', if_not_exists => TR
 ALTER TABLE twitch_link_clicks SET (timescaledb.compress, timescaledb.compress_segmentby = 'streamer_login', timescaledb.compress_orderby = 'clicked_at DESC');
 SELECT add_compression_policy('twitch_link_clicks', INTERVAL '7 days', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_twitch_link_clicks_streamer ON twitch_link_clicks(streamer_login);
+
+-- ========= Go-Live Announcement Builder =========
+CREATE TABLE IF NOT EXISTS twitch_live_announcement_configs (
+    streamer_login           TEXT PRIMARY KEY,
+    config_json              TEXT NOT NULL,
+    allowed_editor_role_ids  TEXT,
+    updated_at               TIMESTAMPTZ DEFAULT NOW(),
+    updated_by               TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_live_announce_configs_updated_at
+    ON twitch_live_announcement_configs(updated_at);
 
 -- ========= Raid Retention Rollup (computed, not a hypertable) =========
 CREATE TABLE IF NOT EXISTS twitch_raid_retention (

@@ -274,6 +274,30 @@ class _DashboardRoutesMixin:
     # Core routes                                                          #
     # ------------------------------------------------------------------ #
 
+    def _dashboard_auth_redirect_or_unavailable(
+        self,
+        request: web.Request,
+        *,
+        next_path: str,
+        fallback_login_url: str,
+    ) -> web.StreamResponse:
+        challenge_builder = getattr(self, "_dashboard_auth_challenge", None)
+        if callable(challenge_builder):
+            try:
+                response = challenge_builder(
+                    request,
+                    next_path=next_path,
+                    allow_discord_admin_login=True,
+                )
+                if isinstance(response, web.StreamResponse):
+                    return response
+            except Exception:
+                log.debug(
+                    "Could not build dashboard auth challenge; fallback to login redirect",
+                    exc_info=True,
+                )
+        return web.HTTPFound(fallback_login_url)
+
     async def index(self, request: web.Request) -> web.StreamResponse:
         """Entrypoint with local-first admin behavior.
 
@@ -324,7 +348,14 @@ class _DashboardRoutesMixin:
                 if self._should_use_discord_admin_login(request)
                 else TWITCH_DASHBOARDS_LOGIN_URL
             )
-            raise web.HTTPFound(login_url)
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/dashboard",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
 
         legacy_url = self._resolve_legacy_stats_url()
         beta_url = "/twitch/dashboard-v2"
@@ -508,6 +539,16 @@ class _DashboardRoutesMixin:
             "</ul>"
             f"<a class='btn' href='{legacy_url}'>Öffnen →</a>"
             "</div>"
+            "<div class='card card-accent-teal'>"
+            "<h3 class='card-title'>🎨 Live Message Builder</h3>"
+            "<p class='card-desc'>Baue deine Go-Live Nachricht mit Text, Embed, Feldern und Button inklusive Live-Vorschau.</p>"
+            "<ul class='card-bullets'>"
+            "<li>Placeholder-System ({channel}, {title}, {viewer_count})</li>"
+            "<li>Rollen-Ping & Allowed Mentions</li>"
+            "<li>Testversand per Discord-DM</li>"
+            "</ul>"
+            "<a class='btn' href='/twitch/live-announcement'>Öffnen →</a>"
+            "</div>"
             + (f"<div class='card card-accent-teal' style='grid-column: span 2; opacity: 0.7; border-color: #334155;'>"
                "<span class='card-badge' style='background: #1e293b; color: #64748b;'>GEPLANT</span>"
                "<h3 class='card-title' style='color: #94a3b8;'>📱 Social Media Publisher</h3>"
@@ -590,7 +631,14 @@ class _DashboardRoutesMixin:
                 if self._should_use_discord_admin_login(request)
                 else TWITCH_ABBO_LOGIN_URL
             )
-            raise web.HTTPFound(login_url)
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/abbo",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
 
         # Generate CSRF token for form submissions
         csrf_token = self._csrf_generate_token(request)
@@ -850,7 +898,14 @@ class _DashboardRoutesMixin:
                 if self._should_use_discord_admin_login(request)
                 else TWITCH_ABBO_LOGIN_URL
             )
-            raise web.HTTPFound(login_url)
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/abbo",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
 
         plan_id = str(request.query.get("plan_id") or "").strip()
         if not plan_id:
@@ -950,7 +1005,14 @@ class _DashboardRoutesMixin:
                 if self._should_use_discord_admin_login(request)
                 else TWITCH_ABBO_LOGIN_URL
             )
-            raise web.HTTPFound(login_url)
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/abbo",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
 
         data = await request.post()
 
@@ -1009,7 +1071,14 @@ class _DashboardRoutesMixin:
                 if self._should_use_discord_admin_login(request)
                 else TWITCH_ABBO_LOGIN_URL
             )
-            raise web.HTTPFound(login_url)
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/abbo",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
 
         if request.method != "POST":
             raise web.HTTPFound("/twitch/abbo?cancel=post_required")
@@ -1075,7 +1144,14 @@ class _DashboardRoutesMixin:
                 if self._should_use_discord_admin_login(request)
                 else TWITCH_ABBO_LOGIN_URL
             )
-            raise web.HTTPFound(login_url)
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/abbo",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
 
         customer_record = self._billing_customer_record_for_request(request)
         stripe_customer_id = str(customer_record.get("stripe_customer_id") or "").strip()
@@ -1209,7 +1285,14 @@ class _DashboardRoutesMixin:
                 if self._should_use_discord_admin_login(request)
                 else TWITCH_ABBO_LOGIN_URL
             )
-            raise web.HTTPFound(login_url)
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/abbo",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
         if not self._check_v2_admin_auth(request):
             raise web.HTTPFound("/twitch/abbo")
 
@@ -1783,7 +1866,14 @@ class _DashboardRoutesMixin:
                 if self._should_use_discord_admin_login(request)
                 else TWITCH_ABBO_LOGIN_URL
             )
-            raise web.HTTPFound(login_url)
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/abbo",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
 
         cycle_months = _normalize_billing_cycle(request.query.get("cycle"))
         catalog = _build_billing_catalog(cycle_months)
@@ -2154,9 +2244,15 @@ class _DashboardRoutesMixin:
             except Exception as _exc:
                 log.debug("Could not delete dashboard session from DB: %s", _exc)
 
-        response = web.HTTPFound(TWITCH_DASHBOARD_V2_LOGIN_URL)
+        response = self._dashboard_auth_redirect_or_unavailable(
+            request,
+            next_path="/twitch/dashboard-v2",
+            fallback_login_url=TWITCH_DASHBOARD_V2_LOGIN_URL,
+        )
         self._clear_session_cookie(response, request)
-        raise response
+        if isinstance(response, web.HTTPException):
+            raise response
+        return response
 
     async def discord_link(self, request: web.Request) -> web.StreamResponse:
         """Persist Discord profile metadata from the stats dashboard."""
@@ -2803,6 +2899,7 @@ class _DashboardRoutesMixin:
                 auth_checker=self._check_v2_auth,
                 auth_session_getter=self._get_dashboard_auth_session,
                 auth_level_getter=self._get_auth_level,
+                oauth_ready_checker=getattr(self, "_is_twitch_oauth_ready", None),
                 public_base_url=self._billing_configured_public_origin(),
             )
 
@@ -2828,6 +2925,7 @@ class _DashboardRoutesMixin:
                 web.get("/twitch/", self.index),
                 web.get("/twitch/admin", self.admin),
                 web.get("/twitch/live", self.admin),
+                web.get("/twitch/live-announcement", self.live_announcement_page),
                 web.post("/twitch/add_any", self.add_any),
                 web.post("/twitch/add_url", self.add_url),
                 web.post("/twitch/add_login/{login}", self.add_login),
@@ -2869,6 +2967,10 @@ class _DashboardRoutesMixin:
                 web.post("/twitch/reload", self.reload_cog),
                 web.get("/twitch/market", self.market_research),
                 web.get("/twitch/api/market_data", self.api_market_data),
+                web.get("/twitch/api/live-announcement/config", self.api_live_announcement_config),
+                web.post("/twitch/api/live-announcement/config", self.api_live_announcement_save_config),
+                web.post("/twitch/api/live-announcement/test", self.api_live_announcement_test_send),
+                web.get("/twitch/api/live-announcement/preview", self.api_live_announcement_preview),
                 web.get("/twitch/api/billing/catalog", self.api_billing_catalog),
                 web.get("/twitch/api/billing/readiness", self.api_billing_readiness),
                 web.post("/twitch/api/billing/stripe/webhook", self.api_billing_stripe_webhook),

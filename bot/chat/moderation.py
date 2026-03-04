@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 import time
@@ -678,8 +679,51 @@ class ModerationMixin:
 
                         async with aiohttp.ClientSession() as session:
                             async with session.post(url, headers=headers, json=payload) as r:
+                                txt = await r.text()
                                 if r.status in {200, 204}:
-                                    return True
+                                    if r.status == 204:
+                                        return True
+
+                                    # Helix kann HTTP 200 liefern, obwohl die Nachricht
+                                    # serverseitig gedroppt wurde (is_sent=false).
+                                    parsed_payload: dict | None = None
+                                    try:
+                                        raw_payload = json.loads(txt) if txt else {}
+                                        if isinstance(raw_payload, dict):
+                                            parsed_payload = raw_payload
+                                    except Exception:
+                                        parsed_payload = None
+
+                                    if parsed_payload is not None:
+                                        data = parsed_payload.get("data")
+                                        if isinstance(data, list) and data:
+                                            first = data[0]
+                                            if isinstance(first, dict):
+                                                is_sent = first.get("is_sent")
+                                                if is_sent is True:
+                                                    return True
+                                                if is_sent is False:
+                                                    drop_reason = first.get("drop_reason")
+                                                    if not isinstance(drop_reason, dict):
+                                                        drop_reason = {}
+                                                    drop_code = str(drop_reason.get("code") or "unknown")
+                                                    drop_message = str(drop_reason.get("message") or "").strip()
+                                                    log.warning(
+                                                        "Twitch hat die Bot-Nachricht verworfen "
+                                                        "(broadcaster=%s, code=%s, detail=%s)",
+                                                        b_id,
+                                                        drop_code,
+                                                        drop_message or "-",
+                                                    )
+                                                    return False
+
+                                    log.warning(
+                                        "Unklare Antwort von /helix/chat/messages trotz HTTP 200 "
+                                        "(broadcaster=%s): %s",
+                                        b_id,
+                                        (txt or "").strip()[:220],
+                                    )
+                                    return False
                                 if r.status == 401 and attempt == 0:
                                     log.debug(
                                         "_send_chat_message: 401 in %s, triggere Token-Refresh",
@@ -687,7 +731,6 @@ class ModerationMixin:
                                     )
                                     await self._token_manager.get_valid_token(force_refresh=True)
                                     continue
-                                txt = await r.text()
                                 if self._should_blacklist_for_source(
                                     source
                                 ) and self._looks_like_ban_error(r.status, txt):

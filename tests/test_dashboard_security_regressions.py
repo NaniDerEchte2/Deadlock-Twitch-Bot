@@ -7,6 +7,7 @@ from aiohttp import web
 
 from bot.analytics.api_overview import _AnalyticsOverviewMixin
 from bot.analytics.api_v2 import AnalyticsV2Mixin
+from bot.dashboard.auth_mixin import _DashboardAuthMixin
 from bot.dashboard.billing_mixin import _DashboardBillingMixin
 from bot.dashboard.live import DashboardLiveMixin
 from bot.dashboard.raid_mixin import _DashboardRaidMixin
@@ -412,6 +413,17 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(dashboard._oauth_public_origin(request), "https://safe.example")
 
+    def test_social_media_returns_503_when_twitch_oauth_missing(self) -> None:
+        dashboard = SocialMediaDashboard(
+            clip_manager=ClipManager(),
+            auth_checker=lambda _req: False,
+            oauth_ready_checker=lambda: False,
+        )
+        request = SimpleNamespace()
+
+        with self.assertRaises(web.HTTPServiceUnavailable):
+            dashboard._require_auth(request)
+
     async def test_social_media_clips_list_rejects_invalid_limit(self) -> None:
         dashboard = SocialMediaDashboard(
             clip_manager=ClipManager(),
@@ -576,6 +588,10 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
         class _Gate:
             _discord_admin_required = True
 
+            @staticmethod
+            def _path_matches_prefixes(path, prefixes):
+                return DashboardV2Server._path_matches_prefixes(path, prefixes)
+
             def _is_discord_admin_request(self, request):
                 return False
 
@@ -603,6 +619,10 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
         class _Gate:
             _discord_admin_required = False
 
+            @staticmethod
+            def _path_matches_prefixes(path, prefixes):
+                return DashboardV2Server._path_matches_prefixes(path, prefixes)
+
             def _is_discord_admin_request(self, request):
                 return False
 
@@ -618,6 +638,20 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(web.HTTPServiceUnavailable):
             DashboardV2Server._require_token(_Gate(), request)
+
+    def test_live_announcement_is_not_treated_as_admin_context(self) -> None:
+        handler = DashboardV2Server.__new__(DashboardV2Server)
+        handler._discord_admin_required = True
+
+        live_announcement_request = SimpleNamespace(path="/twitch/live-announcement")
+        live_admin_request = SimpleNamespace(path="/twitch/live")
+
+        self.assertFalse(
+            DashboardV2Server._should_use_discord_admin_login(handler, live_announcement_request)
+        )
+        self.assertTrue(
+            DashboardV2Server._should_use_discord_admin_login(handler, live_admin_request)
+        )
 
     def test_add_routes_are_post_only(self) -> None:
         app = web.Application()
@@ -672,6 +706,41 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
             await handler.raid_auth_start(request)
         self.assertEqual(ctx.exception.location, "https://auth.example/victim")
         self.assertEqual(handler.require_token_calls, 1)
+
+    async def test_raid_auth_start_without_session_redirects_to_dashboard_login(self) -> None:
+        handler = _DummyRaidAuthRoute()
+        request = SimpleNamespace(query={})
+
+        with self.assertRaises(web.HTTPFound) as ctx:
+            await handler.raid_auth_start(request)
+        self.assertEqual(ctx.exception.location, "/twitch/auth/login?next=%2Ftwitch%2Fraid%2Fauth")
+        self.assertEqual(handler.require_token_calls, 0)
+
+    async def test_raid_auth_start_without_session_returns_503_when_oauth_missing(self) -> None:
+        handler = _DummyRaidAuthRoute()
+        handler._is_twitch_oauth_ready = lambda: False
+        request = SimpleNamespace(query={})
+
+        response = await handler.raid_auth_start(request)
+        self.assertEqual(response.status, 503)
+        self.assertIn("Twitch OAuth ist aktuell nicht konfiguriert", response.text)
+        self.assertEqual(handler.require_token_calls, 0)
+
+    def test_canonical_post_login_destination_keeps_raid_auth_path(self) -> None:
+        self.assertEqual(
+            _DashboardAuthMixin._canonical_post_login_destination(
+                "/twitch/raid/auth?streamer=earlysalty"
+            ),
+            "/twitch/raid/auth?streamer=earlysalty",
+        )
+
+    def test_canonical_post_login_destination_keeps_live_builder_path(self) -> None:
+        self.assertEqual(
+            _DashboardAuthMixin._canonical_post_login_destination(
+                "/twitch/live-announcement?streamer=earlysalty"
+            ),
+            "/twitch/live-announcement?streamer=earlysalty",
+        )
 
     def test_rate_limit_key_ignores_forwarded_headers(self) -> None:
         handler = DashboardV2Server.__new__(DashboardV2Server)
@@ -877,6 +946,143 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(web.HTTPFound) as ctx:
             await handler._serve_dashboard(request)
         self.assertEqual(ctx.exception.location, "/twitch/auth/login?next=%2Ftwitch%2Fdashboard")
+
+    async def test_dashboard_route_returns_503_when_twitch_oauth_missing(self) -> None:
+        handler = DashboardV2Server(
+            app_token=None,
+            noauth=False,
+            partner_token=None,
+            oauth_client_id=None,
+            oauth_client_secret=None,
+            oauth_redirect_uri="https://twitch.earlysalty.com/twitch/auth/callback",
+        )
+        handler._discord_admin_required = False
+        request = SimpleNamespace(
+            path="/twitch/dashboard",
+            headers={"Host": "dashboard.example"},
+            host="dashboard.example",
+            remote="203.0.113.10",
+            transport=None,
+        )
+
+        response = await handler._serve_dashboard(request)
+        self.assertEqual(response.status, 503)
+        self.assertIn("Twitch OAuth ist aktuell nicht konfiguriert", response.text)
+
+    async def test_dashboard_v2_assets_return_503_when_twitch_oauth_missing(self) -> None:
+        handler = DashboardV2Server(
+            app_token=None,
+            noauth=False,
+            partner_token=None,
+            oauth_client_id=None,
+            oauth_client_secret=None,
+            oauth_redirect_uri="https://twitch.earlysalty.com/twitch/auth/callback",
+        )
+        handler._discord_admin_required = False
+        request = SimpleNamespace(
+            path="/twitch/dashboard-v2/assets/index.js",
+            headers={"Host": "dashboard.example"},
+            host="dashboard.example",
+            remote="203.0.113.10",
+            transport=None,
+            match_info={"path": "index.js"},
+        )
+
+        response = await handler._serve_dashboard_v2_assets(request)
+        self.assertEqual(response.status, 503)
+        self.assertIn("Twitch OAuth ist aktuell nicht konfiguriert", response.text)
+
+    async def test_dashboard_route_falls_back_to_discord_login_when_twitch_oauth_missing(self) -> None:
+        handler = DashboardV2Server(
+            app_token=None,
+            noauth=False,
+            partner_token=None,
+            oauth_client_id=None,
+            oauth_client_secret=None,
+            oauth_redirect_uri="https://twitch.earlysalty.com/twitch/auth/callback",
+        )
+        handler._discord_admin_required = True
+        request = SimpleNamespace(
+            path="/twitch/dashboard",
+            headers={"Host": "dashboard.example"},
+            host="dashboard.example",
+            remote="203.0.113.10",
+            transport=None,
+        )
+
+        with self.assertRaises(web.HTTPFound) as ctx:
+            await handler._serve_dashboard(request)
+        self.assertEqual(ctx.exception.location, "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard")
+
+    def test_build_dashboard_login_url_falls_back_to_discord_when_twitch_oauth_missing(self) -> None:
+        handler = DashboardV2Server(
+            app_token=None,
+            noauth=False,
+            partner_token=None,
+            oauth_client_id=None,
+            oauth_client_secret=None,
+            oauth_redirect_uri="https://twitch.earlysalty.com/twitch/auth/callback",
+        )
+        handler._discord_admin_required = True
+        request = SimpleNamespace(
+            path="/twitch/dashboard",
+            rel_url=SimpleNamespace(path_qs="/twitch/dashboard"),
+        )
+
+        self.assertEqual(
+            handler._build_dashboard_login_url(request),
+            "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard",
+        )
+
+    def test_require_v2_auth_uses_discord_login_url_when_twitch_oauth_missing(self) -> None:
+        handler = DashboardV2Server(
+            app_token=None,
+            noauth=False,
+            partner_token=None,
+            oauth_client_id=None,
+            oauth_client_secret=None,
+            oauth_redirect_uri="https://twitch.earlysalty.com/twitch/auth/callback",
+        )
+        handler._discord_admin_required = True
+        request = SimpleNamespace(
+            path="/twitch/api/v2/internal-home",
+            headers={"Host": "dashboard.example"},
+            host="dashboard.example",
+            remote="203.0.113.10",
+            transport=None,
+            rel_url=SimpleNamespace(path_qs="/twitch/api/v2/internal-home"),
+        )
+
+        with self.assertRaises(web.HTTPUnauthorized) as ctx:
+            handler._require_v2_auth(request)
+        payload = json.loads(ctx.exception.text)
+        self.assertEqual(
+            payload.get("loginUrl"),
+            "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard-v2",
+        )
+
+    async def test_stats_entry_returns_503_when_twitch_oauth_missing(self) -> None:
+        handler = DashboardV2Server(
+            app_token=None,
+            noauth=False,
+            partner_token=None,
+            oauth_client_id=None,
+            oauth_client_secret=None,
+            oauth_redirect_uri="https://twitch.earlysalty.com/twitch/auth/callback",
+        )
+        handler._discord_admin_required = False
+        request = SimpleNamespace(
+            path="/twitch/stats",
+            headers={"Host": "dashboard.example"},
+            host="dashboard.example",
+            remote="203.0.113.10",
+            transport=None,
+            query_string="",
+        )
+
+        response = await handler.stats_entry(request)
+        self.assertEqual(response.status, 503)
+        self.assertIn("Twitch OAuth ist aktuell nicht konfiguriert", response.text)
 
     async def test_internal_home_requires_streamer_dashboard_session(self) -> None:
         handler = _DummyInternalHomeApi(dashboard_session=None)

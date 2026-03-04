@@ -460,7 +460,13 @@ function InternalHome() {
   const reconnectUrl = home.oauth?.reconnectUrl || oauthFallbackUrl;
   const profileUrl = home.oauth?.profileUrl || reconnectUrl;
   const needsOauthReconnect = oauthStatus !== 'connected' || hasScopeIssue;
-  const oauthQuickHref = needsOauthReconnect ? reconnectUrl : profileUrl;
+  const oauthQuickHref = reconnectUrl;
+  const oauthPanelHref = needsOauthReconnect ? reconnectUrl : profileUrl;
+  const liveAnnouncementHref = normalizedSelectedStreamer
+    ? `/twitch/live-announcement?streamer=${encodeURIComponent(normalizedSelectedStreamer)}`
+    : twitchLogin
+      ? `/twitch/live-announcement?streamer=${encodeURIComponent(twitchLogin)}`
+      : '/twitch/live-announcement';
   const scopeWatchCardClass = hasScopeIssue
     ? 'rounded-2xl border border-error/35 bg-gradient-to-br from-error/16 via-background/80 to-background/60 p-4'
     : 'rounded-2xl border border-accent/20 bg-gradient-to-br from-accent/12 via-background/80 to-background/60 p-4';
@@ -524,6 +530,13 @@ function InternalHome() {
       description: 'Subscription, Rechnungen und Checkout verwalten',
       href: '/twitch/abbo',
       icon: Gauge,
+    },
+    {
+      id: 'live-announcement',
+      title: 'Live Message Builder',
+      description: 'Go-Live Text, Embed und Button konfigurieren',
+      href: liveAnnouncementHref,
+      icon: RadioTower,
     },
     {
       id: 'oauth',
@@ -658,7 +671,7 @@ function InternalHome() {
                 </p>
 
                 <a
-                  href={oauthQuickHref}
+                  href={oauthPanelHref}
                   className="mt-4 inline-flex items-center gap-2 rounded-lg border border-primary/40 bg-primary/15 px-3 py-2 text-sm font-semibold text-primary transition-colors hover:bg-primary/25"
                 >
                   <Shield className="h-4 w-4" />

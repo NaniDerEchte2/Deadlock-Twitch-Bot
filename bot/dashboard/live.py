@@ -235,6 +235,15 @@ class DashboardLiveMixin:
             if not bool(st.get("manual_partner_opt_out")) and not bool(st.get("archived_at"))
         )
         raid_bot_available = bool(getattr(self, "_raid_bot", None))
+        if not raid_bot_available:
+            # Split-runtime dashboard has no in-process raid bot object.
+            # In this mode, a wired non-empty list callback means the bot runtime is reachable.
+            list_cb = getattr(self, "_list", None)
+            empty_list_cb = getattr(self, "_empty_list", None)
+            list_func = getattr(list_cb, "__func__", list_cb)
+            empty_list_func = getattr(empty_list_cb, "__func__", empty_list_cb)
+            if callable(list_cb) and callable(empty_list_cb) and list_func is not empty_list_func:
+                raid_bot_available = True
 
         def raid_auth_link(login: str) -> str:
             return f"/twitch/raid/auth?login={quote_plus(login)}"

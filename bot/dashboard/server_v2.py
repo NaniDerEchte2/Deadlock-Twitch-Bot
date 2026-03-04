@@ -18,6 +18,7 @@ from ..core.constants import log
 from .auth_mixin import _DashboardAuthMixin
 from .billing_mixin import _DashboardBillingMixin
 from .legal_mixin import _DashboardLegalMixin
+from .live_announcement_mixin import DashboardLiveAnnouncementMixin
 from .live import DashboardLiveMixin
 from .raid_mixin import _DashboardRaidMixin
 from .routes_mixin import _DashboardRoutesMixin
@@ -51,6 +52,7 @@ class DashboardV2Server(
     _DashboardLegalMixin,
     _DashboardBillingMixin,
     _DashboardRoutesMixin,
+    DashboardLiveAnnouncementMixin,
     DashboardLiveMixin,
     DashboardStatsMixin,
     DashboardTemplateMixin,
@@ -80,6 +82,10 @@ class DashboardV2Server(
         | None = None,
         raid_history_cb: Callable[..., Awaitable[list[dict]]] | None = None,
         raid_bot: Any | None = None,
+        raid_auth_url_cb: Callable[[str], Awaitable[str]] | None = None,
+        raid_go_url_cb: Callable[[str], Awaitable[str | None]] | None = None,
+        raid_requirements_cb: Callable[[str], Awaitable[str]] | None = None,
+        raid_oauth_callback_cb: Callable[..., Awaitable[dict]] | None = None,
         reload_cb: Callable[[], Awaitable[str]] | None = None,
     ) -> None:
         self._token = app_token
@@ -139,11 +145,19 @@ class DashboardV2Server(
             raid_history_cb if callable(raid_history_cb) else self._empty_raid_history
         )
         self._raid_bot = raid_bot
+        self._raid_auth_url_cb = raid_auth_url_cb if callable(raid_auth_url_cb) else None
+        self._raid_go_url_cb = raid_go_url_cb if callable(raid_go_url_cb) else None
+        self._raid_requirements_cb = (
+            raid_requirements_cb if callable(raid_requirements_cb) else None
+        )
+        self._raid_oauth_callback_cb = (
+            raid_oauth_callback_cb if callable(raid_oauth_callback_cb) else None
+        )
         self._redirect_uri = str(
             getattr(getattr(raid_bot, "auth_manager", None), "redirect_uri", "") or ""
         ).strip()
         self._master_dashboard_href = "/admin"
-        keyring_client_id = self._read_keyring_secret("DISCORD_OAUTH_CLIENT_ID")
+        keyring_client_id = self._load_secret_value("DISCORD_OAUTH_CLIENT_ID")
         discord_bot = None
         auth_manager = getattr(raid_bot, "auth_manager", None) if raid_bot else None
         if auth_manager is not None:
@@ -152,7 +166,7 @@ class DashboardV2Server(
             discord_bot = getattr(raid_bot, "_discord_bot", None)
         app_client_id = str(getattr(discord_bot, "application_id", "") or "").strip()
         self._discord_admin_client_id = (keyring_client_id or app_client_id).strip()
-        self._discord_admin_client_secret = self._read_keyring_secret(
+        self._discord_admin_client_secret = self._load_secret_value(
             "DISCORD_OAUTH_CLIENT_SECRET"
         ).strip()
         self._discord_admin_redirect_uri = TWITCH_ADMIN_DISCORD_REDIRECT_URI
@@ -444,6 +458,21 @@ class DashboardV2Server(
             return "/twitch/dashboard"
         return "/twitch/admin"
 
+    @staticmethod
+    def _path_matches_prefixes(path: str, prefixes: tuple[str, ...]) -> bool:
+        normalized_path = str(path or "").strip()
+        if not normalized_path:
+            return False
+        for prefix in prefixes:
+            normalized_prefix = str(prefix or "").rstrip("/")
+            if not normalized_prefix:
+                continue
+            if normalized_path == normalized_prefix or normalized_path.startswith(
+                f"{normalized_prefix}/"
+            ):
+                return True
+        return False
+
     def _normalized_discord_admin_redirect_uri(self) -> str | None:
         raw = (self._discord_admin_redirect_uri or "").strip()
         if not raw:
@@ -486,7 +515,7 @@ class DashboardV2Server(
             "/twitch/market",
             "/twitch/stats",
         )
-        if request.path.startswith(admin_only_prefixes):
+        if self._path_matches_prefixes(request.path, admin_only_prefixes):
             if not self._discord_admin_required:
                 raise web.HTTPServiceUnavailable(
                     text=(
@@ -554,7 +583,7 @@ class DashboardV2Server(
                 "/twitch/raid/history",
                 "/twitch/raid/analytics",
             )
-            if request.path.startswith(admin_action_prefixes):
+            if self._path_matches_prefixes(request.path, admin_action_prefixes):
                 default_path = "/twitch/admin"
 
         referer = request.headers.get("Referer")
@@ -644,7 +673,7 @@ class DashboardV2Server(
             "/twitch/reload",
             "/twitch/market",
         )
-        return request.path.startswith(admin_context_prefixes)
+        return self._path_matches_prefixes(request.path, admin_context_prefixes)
 
     async def _do_add(self, raw: str) -> str:
         login = self._normalize_login(raw)
@@ -684,6 +713,10 @@ def build_v2_app(
     discord_profile_cb: Callable[[str, str | None, str | None, bool], Awaitable[str]] | None = None,
     raid_history_cb: Callable[..., Awaitable[list[dict]]] | None = None,
     raid_bot: Any | None = None,
+    raid_auth_url_cb: Callable[[str], Awaitable[str]] | None = None,
+    raid_go_url_cb: Callable[[str], Awaitable[str | None]] | None = None,
+    raid_requirements_cb: Callable[[str], Awaitable[str]] | None = None,
+    raid_oauth_callback_cb: Callable[..., Awaitable[dict]] | None = None,
     reload_cb: Callable[[], Awaitable[str]] | None = None,
     eventsub_webhook_handler: Any | None = None,
 ) -> web.Application:
@@ -707,6 +740,10 @@ def build_v2_app(
         discord_profile_cb=discord_profile_cb,
         raid_history_cb=raid_history_cb,
         raid_bot=raid_bot,
+        raid_auth_url_cb=raid_auth_url_cb,
+        raid_go_url_cb=raid_go_url_cb,
+        raid_requirements_cb=raid_requirements_cb,
+        raid_oauth_callback_cb=raid_oauth_callback_cb,
         reload_cb=reload_cb,
     ).attach(app)
     if eventsub_webhook_handler is not None:

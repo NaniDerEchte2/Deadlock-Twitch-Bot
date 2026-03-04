@@ -345,7 +345,17 @@ class AnalyticsV2Mixin(
                 if callable(should_use_discord) and bool(should_use_discord(request)):
                     login_url = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard-v2"
                 else:
-                    login_url = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
+                    oauth_ready_checker = getattr(self, "_is_twitch_oauth_ready", None)
+                    oauth_ready = True
+                    if callable(oauth_ready_checker):
+                        try:
+                            oauth_ready = bool(oauth_ready_checker())
+                        except Exception:
+                            oauth_ready = True
+                    if not oauth_ready and bool(getattr(self, "_discord_admin_required", False)):
+                        login_url = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard-v2"
+                    else:
+                        login_url = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
             payload = {
                 "error": "Authentication required. Use Twitch login, partner_token, or access from localhost.",
                 "loginUrl": login_url,

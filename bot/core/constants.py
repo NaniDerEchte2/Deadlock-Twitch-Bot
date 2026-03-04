@@ -11,6 +11,8 @@ log = logging.getLogger("TwitchStreams")
 TWITCH_DASHBOARD_NOAUTH = False  # ohne Token nur per ENV-Override aktivieren
 TWITCH_DASHBOARD_HOST = "127.0.0.1"
 TWITCH_DASHBOARD_PORT = 8765
+TWITCH_INTERNAL_API_HOST = "127.0.0.1"
+TWITCH_INTERNAL_API_PORT = 8766
 TWITCH_RAID_REDIRECT_URI = "https://raid.earlysalty.com/twitch/raid/callback"
 
 TWITCH_LANGUAGE = (

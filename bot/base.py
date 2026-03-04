@@ -36,6 +36,8 @@ from .core.constants import (
     TWITCH_DASHBOARD_HOST,
     TWITCH_DASHBOARD_NOAUTH,
     TWITCH_DASHBOARD_PORT,
+    TWITCH_INTERNAL_API_HOST,
+    TWITCH_INTERNAL_API_PORT,
     TWITCH_LANGUAGE,
     TWITCH_LOG_EVERY_N_TICKS,
     TWITCH_NOTIFY_CHANNEL_ID,
@@ -44,6 +46,7 @@ from .core.constants import (
     TWITCH_TARGET_GAME_NAME,
     log,
 )
+from .internal_api import InternalApiRunner
 from .raid.manager import RaidBot
 from .reload_manager import LoopSpec, SubsystemDef, TwitchReloadManager
 
@@ -150,6 +153,47 @@ class TwitchBaseCog(commands.Cog):
         )
         self._legacy_stats_url = (os.getenv("TWITCH_LEGACY_STATS_URL") or "").strip() or None
         self._required_marker_default = TWITCH_REQUIRED_DISCORD_MARKER or None
+        self._internal_api_runner: InternalApiRunner | None = None
+
+        # Internal API for split dashboard deployments
+        self._internal_api_token = (os.getenv("TWITCH_INTERNAL_API_TOKEN") or "").strip() or None
+        env_internal_host = (os.getenv("TWITCH_INTERNAL_API_HOST") or "").strip()
+        default_internal_host = TWITCH_INTERNAL_API_HOST or "127.0.0.1"
+        self._internal_api_host = env_internal_host or default_internal_host
+        try:
+            if ipaddress.ip_address(self._internal_api_host).is_unspecified:
+                log.warning(
+                    "TWITCH_INTERNAL_API_HOST resolves to an unspecified address; keep it private."
+                )
+        except ValueError:
+            log.warning(
+                "TWITCH_INTERNAL_API_HOST is not a valid IP; using it as-is: %s",
+                self._internal_api_host,
+            )
+        self._internal_api_port = _parse_env_int(
+            "TWITCH_INTERNAL_API_PORT",
+            int(TWITCH_INTERNAL_API_PORT),
+        )
+        self._internal_api_runner = InternalApiRunner(
+            host=self._internal_api_host,
+            port=self._internal_api_port,
+            token=self._internal_api_token,
+            add_cb=getattr(self, "_dashboard_add", None),
+            remove_cb=getattr(self, "_dashboard_remove", None),
+            list_cb=getattr(self, "_dashboard_list", None),
+            stats_cb=getattr(self, "_dashboard_stats", None),
+            verify_cb=getattr(self, "_dashboard_verify", None),
+            archive_cb=getattr(self, "_dashboard_archive", None),
+            discord_flag_cb=getattr(self, "_dashboard_set_discord_flag", None),
+            discord_profile_cb=getattr(self, "_dashboard_save_discord_profile", None),
+            streamer_analytics_cb=getattr(self, "_dashboard_streamer_analytics_data", None),
+            comparison_cb=getattr(self, "_dashboard_comparison_stats", None),
+            session_cb=getattr(self, "_dashboard_session_detail", None),
+            raid_auth_url_cb=getattr(self, "_dashboard_raid_auth_url", None),
+            raid_go_url_cb=getattr(self, "_dashboard_raid_go_url", None),
+            raid_requirements_cb=getattr(self, "_dashboard_raid_requirements", None),
+            raid_oauth_callback_cb=getattr(self, "_dashboard_raid_oauth_callback", None),
+        )
 
         # EventSub Webhook Handler – früh initialisieren damit er sowohl im Dashboard
         # als auch in _start_eventsub_listener verfügbar ist.
@@ -268,6 +312,7 @@ class TwitchBaseCog(commands.Cog):
         # invites_refresh.start() → DEAKTIVIERT: On-Demand statt periodisch
         self._spawn_bg_task(self._ensure_category_id(), "twitch.ensure_category_id")
         self._spawn_bg_task(self._load_invite_codes_from_db(), "twitch.load_invites")
+        self._spawn_bg_task(self._start_internal_api(), "twitch.start_internal_api")
         if self._dashboard_embedded:
             self._spawn_bg_task(self._start_dashboard(), "twitch.start_dashboard")
         else:
@@ -652,9 +697,10 @@ class TwitchBaseCog(commands.Cog):
         3. Chat Bot sauber beenden (inklusive Port-Freigabe)
         4. Token Manager cleanup
         5. Dashboard stoppen (inklusive Port-Freigabe)
-        6. Raid Bot cleanup
-        7. API Session schließen
-        8. Commands deregistrieren
+        6. Internal API stoppen
+        7. Raid Bot cleanup
+        8. API Session schließen
+        9. Commands deregistrieren
         """
         log.info("Twitch Cog Unload gestartet – fahre alle Ressourcen herunter...")
 
@@ -786,7 +832,15 @@ class TwitchBaseCog(commands.Cog):
             except Exception:
                 log.exception("Dashboard shutdown fehlgeschlagen")
 
-        # 6. RaidBot Cleanup
+        # 6. Internal API stoppen
+        if self._internal_api_runner and self._internal_api_runner.is_running:
+            log.info("Stoppe interne Twitch API...")
+            try:
+                await self._stop_internal_api()
+            except Exception:
+                log.exception("Internal API shutdown fehlgeschlagen")
+
+        # 7. RaidBot Cleanup
         if self._raid_bot:
             try:
                 await self._raid_bot.cleanup()
@@ -794,7 +848,7 @@ class TwitchBaseCog(commands.Cog):
             except Exception:
                 log.exception("RaidBot cleanup fehlgeschlagen")
 
-        # 7. API Session schließen (mit Grace Period für laufende Requests)
+        # 8. API Session schließen (mit Grace Period für laufende Requests)
         if self.api is not None:
             log.info("Schließe Twitch API Session...")
             try:
@@ -808,7 +862,7 @@ class TwitchBaseCog(commands.Cog):
             except Exception:
                 log.exception("TwitchAPI-Session konnte nicht geschlossen werden")
 
-        # 8. Commands deregistrieren
+        # 9. Commands deregistrieren
         try:
             if self._twl_command is not None:
                 existing = self.bot.get_command(self._twl_command.name)
@@ -827,6 +881,21 @@ class TwitchBaseCog(commands.Cog):
     def set_prefix_command(self, command: commands.Command) -> None:
         """Speichert die Referenz auf den dynamisch registrierten Prefix-Command."""
         self._twl_command = command
+
+    async def _start_internal_api(self) -> None:
+        runner = self._internal_api_runner
+        if runner is None:
+            return
+        try:
+            await runner.start()
+        except Exception:
+            log.exception("Konnte interne Twitch API nicht starten")
+
+    async def _stop_internal_api(self) -> None:
+        runner = self._internal_api_runner
+        if runner is None:
+            return
+        await runner.stop()
 
     def _spawn_bg_task(self, coro: Coroutine[Any, Any, Any], name: str) -> None:
         """Start a background coroutine without relying on Bot.loop (removed in d.py 2.4)."""

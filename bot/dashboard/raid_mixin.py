@@ -387,17 +387,40 @@ new Chart(ctx, {{
                 self._require_token(request)
             login = requested_login
         elif not login:
-            self._require_token(request)
-            login = requested_login
+            # Reconnect entrypoint for regular streamers: force Twitch dashboard login,
+            # not Discord admin auth.
+            oauth_ready_checker = getattr(self, "_is_twitch_oauth_ready", None)
+            if callable(oauth_ready_checker) and not oauth_ready_checker():
+                return web.Response(
+                    text=(
+                        "Twitch OAuth ist aktuell nicht konfiguriert oder die Redirect-URI ist ungültig. "
+                        "Bitte OAuth-Einstellungen prüfen."
+                    ),
+                    status=503,
+                )
+            raise web.HTTPFound("/twitch/auth/login?next=%2Ftwitch%2Fraid%2Fauth")
 
         if not login:
             return web.Response(text="Missing login parameter", status=400)
 
         auth_manager = getattr(getattr(self, "_raid_bot", None), "auth_manager", None)
-        if not auth_manager:
-            return web.Response(text="Raid bot not initialized", status=503)
+        if auth_manager:
+            auth_url = str(auth_manager.generate_auth_url(login))
+        else:
+            raid_auth_url_cb = getattr(self, "_raid_auth_url_cb", None)
+            if not callable(raid_auth_url_cb):
+                return web.Response(text="Raid bot not initialized", status=503)
+            try:
+                auth_url = str(await raid_auth_url_cb(login)).strip()
+            except Exception as exc:
+                status = int(getattr(exc, "status", 503) or 503)
+                return web.Response(
+                    text=str(getattr(exc, "message", str(exc)) or "Raid bot not initialized"),
+                    status=max(400, min(status, 599)),
+                )
+            if not auth_url:
+                return web.Response(text="Raid bot not initialized", status=503)
 
-        auth_url = str(auth_manager.generate_auth_url(login))
         raise web.HTTPFound(location=auth_url)
 
     async def raid_auth_go(self, request: web.Request) -> web.StreamResponse:
@@ -413,10 +436,20 @@ new Chart(ctx, {{
             return web.Response(text="Missing state parameter", status=400)
 
         auth_manager = getattr(getattr(self, "_raid_bot", None), "auth_manager", None)
-        if not auth_manager:
-            return web.Response(text="Raid bot not initialized", status=503)
-
-        full_url = auth_manager.get_pending_auth_url(state)
+        if auth_manager:
+            full_url = auth_manager.get_pending_auth_url(state)
+        else:
+            raid_go_url_cb = getattr(self, "_raid_go_url_cb", None)
+            if not callable(raid_go_url_cb):
+                return web.Response(text="Raid bot not initialized", status=503)
+            try:
+                full_url = await raid_go_url_cb(state)
+            except Exception as exc:
+                status = int(getattr(exc, "status", 503) or 503)
+                return web.Response(
+                    text=str(getattr(exc, "message", str(exc)) or "Raid bot not initialized"),
+                    status=max(400, min(status, 599)),
+                )
         if not full_url:
             return web.Response(
                 text="<html><body>Link abgelaufen oder ungültig. "
@@ -437,7 +470,20 @@ new Chart(ctx, {{
 
         auth_manager = getattr(getattr(self, "_raid_bot", None), "auth_manager", None)
         if not auth_manager:
-            return web.Response(text="Raid bot not initialized", status=503)
+            raid_requirements_cb = getattr(self, "_raid_requirements_cb", None)
+            if not callable(raid_requirements_cb):
+                return web.Response(text="Raid bot not initialized", status=503)
+            try:
+                ok_message = str(await raid_requirements_cb(login))
+            except Exception as exc:
+                status = int(getattr(exc, "status", 503) or 503)
+                return web.Response(
+                    text=str(getattr(exc, "message", str(exc)) or "Raid bot not initialized"),
+                    status=max(400, min(status, 599)),
+                )
+            location = self._redirect_location(request, ok=ok_message, default_path="/twitch/admin")
+            safe_location = self._safe_internal_redirect(location, fallback="/twitch/admin")
+            raise web.HTTPFound(location=safe_location)
 
         try:
             with storage.get_conn() as conn:
@@ -637,6 +683,37 @@ new Chart(ctx, {{
         code = (request.query.get("code") or "").strip()
         state = (request.query.get("state") or "").strip()
         error = (request.query.get("error") or "").strip()
+
+        if not raid_bot or not auth_manager:
+            raid_oauth_callback_cb = getattr(self, "_raid_oauth_callback_cb", None)
+            if callable(raid_oauth_callback_cb):
+                try:
+                    payload = await raid_oauth_callback_cb(code=code, state=state, error=error)
+                except Exception as exc:
+                    status = int(getattr(exc, "status", 503) or 503)
+                    payload = {
+                        "title": "Raid-Bot nicht verfügbar",
+                        "body_html": (
+                            "<p>"
+                            + html.escape(
+                                str(getattr(exc, "message", str(exc)) or "Raid bot not initialized"),
+                                quote=True,
+                            )
+                            + "</p>"
+                        ),
+                        "status": max(400, min(status, 599)),
+                    }
+                title = str(payload.get("title") or "Autorisierung")
+                body_html = str(payload.get("body_html") or "<p>Unbekannte Antwort.</p>")
+                try:
+                    status_code = int(payload.get("status", 200))
+                except (TypeError, ValueError):
+                    status_code = 200
+                return web.Response(
+                    text=self._render_oauth_page(title, body_html),
+                    status=max(200, min(status_code, 599)),
+                    content_type="text/html",
+                )
 
         if error:
             expected_uri = (getattr(auth_manager, "redirect_uri", "") or "").strip()

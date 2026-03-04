@@ -3,13 +3,111 @@
 from __future__ import annotations
 
 import logging
+import os
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
+import aiohttp
 import discord
+
+from ..internal_api import INTERNAL_API_BASE_PATH, INTERNAL_TOKEN_HEADER
 
 log = logging.getLogger("TwitchStreams.RaidViews")
 
 AUTH_BUTTON_LABEL = "OAuth-Link erzeugen"
 AUTH_LINK_LABEL = "Twitch autorisieren"
+
+
+def _parse_env_bool(var_name: str, default: bool = False) -> bool:
+    raw = (os.getenv(var_name) or "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _split_runtime_enforced_role() -> str:
+    role = (os.getenv("TWITCH_SPLIT_RUNTIME_ROLE") or "").strip().lower()
+    if not role:
+        return ""
+    if role not in {"bot", "dashboard"}:
+        return ""
+    if not _parse_env_bool("TWITCH_SPLIT_RUNTIME_ENFORCE", False):
+        return ""
+    return role
+
+
+def _split_internal_api_auth_url(discord_user_id: int) -> tuple[str, dict[str, str]] | None:
+    base_url = (os.getenv("TWITCH_INTERNAL_API_BASE_URL") or "").strip()
+    token = (os.getenv("TWITCH_INTERNAL_API_TOKEN") or "").strip()
+    if not base_url or not token:
+        return None
+
+    raw = base_url if "://" in base_url else f"http://{base_url}"
+    try:
+        parsed = urlsplit(raw)
+    except Exception:
+        return None
+
+    if not parsed.scheme or not parsed.netloc:
+        return None
+
+    base_path = (parsed.path or "").rstrip("/")
+    internal_base = INTERNAL_API_BASE_PATH.rstrip("/")
+    if base_path == internal_base:
+        base_path = ""
+    elif base_path.endswith(internal_base):
+        base_path = base_path[: -len(internal_base)]
+
+    normalized_base = urlunsplit((parsed.scheme, parsed.netloc, base_path.rstrip("/"), "", ""))
+    endpoint = f"{normalized_base.rstrip('/')}{internal_base}/raid/auth-url"
+    query = urlencode({"login": f"discord:{discord_user_id}"})
+    headers = {INTERNAL_TOKEN_HEADER: token}
+    return f"{endpoint}?{query}", headers
+
+
+def _prefer_split_internal_raid_auth_api() -> bool:
+    if _split_internal_api_auth_url(0) is None:
+        return False
+    return _split_runtime_enforced_role() != "bot"
+
+
+async def _fetch_split_raid_auth_url(discord_user_id: int) -> str | None:
+    request_data = _split_internal_api_auth_url(discord_user_id)
+    if request_data is None:
+        return None
+
+    url, headers = request_data
+    timeout = aiohttp.ClientTimeout(total=8.0)
+
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers) as response:
+                body = await response.text()
+                payload: dict[str, object] = {}
+                if body:
+                    try:
+                        decoded = await response.json(content_type=None)
+                    except Exception:
+                        decoded = {}
+                    if isinstance(decoded, dict):
+                        payload = decoded
+
+                if response.status != 200:
+                    log.warning(
+                        "Split-API raid auth url failed (%s): %s",
+                        response.status,
+                        str(payload.get("message") or body or "").strip()[:200],
+                    )
+                    return None
+
+                auth_url = str(payload.get("auth_url") or "").strip()
+                return auth_url or None
+    except Exception as exc:
+        log.warning("Split-API raid auth request failed: %r", exc)
+        return None
 
 
 def build_raid_requirements_embed(twitch_login: str) -> discord.Embed:
@@ -70,15 +168,32 @@ class _RaidAuthGenerateButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
         try:
             login = self._twitch_login
+            if not login:
+                await interaction.response.send_message(
+                    "⚠️ Bot nicht bereit – bitte kurz warten und nochmal versuchen.\n"
+                    "Alternativ: `/traid` in Discord nutzen.",
+                    ephemeral=True,
+                )
+                return
 
-            # Auth-Manager dynamisch aus dem Cog holen (restart-sicher)
-            auth_manager = None
-            for cog in interaction.client.cogs.values():
-                if hasattr(cog, "_raid_bot") and getattr(cog, "_raid_bot", None):
-                    auth_manager = cog._raid_bot.auth_manager  # type: ignore[union-attr]
-                    break
+            button_url = ""
+            if _prefer_split_internal_raid_auth_api():
+                button_url = str(await _fetch_split_raid_auth_url(int(interaction.user.id)) or "").strip()
 
-            if not auth_manager or not login:
+            if not button_url:
+                # Auth-Manager dynamisch aus dem Cog holen (restart-sicher)
+                auth_manager = None
+                for cog in interaction.client.cogs.values():
+                    if hasattr(cog, "_raid_bot") and getattr(cog, "_raid_bot", None):
+                        auth_manager = cog._raid_bot.auth_manager  # type: ignore[union-attr]
+                        break
+                if auth_manager:
+                    button_url = str(auth_manager.generate_discord_button_url(login) or "").strip()
+                elif not _prefer_split_internal_raid_auth_api():
+                    # Legacy fallback: if split mode is not preferred, try internal API if configured.
+                    button_url = str(await _fetch_split_raid_auth_url(int(interaction.user.id)) or "").strip()
+
+            if not button_url:
                 await interaction.response.send_message(
                     "⚠️ Bot nicht bereit – bitte kurz warten und nochmal versuchen.\n"
                     "Alternativ: `/traid` in Discord nutzen.",
@@ -88,7 +203,6 @@ class _RaidAuthGenerateButton(discord.ui.Button):
 
             # generate_discord_button_url liefert einen kurzen Redirect-URL (<512 Zeichen)
             # statt des vollen Twitch-OAuth-URL der das Discord-Limit überschreiten würde.
-            button_url = auth_manager.generate_discord_button_url(login)
             link_view = discord.ui.View(timeout=300)
             link_view.add_item(
                 discord.ui.Button(

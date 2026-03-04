@@ -16,7 +16,10 @@ Features:
 import logging
 from datetime import UTC, datetime
 
-from service.field_crypto import DecryptFailed, get_crypto
+try:
+    from service.field_crypto import DecryptFailed, get_crypto
+except ModuleNotFoundError:  # pragma: no cover - split runtime fallback
+    from ..compat.field_crypto import DecryptFailed, get_crypto
 
 from ..storage import get_conn
 

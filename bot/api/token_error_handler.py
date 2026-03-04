@@ -557,7 +557,7 @@ class TokenErrorHandler:
                 name="Aktion erforderlich",
                 value=(
                     "Der Streamer muss sich **neu autorisieren**, damit der Raid-Bot wieder funktioniert.\n"
-                    "➡️ Verwende `/twitch raid auth` um den Auth-Link zu erhalten."
+                    "➡️ Verwende `/traid`, um den Auth-Link zu erhalten."
                 ),
                 inline=False,
             )
@@ -644,7 +644,7 @@ class TokenErrorHandler:
                 value=(
                     "Klicke auf den Button unten, um einen neuen Auth-Link zu erhalten.\n"
                     "Nach erfolgreicher Autorisierung wird die Streamer-Rolle automatisch wiederhergestellt.\n\n"
-                    "Alternativ: `/twitch raid auth` auf dem Discord-Server nutzen."
+                    "Alternativ: `/traid` auf dem Discord-Server nutzen."
                 ),
                 inline=False,
             )
@@ -877,7 +877,7 @@ class TokenErrorHandler:
                 name="Nächste Schritte",
                 value=(
                     f"Bitte kontaktiere {mention} direkt.\n"
-                    f"Der User kann sich über `/twitch raid auth` neu autorisieren um die Rolle zurückzubekommen."
+                    f"Der User kann sich über `/traid` neu autorisieren, um die Rolle zurückzubekommen."
                 ),
                 inline=False,
             )

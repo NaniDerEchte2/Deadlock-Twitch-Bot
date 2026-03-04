@@ -1,0 +1,95 @@
+# Split Runtime Runbook (Deadlock Twitch Bot)
+
+## Scope
+This runbook installs and operates split runtime services:
+- `twitch-bot-service`: bot runtime, internal API (`127.0.0.1:8776`), private EventSub callback listener (`127.0.0.1:8768`)
+- `twitch-dashboard-service`: standalone dashboard module (`python -m bot.dashboard_service`) on `127.0.0.1:8765`
+
+Public routing is handled by `C:/caddy/Caddyfile.deadlock-twitch-bot`.
+
+## File Locations
+- Caddy config: `C:/caddy/Caddyfile.deadlock-twitch-bot`
+- NSSM install script: `C:/nssm/install-deadlock-twitch-bot-services.ps1`
+- NSSM update script: `C:/nssm/update-deadlock-twitch-bot-services.ps1`
+- Restart dashboard only: `C:/nssm/restart-dashboard-only.ps1`
+- Restart bot only: `C:/nssm/restart-bot-only.ps1`
+- Healthcheck: `C:/nssm/healthcheck-deadlock-twitch-bot.ps1`
+
+## Required Env (Admin PowerShell Session)
+Set one shared token that both services use:
+```powershell
+$env:TWITCH_INTERNAL_API_TOKEN = 'replace-with-strong-random-token'
+```
+Set Twitch OAuth credentials for the standalone dashboard service:
+```powershell
+$env:TWITCH_CLIENT_ID = 'replace-with-twitch-client-id'
+$env:TWITCH_CLIENT_SECRET = 'replace-with-twitch-client-secret'
+```
+Optional (defaults to `https://twitch.earlysalty.com/twitch/auth/callback`):
+```powershell
+$env:TWITCH_DASHBOARD_AUTH_REDIRECT_URI = 'https://twitch.earlysalty.com/twitch/auth/callback'
+```
+Optional: you can override host/port defaults before install/update:
+```powershell
+$env:TWITCH_INTERNAL_API_HOST = '127.0.0.1'
+$env:TWITCH_INTERNAL_API_PORT = '8776'
+$env:TWITCH_INTERNAL_API_BASE_URL = 'http://127.0.0.1:8776'
+```
+
+## Install (Admin PowerShell)
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:/nssm/install-deadlock-twitch-bot-services.ps1
+```
+
+## Update Service Definitions (Admin PowerShell)
+Use this after changing command paths, env vars, ports, or log settings.
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:/nssm/update-deadlock-twitch-bot-services.ps1
+```
+
+## Restart Commands (Admin PowerShell)
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:/nssm/restart-dashboard-only.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File C:/nssm/restart-bot-only.ps1
+```
+
+## EventSub Routing Decision
+- Public `/twitch*` traffic is routed to `twitch-dashboard-service` on `127.0.0.1:8765`.
+- Exact path `/twitch/eventsub/callback` is routed to `twitch-bot-service` on `127.0.0.1:8768`.
+- This is intentional: webhook signature verification and callback handling remain in bot runtime.
+- No conflict: Caddy matches the exact callback path first, then the `/twitch*` matcher.
+
+## Internal API Exposure Policy
+- Internal API lives at `http://127.0.0.1:8776/internal/twitch/v1/*`.
+- It requires `X-Internal-Token` and is intended for local service-to-service traffic only.
+- Caddy does not proxy `/internal/twitch/v1/*` publicly.
+- Keep `127.0.0.1:8766` free for the master admin dashboard service.
+
+## Verification
+1. Service-level healthcheck:
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:/nssm/healthcheck-deadlock-twitch-bot.ps1
+```
+2. Direct local checks:
+```powershell
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8765/twitch | Select-Object StatusCode
+Invoke-WebRequest -UseBasicParsing -Headers @{ 'X-Internal-Token' = $env:TWITCH_INTERNAL_API_TOKEN } http://127.0.0.1:8776/internal/twitch/v1/healthz | Select-Object StatusCode
+Invoke-WebRequest -UseBasicParsing -Method Post http://127.0.0.1:8768/twitch/eventsub/callback -Body '{}' -ContentType 'application/json' -ErrorAction SilentlyContinue | Select-Object StatusCode
+```
+3. Caddy validation/reload (if included by main `C:/caddy/Caddyfile`):
+```powershell
+C:/caddy/caddy.exe validate --config C:/caddy/Caddyfile
+C:/caddy/caddy.exe reload --config C:/caddy/Caddyfile
+```
+
+## Rollback
+1. Restore previous Caddy include file:
+```powershell
+Copy-Item C:/caddy/Caddyfile.deadlock-twitch-bot.bak C:/caddy/Caddyfile.deadlock-twitch-bot -Force
+```
+2. Restore previous NSSM script revisions if you keep backups.
+3. Restart services:
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:/nssm/restart-dashboard-only.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File C:/nssm/restart-bot-only.ps1
+```

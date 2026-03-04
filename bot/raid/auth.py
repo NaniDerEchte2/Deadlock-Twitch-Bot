@@ -151,6 +151,14 @@ class RaidAuthManager:
             from service.field_crypto import get_crypto  # noqa: PLC0415
 
             return get_crypto()
+        except ModuleNotFoundError:
+            try:
+                from ..compat.field_crypto import get_crypto  # noqa: PLC0415
+
+                return get_crypto()
+            except Exception as exc:
+                log.warning("field_crypto fallback nicht verfügbar: %s", exc)
+                return None
         except Exception as exc:
             log.warning("field_crypto nicht verfügbar: %s", exc)
             return None
