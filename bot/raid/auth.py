@@ -12,7 +12,7 @@ import logging
 import os
 import secrets
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode
 
 import aiohttp
@@ -79,6 +79,8 @@ STREAMER_GUILD_ID = _parse_env_int("STREAMER_GUILD_ID", 0)
 FALLBACK_MAIN_GUILD_ID = _parse_env_int("MAIN_GUILD_ID", 0)
 
 log = logging.getLogger("TwitchStreams.RaidManager")
+_OAUTH_STATE_PLATFORM_RAID = "twitch_raid"
+_OAUTH_STATE_TTL_SECONDS = 600
 
 
 def _safe_int(val, default: int = 0) -> int:
@@ -139,6 +141,92 @@ class RaidAuthManager:
         # Basis-URL für Short-Redirect ableiten (z.B. https://raid.earlysalty.com)
         _parts = redirect_uri.split("/twitch/", 1)
         self._base_url: str = _parts[0] if len(_parts) > 1 else ""
+
+    def _persist_state_token(self, state: str, twitch_login: str, created_ts: float) -> None:
+        """Persist OAuth state to shared DB so callback verification works across instances/restarts."""
+        expires_at = datetime.fromtimestamp(created_ts, tz=UTC) + timedelta(
+            seconds=_OAUTH_STATE_TTL_SECONDS
+        )
+        try:
+            with get_conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO oauth_state_tokens
+                        (state_token, platform, streamer_login, redirect_uri, pkce_verifier, expires_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (state_token) DO UPDATE SET
+                        platform = excluded.platform,
+                        streamer_login = excluded.streamer_login,
+                        redirect_uri = excluded.redirect_uri,
+                        pkce_verifier = excluded.pkce_verifier,
+                        expires_at = excluded.expires_at
+                    """,
+                    (
+                        state,
+                        _OAUTH_STATE_PLATFORM_RAID,
+                        twitch_login,
+                        self.redirect_uri,
+                        None,
+                        expires_at.isoformat(),
+                    ),
+                )
+        except Exception:
+            log.exception(
+                "Failed to persist raid oauth state for %s", _mask_log_identifier(twitch_login)
+            )
+
+    def _lookup_state_token(self, state: str) -> str | None:
+        """Look up a still-valid raid OAuth state without consuming it."""
+        try:
+            with get_conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT streamer_login
+                    FROM oauth_state_tokens
+                    WHERE state_token = ?
+                      AND platform = ?
+                      AND expires_at > ?
+                    LIMIT 1
+                    """,
+                    (
+                        state,
+                        _OAUTH_STATE_PLATFORM_RAID,
+                        datetime.now(UTC).isoformat(),
+                    ),
+                ).fetchone()
+        except Exception:
+            log.exception("Failed to lookup raid oauth state")
+            return None
+
+        if not row:
+            return None
+        return str(row["streamer_login"] if hasattr(row, "keys") else row[0] or "").strip() or None
+
+    def _consume_state_token(self, state: str) -> str | None:
+        """Atomically consume a still-valid raid OAuth state from shared DB."""
+        try:
+            with get_conn() as conn:
+                row = conn.execute(
+                    """
+                    DELETE FROM oauth_state_tokens
+                    WHERE state_token = ?
+                      AND platform = ?
+                      AND expires_at > ?
+                    RETURNING streamer_login
+                    """,
+                    (
+                        state,
+                        _OAUTH_STATE_PLATFORM_RAID,
+                        datetime.now(UTC).isoformat(),
+                    ),
+                ).fetchone()
+        except Exception:
+            log.exception("Failed to consume raid oauth state")
+            return None
+
+        if not row:
+            return None
+        return str(row["streamer_login"] if hasattr(row, "keys") else row[0] or "").strip() or None
 
     # ------------------------------------------------------------------
     # Encryption helpers (field-level AES-256-GCM)
@@ -274,7 +362,9 @@ class RaidAuthManager:
     def generate_auth_url(self, twitch_login: str) -> str:
         """Generiert eine OAuth-URL für Streamer-Autorisierung."""
         state = secrets.token_urlsafe(16)
-        self._state_tokens[state] = (twitch_login, time.time())
+        ts = time.time()
+        self._state_tokens[state] = (twitch_login, ts)
+        self._persist_state_token(state, twitch_login, ts)
 
         params = {
             "client_id": self.client_id,
@@ -297,6 +387,7 @@ class RaidAuthManager:
         state = secrets.token_urlsafe(16)
         ts = time.time()
         self._state_tokens[state] = (twitch_login, ts)
+        self._persist_state_token(state, twitch_login, ts)
 
         params = {
             "client_id": self.client_id,
@@ -318,24 +409,45 @@ class RaidAuthManager:
         """Gibt den gespeicherten vollen OAuth-URL für einen State zurück (einmalig)."""
         # Wir löschen den Eintrag NICHT hier – verify_state macht das beim echten Callback.
         entry = self._pending_auth_urls.get(state)
-        if not entry:
-            return None
-        # Prüfen ob der State noch gültig ist (10 Min TTL)
         token_data = self._state_tokens.get(state)
-        if not token_data or time.time() - token_data[1] > 600:
+        if entry and token_data and time.time() - token_data[1] <= _OAUTH_STATE_TTL_SECONDS:
+            return entry
+
+        # Fallback für split/multi-instance/restart:
+        # wenn der state in DB noch gültig ist, den vollen OAuth-URL on-the-fly rekonstruieren.
+        persisted_login = self._lookup_state_token(state)
+        if not persisted_login:
             self._pending_auth_urls.pop(state, None)
             return None
-        return entry
+
+        params = {
+            "client_id": self.client_id,
+            "redirect_uri": self.redirect_uri,
+            "response_type": "code",
+            "scope": " ".join(RAID_SCOPES),
+            "state": state,
+            "force_verify": "true",
+        }
+        full_url = f"{TWITCH_AUTHORIZE_URL}?{urlencode(params)}"
+        self._pending_auth_urls[state] = full_url
+        return full_url
 
     def verify_state(self, state: str) -> str | None:
         """Verifiziert State-Token und gibt den zugehörigen Login zurück (max 10 Min alt)."""
         self._pending_auth_urls.pop(state, None)  # Cleanup Short-URL Eintrag
+        # Primär aus Shared-DB konsumieren (robust bei split runtime / mehreren Instanzen).
+        login_from_db = self._consume_state_token(state)
+        if login_from_db:
+            self._state_tokens.pop(state, None)
+            return login_from_db
+
+        # Fallback: lokaler RAM-State (wenn DB gerade nicht erreichbar war).
         data = self._state_tokens.pop(state, None)
         if not data:
             return None
 
         login, timestamp = data
-        if time.time() - timestamp > 600:  # 10 Minuten TTL
+        if time.time() - timestamp > _OAUTH_STATE_TTL_SECONDS:
             log.warning("OAuth state for %s expired", login)
             return None
 
@@ -344,10 +456,22 @@ class RaidAuthManager:
     def cleanup_states(self) -> None:
         """Entfernt abgelaufene State-Tokens aus dem Speicher."""
         now = time.time()
-        expired = [s for s, (_, ts) in self._state_tokens.items() if now - ts > 600]
+        expired = [s for s, (_, ts) in self._state_tokens.items() if now - ts > _OAUTH_STATE_TTL_SECONDS]
         for s in expired:
             del self._state_tokens[s]
             self._pending_auth_urls.pop(s, None)
+        try:
+            with get_conn() as conn:
+                conn.execute(
+                    """
+                    DELETE FROM oauth_state_tokens
+                    WHERE platform = ?
+                      AND expires_at <= ?
+                    """,
+                    (_OAUTH_STATE_PLATFORM_RAID, datetime.now(UTC).isoformat()),
+                )
+        except Exception:
+            log.exception("Failed to cleanup persisted raid oauth states")
         if expired:
             log.debug("Cleaned up %d expired auth states", len(expired))
 
