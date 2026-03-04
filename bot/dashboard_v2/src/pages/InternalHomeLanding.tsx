@@ -284,18 +284,40 @@ export function InternalHomeLanding() {
   const greeting = home.greeting?.trim() || `Willkommen zurück, ${displayName}`;
   const grantedScopes = home.oauth?.grantedScopes ?? [];
   const missingScopes = home.oauth?.missingScopes ?? [];
-  const hasScopeIssue = missingScopes.length > 0 || home.oauth?.status === 'partial' || home.oauth?.status === 'missing';
+  const missingScopeCount = missingScopes.length;
+  const hasScopeIssue = missingScopeCount > 0 || home.oauth?.status === 'partial' || home.oauth?.status === 'missing';
   const oauthStatus = home.oauth?.status || (home.oauth?.connected ? 'connected' : hasScopeIssue ? 'missing' : 'partial');
-  const oauthStatusText = oauthStatus === 'connected' ? 'OAuth verbunden' : oauthStatus === 'error' ? 'OAuth Fehler' : hasScopeIssue ? 'Scopes fehlen' : 'OAuth prüfen';
-  const oauthStatusClass = oauthStatus === 'connected' ? 'border-success/35 bg-success/10 text-success' : oauthStatus === 'error' || hasScopeIssue ? 'border-error/35 bg-error/10 text-error' : 'border-accent/35 bg-accent/10 text-accent';
+  const oauthBannerText = oauthStatus === 'connected' ? 'OAuth verbunden' : oauthStatus === 'error' ? 'OAuth Fehler' : hasScopeIssue ? 'Scopes fehlen' : 'OAuth prüfen';
+  const oauthBannerClass = oauthStatus === 'connected' ? 'border-success/35 bg-success/10 text-success' : oauthStatus === 'error' || hasScopeIssue ? 'border-error/35 bg-error/10 text-error' : 'border-accent/35 bg-accent/10 text-accent';
   const oauthFallbackUrl = '/twitch/auth/login?next=%2Ftwitch%2Fdashboard';
+  const discordConnectFallbackUrl = '/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard';
   const reconnectUrl = home.oauth?.reconnectUrl || oauthFallbackUrl;
   const profileUrl = home.oauth?.profileUrl || reconnectUrl;
   const needsOauthReconnect = oauthStatus !== 'connected' || hasScopeIssue;
   const oauthQuickHref = needsOauthReconnect ? reconnectUrl : profileUrl;
+  const oauthCardStatusText = !needsOauthReconnect ? 'Verbunden' : missingScopeCount > 1 ? 'Re-Auth nötig' : 'Unvollständig';
+  const oauthCardStatusClass = !needsOauthReconnect ? 'text-success' : missingScopeCount === 1 ? 'text-error' : 'text-warning';
+  const oauthCardHintText = !needsOauthReconnect
+    ? 'Verbindung steht und ist nutzbar.'
+    : missingScopeCount > 1
+      ? `${missingScopeCount} Scopes fehlen. Bitte neu autorisieren.`
+      : '1 Scope fehlt. Kritisch unvollständig.';
+  const scopeCardStatusText = missingScopeCount === 0 ? 'Vollständig' : missingScopeCount === 1 ? 'Kritisch unvollständig' : 'Re-Auth nötig';
+  const scopeCardStatusClass = missingScopeCount === 0 ? 'text-success' : missingScopeCount === 1 ? 'text-error' : 'text-warning';
+  const scopeCardHintText = missingScopeCount === 0
+    ? `${grantedScopes.length} erwartete Scopes aktiv.`
+    : missingScopeCount === 1
+      ? 'Genau 1 Scope fehlt.'
+      : `${missingScopeCount} Scopes fehlen.`;
+  const discordConnected = Boolean(home.discord?.connected);
+  const discordConnectUrl = home.discord?.connectUrl || discordConnectFallbackUrl;
+  const discordCardStatusText = discordConnected ? 'Verbunden' : 'Nicht verbunden';
+  const discordCardStatusClass = discordConnected ? 'text-success' : 'text-warning';
+  const discordCardHintText = discordConnected
+    ? 'Discord-Verknüpfung erkannt.'
+    : 'Noch kein Discord-Profil verknüpft.';
   const liveAnnouncementTarget = normalizedSelectedStreamer || twitchLogin;
   const liveAnnouncementHref = liveAnnouncementTarget ? `/twitch/live-announcement?streamer=${encodeURIComponent(liveAnnouncementTarget)}` : '/twitch/live-announcement';
-  const raidStatusText = home.raid?.statusText?.trim() || (home.raid?.active === false ? 'Auto-Raid inaktiv' : 'Auto-Raid aktiv');
   const rawActionLog = home.actionLog ?? [];
   const activityFeedNote = rawActionLog.find((entry) => String(entry.id || '').trim() === 'impact-note')?.summary?.trim() || '';
   const channelScopeLogin = (normalizedSelectedStreamer || twitchLogin || '').trim().toLowerCase();
@@ -304,12 +326,49 @@ export function InternalHomeLanding() {
     .filter((entry) => isVisibleChannelAction(entry, channelScopeLogin));
   const actionLog = prioritizeActionLog(baseActionLog, 8);
   const changelogEntries = (home.changelog?.entries ?? []).slice(0, 3);
-
   const quickActions: Array<{ id: string; title: string; description: string; href: string; icon: LucideIcon }> = [
-    { id: 'oauth', title: 'OAuth & Profil', description: needsOauthReconnect ? 'Fehlende Scopes direkt neu autorisieren' : 'Profil, Verknuepfung und Scopes pruefen', href: oauthQuickHref, icon: ShieldCheck },
-    { id: 'analysis-v2', title: 'Analytics v2', description: 'Vollstaendiges Analyse-Dashboard mit allen Tabs', href: '/twitch/dashboard-v2', icon: BarChart3 },
-    { id: 'live-announcement', title: 'Live Message Builder', description: 'Go-Live Text, Embed und Buttons konfigurieren', href: liveAnnouncementHref, icon: RadioTower },
-    { id: 'billing', title: 'Abo / Billing', description: 'Subscription, Rechnungen und Checkout verwalten', href: '/twitch/abbo', icon: Gauge },
+    {
+      id: 'oauth',
+      title: 'OAuth & Profil',
+      description: needsOauthReconnect ? 'Fehlende Scopes direkt neu autorisieren' : 'Profil, Verknuepfung und Scopes pruefen',
+      href: oauthQuickHref,
+      icon: ShieldCheck,
+    },
+    {
+      id: 'analysis-v2',
+      title: 'Analytics v2',
+      description: 'Vollstaendiges Analyse-Dashboard mit allen Tabs',
+      href: '/twitch/dashboard-v2',
+      icon: BarChart3,
+    },
+    {
+      id: 'live-announcement',
+      title: 'Live Message Builder',
+      description: 'Go-Live Text, Embed und Buttons konfigurieren',
+      href: liveAnnouncementHref,
+      icon: RadioTower,
+    },
+    {
+      id: 'billing',
+      title: 'Abo / Billing',
+      description: 'Subscription, Rechnungen und Checkout verwalten',
+      href: '/twitch/abbo',
+      icon: Gauge,
+    },
+    {
+      id: 'oauth-reauth',
+      title: 'Twitch neu autorisieren',
+      description: 'Direkter Re-Auth-Link für fehlende Scopes.',
+      href: reconnectUrl,
+      icon: ShieldAlert,
+    },
+    {
+      id: 'discord-connect',
+      title: 'Discord verbinden',
+      description: discordConnected ? 'Discord erneut verbinden oder Status pruefen.' : 'Discord-Verknüpfung jetzt starten.',
+      href: discordConnectUrl,
+      icon: CheckCircle2,
+    },
   ];
 
   if (isLoading) {
@@ -366,9 +425,9 @@ export function InternalHomeLanding() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                <span className={`internal-home-pill ${oauthStatusClass}`}>
+                <span className={`internal-home-pill ${oauthBannerClass}`}>
                   {oauthStatus === 'connected' ? <ShieldCheck className="h-3.5 w-3.5" /> : <ShieldAlert className="h-3.5 w-3.5" />}
-                  {oauthStatusText}
+                  {oauthBannerText}
                 </span>
                 <span className="internal-home-pill border-border/80 bg-background/70 text-text-secondary">
                   <Twitch className="h-3.5 w-3.5 text-primary" />
@@ -423,33 +482,27 @@ export function InternalHomeLanding() {
 
         <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 internal-home-section" data-delay="1">
           <article className="internal-home-status-card rounded-xl border border-border bg-background/60 p-4">
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">OAuth</div>
-            <p className="mt-2 text-base font-semibold text-white">{oauthStatusText}</p>
-            <p className="mt-1 text-xs text-text-secondary">{needsOauthReconnect ? 'Scopes fehlen. Bitte Verbindung erneuern.' : 'Verbindung steht und ist nutzbar.'}</p>
-            <a href={oauthQuickHref} className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-primary transition-colors hover:text-white">
-              {needsOauthReconnect ? 'OAuth neu autorisieren' : 'OAuth/Profil öffnen'}
-              <ArrowRight className="h-3.5 w-3.5" />
-            </a>
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">OAuth Verbindung</div>
+            <p className={`mt-2 text-base font-semibold ${oauthCardStatusClass}`}>{oauthCardStatusText}</p>
+            <p className="mt-1 text-xs text-text-secondary">{oauthCardHintText}</p>
           </article>
 
           <article className="internal-home-status-card rounded-xl border border-border bg-background/60 p-4">
             <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">Scopes</div>
-            <p className={`mt-2 text-base font-semibold ${hasScopeIssue ? 'text-error' : 'text-white'}`}>
-              {hasScopeIssue ? `${missingScopes.length || 1} offen` : `${grantedScopes.length} ok`}
-            </p>
-            <p className="mt-1 text-xs text-text-secondary">{hasScopeIssue ? 'Ein oder mehrere Berechtigungen fehlen.' : 'Alle erwarteten Berechtigungen aktiv.'}</p>
+            <p className={`mt-2 text-base font-semibold ${scopeCardStatusClass}`}>{scopeCardStatusText}</p>
+            <p className="mt-1 text-xs text-text-secondary">{scopeCardHintText}</p>
           </article>
 
           <article className="internal-home-status-card rounded-xl border border-border bg-background/60 p-4">
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">Twitch Login</div>
-            <p className="mt-2 text-base font-semibold text-white">{twitchLogin ? `@${twitchLogin}` : 'Nicht verbunden'}</p>
-            <p className="mt-1 text-xs text-text-secondary">{home.displayName?.trim() || 'Profilname wird nach OAuth-Verknüpfung angezeigt.'}</p>
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">Discord verbunden</div>
+            <p className={`mt-2 text-base font-semibold ${discordCardStatusClass}`}>{discordCardStatusText}</p>
+            <p className="mt-1 text-xs text-text-secondary">{discordCardHintText}</p>
           </article>
 
           <article className="internal-home-status-card rounded-xl border border-border bg-background/60 p-4">
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">Ops Status</div>
-            <p className="mt-2 text-base font-semibold text-white">{raidStatusText}</p>
-            <p className="mt-1 text-xs text-text-secondary">Letzter Refresh: {formatDateTime(home.generatedAt)}</p>
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">Abo</div>
+            <p className="mt-2 text-base font-semibold text-white">Free</p>
+            <p className="mt-1 text-xs text-text-secondary">Platzhalter für spätere Abo-Details.</p>
           </article>
         </section>
 
@@ -459,7 +512,7 @@ export function InternalHomeLanding() {
               <h2 className="text-lg font-bold text-white">Schnellzugriff</h2>
               <p className="text-xs text-text-secondary">Direkte Ziele fuer Navigation, ohne in Details zu versinken.</p>
             </div>
-            <span className="text-xs text-text-secondary">4 Kernbereiche</span>
+            <span className="text-xs text-text-secondary">{quickActions.length} Aktionen</span>
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

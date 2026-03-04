@@ -1,4 +1,11 @@
 export const DISCORD_INVITE_URL = "https://dc.earlysalty.com";
 
-export const DISCORD_OAUTH_URL =
-  "https://admin.earlysalty.de/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard-v2";
+export const TWITCH_BOT_AUTH_START_URL =
+  "https://raid.earlysalty.com/twitch/raid/auth";
+
+export function buildTwitchBotAuthUrl(): string {
+  const url = new URL(TWITCH_BOT_AUTH_START_URL);
+  // Unique URL per click avoids stale/cached redirects and forces fresh OAuth state.
+  url.searchParams.set("ts", Date.now().toString());
+  return url.toString();
+}

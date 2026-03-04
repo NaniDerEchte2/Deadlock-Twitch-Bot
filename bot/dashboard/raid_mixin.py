@@ -387,24 +387,19 @@ new Chart(ctx, {{
                 self._require_token(request)
             login = requested_login
         elif not login:
-            # Reconnect entrypoint for regular streamers: force Twitch dashboard login,
-            # not Discord admin auth.
-            oauth_ready_checker = getattr(self, "_is_twitch_oauth_ready", None)
-            if callable(oauth_ready_checker) and not oauth_ready_checker():
-                return web.Response(
-                    text=(
-                        "Twitch OAuth ist aktuell nicht konfiguriert oder die Redirect-URI ist ungültig. "
-                        "Bitte OAuth-Einstellungen prüfen."
-                    ),
-                    status=503,
-                )
-            raise web.HTTPFound("/twitch/auth/login?next=%2Ftwitch%2Fraid%2Fauth")
+            # Public onboarding entrypoint: build a fresh Twitch OAuth URL directly,
+            # so domains that only expose raid routes do not depend on /twitch/auth/login.
+            login = "public_onboarding"
 
         if not login:
             return web.Response(text="Missing login parameter", status=400)
 
         auth_manager = getattr(getattr(self, "_raid_bot", None), "auth_manager", None)
         if auth_manager:
+            client_id = str(getattr(auth_manager, "client_id", "") or "").strip()
+            redirect_uri = str(getattr(auth_manager, "redirect_uri", "") or "").strip()
+            if not client_id or not redirect_uri:
+                return web.Response(text="Raid bot OAuth is not configured", status=503)
             auth_url = str(auth_manager.generate_auth_url(login))
         else:
             raid_auth_url_cb = getattr(self, "_raid_auth_url_cb", None)

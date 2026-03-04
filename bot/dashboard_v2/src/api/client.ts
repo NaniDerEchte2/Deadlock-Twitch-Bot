@@ -47,6 +47,7 @@ import type {
 const API_BASE = '/twitch/api/v2';
 const INTERNAL_REDIRECT_PREFIX = '/twitch';
 const INTERNAL_HOME_LOGIN_FALLBACK = '/twitch/auth/login?next=%2Ftwitch%2Fdashboard';
+const INTERNAL_HOME_DISCORD_CONNECT_FALLBACK = '/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard';
 const DASHBOARD_V2_LOGIN_FALLBACK = '/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2';
 const INTERNAL_HOME_BLOCKED_OAUTH_PATHS = ['/twitch/raid/requirements'] as const;
 
@@ -323,6 +324,13 @@ export interface InternalHomeOAuthStatus {
   lastCheckedAt?: string | null;
 }
 
+export interface InternalHomeDiscordStatus {
+  connected?: boolean;
+  status?: 'connected' | 'missing' | 'error' | string;
+  connectUrl?: string | null;
+  lastCheckedAt?: string | null;
+}
+
 export interface InternalHomeRaidStatus {
   active?: boolean;
   statusText?: string | null;
@@ -390,6 +398,7 @@ export interface InternalHomeData {
   displayName?: string | null;
   loginUrl?: string | null;
   oauth?: InternalHomeOAuthStatus | null;
+  discord?: InternalHomeDiscordStatus | null;
   raid?: InternalHomeRaidStatus | null;
   kpis30d?: InternalHomeKpis30d | null;
   recentStreams?: InternalHomeSession[] | null;
@@ -406,6 +415,13 @@ interface InternalHomeRawOAuthStatus {
   missing_scopes?: string[];
   reconnect_url?: string | null;
   profile_url?: string | null;
+  last_checked_at?: string | null;
+}
+
+interface InternalHomeRawDiscordStatus {
+  connected?: boolean;
+  status?: string;
+  connect_url?: string | null;
   last_checked_at?: string | null;
 }
 
@@ -469,6 +485,7 @@ interface InternalHomeRawResponse {
   profile?: InternalHomeRawProfile | null;
   status?: {
     oauth?: InternalHomeRawOAuthStatus | null;
+    discord?: InternalHomeRawDiscordStatus | null;
     raid_status?: InternalHomeRawRaidStatus | null;
   } | null;
   kpis?: InternalHomeRawKpis | null;
@@ -488,6 +505,7 @@ interface InternalHomeRawResponse {
   links?: {
     oauth_reconnect?: string | null;
     profile_status?: string | null;
+    discord_connect?: string | null;
   } | null;
   generated_at?: string | null;
 }
@@ -628,6 +646,7 @@ export async function fetchInternalHome(streamer?: string | null): Promise<Inter
   const profile = raw.profile || {};
   const status = raw.status || {};
   const oauth = status.oauth || {};
+  const discord = status.discord || {};
   const raidStatus = status.raid_status || {};
   const kpis = raw.kpis || {};
   const links = raw.links || {};
@@ -645,6 +664,13 @@ export async function fetchInternalHome(streamer?: string | null): Promise<Inter
   const profileUrl = missingScopes.length > 0
     ? reconnectUrl
     : sanitizeInternalHomeOauthUrl(profileStatusUrl, INTERNAL_HOME_LOGIN_FALLBACK);
+  const discordConnected = Boolean(discord.connected);
+  const discordStatusRaw = String(discord.status || '').trim().toLowerCase();
+  const discordStatus = discordStatusRaw || (discordConnected ? 'connected' : 'missing');
+  const discordConnectUrl = sanitizeInternalRedirectUrl(
+    discord.connect_url || links.discord_connect || null,
+    INTERNAL_HOME_DISCORD_CONNECT_FALLBACK
+  );
 
   const impactEvents = (raw.bot_impact?.events || []).map(mapImpactEntry);
   const activityEvents = (raw.bot_activity?.events || []).map(mapImpactEntry);
@@ -692,6 +718,12 @@ export async function fetchInternalHome(streamer?: string | null): Promise<Inter
       reconnectUrl,
       profileUrl,
       lastCheckedAt: oauth.last_checked_at || raw.generated_at || null,
+    },
+    discord: {
+      connected: discordConnected,
+      status: discordStatus,
+      connectUrl: discordConnectUrl,
+      lastCheckedAt: discord.last_checked_at || raw.generated_at || null,
     },
     raid: {
       active: String(raidStatus.state || '').toLowerCase() === 'active',

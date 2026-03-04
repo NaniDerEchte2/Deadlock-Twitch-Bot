@@ -28,6 +28,7 @@ from .api_viewers import _AnalyticsViewersMixin
 
 log = logging.getLogger("TwitchStreams.AnalyticsV2")
 INTERNAL_HOME_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard"
+INTERNAL_HOME_DISCORD_CONNECT_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard"
 DASHBOARD_V2_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
 
 # Twitch logins that receive admin-level access (same as Discord admin / localhost)
@@ -1174,6 +1175,7 @@ class AnalyticsV2Mixin(
         granted_scopes: list[str] = []
         missing_scopes: list[str] = []
         oauth_status = "missing"
+        discord_connected = False
         recent_streams: list[dict[str, Any]] = []
         raid_events: list[dict[str, Any]] = []
         autoban_events: list[dict[str, Any]] = []
@@ -1183,7 +1185,14 @@ class AnalyticsV2Mixin(
         with storage.get_conn() as conn:
             identity_row = conn.execute(
                 """
-                SELECT LOWER(twitch_login), COALESCE(twitch_user_id, '')
+                SELECT
+                    LOWER(twitch_login),
+                    COALESCE(twitch_user_id, ''),
+                    CASE
+                        WHEN COALESCE(is_on_discord, 0) = 1 THEN 1
+                        WHEN COALESCE(discord_user_id, '') <> '' THEN 1
+                        ELSE 0
+                    END AS discord_connected
                 FROM twitch_streamers
                 WHERE (COALESCE(?, '') != '' AND LOWER(twitch_login) = ?)
                    OR (COALESCE(?, '') != '' AND twitch_user_id = ?)
@@ -1205,6 +1214,7 @@ class AnalyticsV2Mixin(
             if identity_row:
                 resolved_login = str(identity_row[0] or resolved_login or "").strip().lower()
                 resolved_user_id = str(identity_row[1] or resolved_user_id or "").strip()
+                discord_connected = bool(identity_row[2])
 
             if resolved_login:
                 oauth_row = conn.execute(
@@ -1435,7 +1445,13 @@ class AnalyticsV2Mixin(
                     "granted_scopes": granted_scopes,
                     "missing_scopes": missing_scopes,
                     "reconnect_url": oauth_reconnect_url,
-                    "profile_url": "/twitch/dashboard-v2",
+                    "profile_url": "/twitch/dashboard",
+                    "last_checked_at": generated_at,
+                },
+                "discord": {
+                    "connected": discord_connected,
+                    "status": "connected" if discord_connected else "missing",
+                    "connect_url": INTERNAL_HOME_DISCORD_CONNECT_URL,
                     "last_checked_at": generated_at,
                 },
                 "raid_status": {
@@ -1473,7 +1489,8 @@ class AnalyticsV2Mixin(
                 "raid_requirements": "/twitch/raid/requirements",
                 "billing": "/twitch/abbo",
                 "oauth_reconnect": oauth_reconnect_url,
-                "profile_status": "/twitch/dashboard-v2",
+                "profile_status": "/twitch/dashboard",
+                "discord_connect": INTERNAL_HOME_DISCORD_CONNECT_URL,
                 "internal_home_api": f"/twitch/api/v2/internal-home?{urlencode({'days': days})}",
                 "overview_api": f"/twitch/api/v2/overview?{urlencode(overview_query)}",
             },
