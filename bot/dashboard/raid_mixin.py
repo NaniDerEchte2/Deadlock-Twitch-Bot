@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import html
+import os
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 import discord
@@ -15,6 +17,7 @@ from ..core.constants import log
 from ..raid.views import RaidAuthGenerateView, build_raid_requirements_embed
 
 TWITCH_HELIX_USERS_URL = "https://api.twitch.tv/helix/users"
+DEFAULT_RAID_OAUTH_SUCCESS_REDIRECT_URL = "https://twitch.earlysalty.com/twitch/dashboard"
 
 
 class _DashboardRaidMixin:
@@ -358,6 +361,32 @@ new Chart(ctx, {{
 </script>
 </body>
 </html>"""
+
+    @staticmethod
+    def _raid_oauth_success_redirect_url() -> str:
+        configured = (os.getenv("TWITCH_RAID_SUCCESS_REDIRECT_URL") or "").strip()
+        candidate = configured or DEFAULT_RAID_OAUTH_SUCCESS_REDIRECT_URL
+        fallback = DEFAULT_RAID_OAUTH_SUCCESS_REDIRECT_URL
+
+        try:
+            parts = urlsplit(candidate)
+        except Exception:
+            return fallback
+
+        if parts.username or parts.password:
+            return fallback
+
+        scheme = (parts.scheme or "").strip().lower()
+        host = (parts.hostname or "").strip().lower()
+        if scheme not in {"https", "http"}:
+            return fallback
+        if not host:
+            return fallback
+        if scheme == "http" and host not in {"127.0.0.1", "localhost", "::1"}:
+            return fallback
+
+        path = parts.path or "/"
+        return urlunsplit((scheme, parts.netloc, path, parts.query, ""))
 
     # ------------------------------------------------------------------ #
     # Raid routes                                                          #
@@ -838,14 +867,9 @@ new Chart(ctx, {{
                 )
 
             log.info("Raid auth successful for %s", twitch_login)
-            success_html = (
-                "<p>Der Raid-Bot wurde erfolgreich autorisiert.</p>"
-                "<p>Du kannst dieses Fenster jetzt schließen.</p>"
-            )
-            return web.Response(
-                text=self._render_oauth_page("Autorisierung erfolgreich", success_html),
-                content_type="text/html",
-            )
+            raise web.HTTPFound(location=self._raid_oauth_success_redirect_url())
+        except web.HTTPException:
+            raise
         except Exception:
             log.exception("Raid OAuth callback failed for state login=%s", login)
             return web.Response(

@@ -1,0 +1,112 @@
+import os
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from aiohttp import web
+
+from bot.dashboard.raid_mixin import (
+    DEFAULT_RAID_OAUTH_SUCCESS_REDIRECT_URL,
+    _DashboardRaidMixin,
+)
+
+
+class _FakeUsersResponse:
+    def __init__(self, payload: dict):
+        self.status = 200
+        self._payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def text(self) -> str:
+        return ""
+
+    async def json(self) -> dict:
+        return self._payload
+
+
+class _FakeSession:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def get(self, *_args, **_kwargs):
+        return _FakeUsersResponse(self._payload)
+
+
+class _FakeAuthManager:
+    client_id = "client-id"
+    redirect_uri = "https://raid.earlysalty.com/twitch/raid/callback"
+
+    def verify_state(self, _state: str) -> str:
+        return "discord:123456789"
+
+    async def exchange_code_for_token(self, _code: str, _session) -> dict:
+        return {
+            "access_token": "access-token",
+            "refresh_token": "refresh-token",
+            "expires_in": 3600,
+            "scope": [],
+        }
+
+    def save_auth(self, **_kwargs) -> None:
+        return None
+
+
+class _DummyRaidCallback(_DashboardRaidMixin):
+    def __init__(self) -> None:
+        self._raid_bot = SimpleNamespace(
+            auth_manager=_FakeAuthManager(),
+            session=_FakeSession(payload={"data": [{"id": "1001", "login": "partner_one"}]}),
+        )
+
+    @staticmethod
+    def _render_oauth_page(title: str, body_html: str) -> str:
+        return f"{title}: {body_html}"
+
+
+class RaidOAuthSuccessRedirectTests(unittest.IsolatedAsyncioTestCase):
+    def test_success_redirect_default(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            self.assertEqual(
+                _DashboardRaidMixin._raid_oauth_success_redirect_url(),
+                DEFAULT_RAID_OAUTH_SUCCESS_REDIRECT_URL,
+            )
+
+    def test_success_redirect_env_override_https(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"TWITCH_RAID_SUCCESS_REDIRECT_URL": "https://dashboard.example/twitch/dashboard"},
+            clear=False,
+        ):
+            self.assertEqual(
+                _DashboardRaidMixin._raid_oauth_success_redirect_url(),
+                "https://dashboard.example/twitch/dashboard",
+            )
+
+    def test_success_redirect_rejects_untrusted_http_host(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"TWITCH_RAID_SUCCESS_REDIRECT_URL": "http://evil.example/twitch/dashboard"},
+            clear=False,
+        ):
+            self.assertEqual(
+                _DashboardRaidMixin._raid_oauth_success_redirect_url(),
+                DEFAULT_RAID_OAUTH_SUCCESS_REDIRECT_URL,
+            )
+
+    async def test_raid_callback_redirects_to_dashboard_on_success(self) -> None:
+        handler = _DummyRaidCallback()
+        request = SimpleNamespace(query={"code": "oauth-code", "state": "valid-state"})
+
+        with self.assertRaises(web.HTTPFound) as ctx:
+            await handler.raid_oauth_callback(request)
+
+        self.assertEqual(ctx.exception.location, DEFAULT_RAID_OAUTH_SUCCESS_REDIRECT_URL)
+
+
+if __name__ == "__main__":
+    unittest.main()
