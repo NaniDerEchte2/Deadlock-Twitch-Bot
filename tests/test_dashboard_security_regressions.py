@@ -180,6 +180,8 @@ class _DummyRaidAuthRoute(_DashboardRaidMixin):
         self.require_token_calls = 0
         self._raid_bot = SimpleNamespace(
             auth_manager=SimpleNamespace(
+                client_id="raid-client-id",
+                redirect_uri="https://twitch.earlysalty.com/twitch/raid/callback",
                 generate_auth_url=lambda login: f"https://auth.example/{login}"
             )
         )
@@ -584,6 +586,36 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handler._check_v2_auth(request_admin_header))
         self.assertEqual(handler._get_auth_level(request_admin_header), "admin")
 
+    def test_api_v2_auth_rejects_partner_token_on_admin_host(self) -> None:
+        handler = _DummyV2HeaderOnlyAuth()
+        request_partner_admin_host = SimpleNamespace(
+            path="/twitch/api/v2/overview",
+            headers={"Host": "admin.earlysalty.de", "X-Partner-Token": "partner-secret"},
+            query={},
+            host="admin.earlysalty.de",
+            remote="203.0.113.10",
+            transport=None,
+            rel_url=SimpleNamespace(path_qs="/twitch/api/v2/overview"),
+        )
+        request_admin_admin_host = SimpleNamespace(
+            path="/twitch/api/v2/overview",
+            headers={"Host": "admin.earlysalty.de", "X-Admin-Token": "admin-secret"},
+            query={},
+            host="admin.earlysalty.de",
+            remote="203.0.113.10",
+            transport=None,
+            rel_url=SimpleNamespace(path_qs="/twitch/api/v2/overview"),
+        )
+
+        self.assertFalse(handler._check_v2_auth(request_partner_admin_host))
+        with self.assertRaises(web.HTTPForbidden) as partner_ctx:
+            handler._require_v2_auth(request_partner_admin_host)
+        partner_payload = json.loads(partner_ctx.exception.text)
+        self.assertEqual(partner_payload.get("error"), "admin_required")
+        self.assertEqual(partner_payload.get("required"), "admin")
+
+        self.assertTrue(handler._check_v2_auth(request_admin_admin_host))
+
     def test_admin_require_token_rejects_header_token_without_discord_session(self) -> None:
         class _Gate:
             _discord_admin_required = True
@@ -713,17 +745,17 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(web.HTTPFound) as ctx:
             await handler.raid_auth_start(request)
-        self.assertEqual(ctx.exception.location, "/twitch/auth/login?next=%2Ftwitch%2Fraid%2Fauth")
+        self.assertEqual(ctx.exception.location, "https://auth.example/public_onboarding")
         self.assertEqual(handler.require_token_calls, 0)
 
     async def test_raid_auth_start_without_session_returns_503_when_oauth_missing(self) -> None:
         handler = _DummyRaidAuthRoute()
-        handler._is_twitch_oauth_ready = lambda: False
+        handler._raid_bot.auth_manager.client_id = ""
         request = SimpleNamespace(query={})
 
         response = await handler.raid_auth_start(request)
         self.assertEqual(response.status, 503)
-        self.assertIn("Twitch OAuth ist aktuell nicht konfiguriert", response.text)
+        self.assertIn("Raid bot OAuth is not configured", response.text)
         self.assertEqual(handler.require_token_calls, 0)
 
     def test_canonical_post_login_destination_keeps_raid_auth_path(self) -> None:
@@ -946,6 +978,75 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(web.HTTPFound) as ctx:
             await handler._serve_dashboard(request)
         self.assertEqual(ctx.exception.location, "/twitch/auth/login?next=%2Ftwitch%2Fdashboard")
+
+    async def test_dashboard_route_on_admin_host_returns_404_without_auth(self) -> None:
+        handler = DashboardV2Server(
+            app_token=None,
+            noauth=False,
+            partner_token=None,
+            oauth_client_id=None,
+            oauth_client_secret=None,
+            oauth_redirect_uri="https://twitch.earlysalty.com/twitch/auth/callback",
+        )
+        request = SimpleNamespace(
+            path="/twitch/dashboard",
+            headers={"Host": "admin.earlysalty.de"},
+            host="admin.earlysalty.de",
+            remote="203.0.113.10",
+            transport=None,
+        )
+
+        response = await handler._serve_dashboard(request)
+        self.assertEqual(response.status, 404)
+
+    async def test_dashboard_route_on_admin_host_returns_404_for_partner(self) -> None:
+        handler = DashboardV2Server(
+            app_token=None,
+            noauth=False,
+            partner_token=None,
+            oauth_client_id=None,
+            oauth_client_secret=None,
+            oauth_redirect_uri="https://twitch.earlysalty.com/twitch/auth/callback",
+        )
+        handler._get_dashboard_auth_session = lambda _request: {  # type: ignore[method-assign]
+            "twitch_login": "partner_one",
+            "twitch_user_id": "1001",
+            "display_name": "Partner One",
+        }
+        request = SimpleNamespace(
+            path="/twitch/dashboard",
+            headers={"Host": "admin.earlysalty.de"},
+            host="admin.earlysalty.de",
+            remote="203.0.113.10",
+            transport=None,
+        )
+
+        response = await handler._serve_dashboard(request)
+        self.assertEqual(response.status, 404)
+
+    async def test_dashboard_route_on_admin_host_returns_404_for_admin(self) -> None:
+        handler = DashboardV2Server(
+            app_token=None,
+            noauth=False,
+            partner_token=None,
+            oauth_client_id=None,
+            oauth_client_secret=None,
+            oauth_redirect_uri="https://twitch.earlysalty.com/twitch/auth/callback",
+        )
+        handler._get_dashboard_auth_session = lambda _request: {  # type: ignore[method-assign]
+            "auth_type": "discord_admin",
+            "discord_user_id": "42",
+        }
+        request = SimpleNamespace(
+            path="/twitch/dashboard",
+            headers={"Host": "admin.earlysalty.de"},
+            host="admin.earlysalty.de",
+            remote="203.0.113.10",
+            transport=None,
+        )
+
+        response = await handler._serve_dashboard(request)
+        self.assertEqual(response.status, 404)
 
     async def test_dashboard_route_returns_503_when_twitch_oauth_missing(self) -> None:
         handler = DashboardV2Server(

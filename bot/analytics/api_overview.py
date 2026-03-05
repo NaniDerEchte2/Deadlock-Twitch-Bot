@@ -263,6 +263,21 @@ class _AnalyticsOverviewMixin:
                 log.debug("Could not build dashboard auth challenge; fallback to login redirect", exc_info=True)
         return web.HTTPFound(fallback_login_url)
 
+    def _admin_dashboard_host_page_gate(
+        self, request: web.Request
+    ) -> web.Response | None:
+        host_checker = getattr(self, "_is_admin_dashboard_host_request", None)
+        if not callable(host_checker):
+            return None
+        try:
+            if not bool(host_checker(request)):
+                return None
+        except Exception:
+            log.debug("Could not evaluate admin dashboard host gate", exc_info=True)
+            return None
+        # Keep user-facing dashboard pages strictly off the admin host.
+        return web.Response(text="Not found.", status=404)
+
     async def _serve_demo_dashboard(self, request: web.Request) -> web.Response:
         """Serve the demo dashboard HTML without authentication."""
         import pathlib
@@ -315,6 +330,9 @@ class _AnalyticsOverviewMixin:
 
     async def _serve_dashboard_v2(self, request: web.Request) -> web.Response:
         """Serve the main dashboard HTML."""
+        gate_response = self._admin_dashboard_host_page_gate(request)
+        if gate_response is not None:
+            return gate_response
         if not self._check_v2_auth(request):
             should_use_discord = getattr(self, "_should_use_discord_admin_login", None)
             if callable(should_use_discord) and bool(should_use_discord(request)):
@@ -340,6 +358,9 @@ class _AnalyticsOverviewMixin:
 
     async def _serve_dashboard(self, request: web.Request) -> web.Response:
         """Serve the new internal dashboard landing page."""
+        gate_response = self._admin_dashboard_host_page_gate(request)
+        if gate_response is not None:
+            return gate_response
         if not self._check_v2_auth(request):
             should_use_discord = getattr(self, "_should_use_discord_admin_login", None)
             if callable(should_use_discord) and bool(should_use_discord(request)):
@@ -365,6 +386,9 @@ class _AnalyticsOverviewMixin:
 
     async def _serve_dashboard_v2_assets(self, request: web.Request) -> web.Response:
         """Serve static assets for the dashboard."""
+        gate_response = self._admin_dashboard_host_page_gate(request)
+        if gate_response is not None:
+            return gate_response
         if not self._check_v2_auth(request):
             should_use_discord = getattr(self, "_should_use_discord_admin_login", None)
             if callable(should_use_discord) and bool(should_use_discord(request)):

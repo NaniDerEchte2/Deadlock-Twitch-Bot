@@ -7,6 +7,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import os
 from collections import deque
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -309,6 +310,55 @@ class AnalyticsV2Mixin(
             f"/twitch/auth/login?{urlencode({'next': next_path})}"
         )
 
+    @staticmethod
+    def _normalize_host_header(raw_value: str | None) -> str:
+        value = str(raw_value or "").strip()
+        if not value:
+            return ""
+        token = value.split(",")[0].strip()
+        if not token:
+            return ""
+        candidate = token if "://" in token else f"//{token}"
+        try:
+            parsed = urlsplit(candidate)
+        except Exception:
+            return ""
+        return str(parsed.hostname or "").strip().lower()
+
+    @classmethod
+    def _host_from_origin_like(cls, raw_value: str | None) -> str:
+        value = str(raw_value or "").strip()
+        if not value:
+            return ""
+        candidate = value if "://" in value else f"https://{value}"
+        try:
+            parsed = urlsplit(candidate)
+        except Exception:
+            return ""
+        host = str(parsed.hostname or "").strip().lower()
+        if host:
+            return host
+        return cls._normalize_host_header(value)
+
+    def _configured_admin_dashboard_host(self) -> str:
+        candidates = (
+            os.getenv("TWITCH_ADMIN_PUBLIC_URL"),
+            os.getenv("MASTER_DASHBOARD_PUBLIC_URL"),
+            getattr(self, "_discord_admin_redirect_uri", ""),
+            "https://admin.earlysalty.de",
+        )
+        for candidate in candidates:
+            host = self._host_from_origin_like(candidate)
+            if host:
+                return host
+        return "admin.earlysalty.de"
+
+    def _is_admin_dashboard_host_request(self, request: web.Request) -> bool:
+        request_host = self._normalize_host_header(request.headers.get("Host") or request.host or "")
+        if not request_host:
+            return False
+        return request_host == self._configured_admin_dashboard_host()
+
     def _check_v2_auth(self, request: web.Request) -> bool:
         """Check if request is authorized for v2 API.
 
@@ -318,40 +368,16 @@ class AnalyticsV2Mixin(
         - Valid Twitch OAuth partner session exists
         - Valid partner_token or admin token is provided
         """
-        # Localhost = always allowed (dev mode)
-        if _is_localhost(request):
-            return True
-
-        # Check noauth mode from parent
-        if getattr(self, "_noauth", False):
-            return True
-
-        # Twitch OAuth session (partner access)
-        if self._get_dashboard_session(request):
-            return True
-
-        # Check tokens
-        partner_token = getattr(self, "_partner_token", None)
-        admin_token = getattr(self, "_token", None)
-
-        partner_header = request.headers.get("X-Partner-Token")
-        admin_header = request.headers.get("X-Admin-Token")
-
-        # Partner token check
-        if partner_token:
-            if partner_header == partner_token:
-                return True
-
-        # Admin token check (admin can access everything)
-        if admin_token:
-            if admin_header == admin_token:
-                return True
-
-        return False
+        auth_level = self._get_auth_level(request)
+        if self._is_admin_dashboard_host_request(request):
+            return auth_level in ("localhost", "admin")
+        return auth_level != "none"
 
     def _require_v2_auth(self, request: web.Request):
         """Require authentication for v2 API, but allow localhost."""
         if not self._check_v2_auth(request):
+            auth_level = self._get_auth_level(request)
+            on_admin_host = self._is_admin_dashboard_host_request(request)
             login_url = self._get_dashboard_login_url(request)
             if request.path.startswith("/twitch/api/"):
                 should_use_discord = getattr(self, "_should_use_discord_admin_login", None)
@@ -369,6 +395,18 @@ class AnalyticsV2Mixin(
                         login_url = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard-v2"
                     else:
                         login_url = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
+            if on_admin_host and auth_level not in ("none", "localhost", "admin"):
+                payload = {
+                    "error": "admin_required",
+                    "required": "admin",
+                    "auth_level": auth_level,
+                    "message": "Admin access required on admin dashboard host.",
+                }
+                if request.path.startswith("/twitch/api/"):
+                    raise web.HTTPForbidden(
+                        text=json.dumps(payload), content_type="application/json"
+                    )
+                raise web.HTTPForbidden(text=payload["message"])
             payload = {
                 "error": "Authentication required. Use Twitch login, partner_token, or access from localhost.",
                 "loginUrl": login_url,
@@ -1859,7 +1897,7 @@ class AnalyticsV2Mixin(
         auth_level = self._get_auth_level(request)
         session = self._get_dashboard_session(request) or {}
         is_authenticated = auth_level != "none"
-        can_view_all_streamers = is_authenticated
+        can_view_all_streamers = auth_level in ("localhost", "admin")
 
         return web.json_response(
             {
