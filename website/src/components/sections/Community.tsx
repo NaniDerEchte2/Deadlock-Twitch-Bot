@@ -37,7 +37,7 @@ export function Community() {
         <SectionHeading
           badge="Community"
           title="Deine Community, organisiert"
-          subtitle="Tools für Engagement, Belohnungen und Verbindungen."
+          subtitle="Mach aus neuen Viewern eine aktive Stamm-Community - mit automatischen Belohnungen, Rollen und Live-Signalen."
         />
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-16">
