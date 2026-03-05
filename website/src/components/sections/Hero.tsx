@@ -18,6 +18,12 @@ const HERO_STATS = [
   },
 ];
 
+const HERO_STAT_STAIR_LAYOUT = [
+  "md:w-[80%] md:mr-[20%]",
+  "md:w-[80%] md:mx-auto",
+  "md:w-[80%] md:ml-[20%]",
+] as const;
+
 export function Hero() {
   return (
     <section
@@ -144,7 +150,7 @@ export function Hero() {
                   delay: index * 0.08,
                   ease: "easeOut",
                 }}
-                className="panel-card w-full rounded-xl px-4 py-3 text-center"
+                className={`panel-card w-full rounded-xl px-4 py-3 text-center ${HERO_STAT_STAIR_LAYOUT[index] ?? "md:w-[80%] md:mx-auto"}`}
               >
                 <p className="text-base font-semibold text-[var(--color-text-primary)]">
                   {stat.title}
