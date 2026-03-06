@@ -768,15 +768,21 @@ class _DashboardRoutesMixin:
         account_actions: list[str] = []
         if selected_paid_plan is not None:
             pay_plan_id = str(selected_paid_plan.get("id") or "").strip()
-            pay_href = (
-                f"/twitch/abbo/bezahlen?plan_id={html.escape(pay_plan_id, quote=True)}"
-                f"&cycle={selected_cycle}&quantity=1"
-            )
             account_actions.append(
-                f"<a class='action-btn action-primary' href='{pay_href}'>Zu Stripe Checkout</a>"
+                f"<form method='get' action='/twitch/abbo/bezahlen' style='margin:0'>"
+                f"<input type='hidden' name='plan_id' value='{html.escape(pay_plan_id, quote=True)}'>"
+                f"<input type='hidden' name='cycle' value='{selected_cycle}'>"
+                "<input type='hidden' name='quantity' value='1'>"
+                "<label class='widerruf-label'>"
+                "<input type='checkbox' name='widerruf_ok' required>"
+                " Ich stimme zu, dass die Leistung sofort nach Buchung startet und mein "
+                "<a href='/twitch/agb#widerruf'>Widerrufsrecht</a> damit erlischt."
+                "</label>"
+                "<button type='submit' class='action-btn action-primary'>Zu Stripe Checkout</button>"
+                "</form>"
             )
         account_actions.append(
-            "<a class='action-btn action-neutral' href='/twitch/abbo/rechnungen'>Rechnungen herunterladen</a>"
+            "<a class='action-btn action-neutral' href='/twitch/abbo/rechnungen'>Rechnungen herunterladen (PDF)</a>"
         )
         account_actions.append(
             "<form method='post' action='/twitch/abbo/kündigen' style='margin:0;'>"
@@ -790,7 +796,18 @@ class _DashboardRoutesMixin:
             )
         account_actions_html = "".join(account_actions)
 
+        profile_needs_input = any(
+            not str(billing_profile.get(key) or "").strip()
+            for key in ("recipient_name", "recipient_email", "street_line1", "postal_code", "city")
+        )
+        details_open_attr = " open" if profile_needs_input else ""
         billing_profile_form_html = (
+            f"<details class='profile-details'{details_open_attr}>"
+            "<summary class='profile-summary'>"
+            "<span>&#9881; Rechnungsdaten</span>"
+            "<span class='profile-hint'>Name, Adresse, USt-IdNr</span>"
+            "</summary>"
+            "<div class='profile-inner'>"
             "<form method='post' action='/twitch/abbo/rechnungsdaten'>"
             f"<input type='hidden' name='cycle' value='{selected_cycle}'>"
             f"<input type='hidden' name='csrf_token' value='{html.escape(csrf_token, quote=True)}'>"
@@ -817,6 +834,8 @@ class _DashboardRoutesMixin:
             "<span class='profile-help'>Pflichtfelder sind Name, E-Mail und Adresse.</span>"
             "</div>"
             "</form>"
+            "</div>"
+            "</details>"
         )
 
         plan_cards: list[str] = []
@@ -1177,6 +1196,12 @@ class _DashboardRoutesMixin:
             log.exception("billing invoice list failed")
             raise web.HTTPFound("/twitch/abbo?invoice=error") from None
 
+        invoice_rows.sort(
+            key=lambda x: int(self._billing_stripe_obj_get(x, "created", 0) or 0),
+            reverse=True,
+        )
+
+        _status_badge_class = {"paid": "badge-paid", "open": "badge-open", "void": "badge-void"}
         table_rows: list[str] = []
         for invoice_obj in invoice_rows:
             invoice_id = str(self._billing_stripe_obj_get(invoice_obj, "id", "") or "").strip()
@@ -1186,43 +1211,35 @@ class _DashboardRoutesMixin:
                 or ""
             ).strip()
             status = str(self._billing_stripe_obj_get(invoice_obj, "status", "open") or "open").strip()
-            hosted_url = str(
-                self._billing_stripe_obj_get(invoice_obj, "hosted_invoice_url", "") or ""
-            ).strip()
             pdf_url = str(self._billing_stripe_obj_get(invoice_obj, "invoice_pdf", "") or "").strip()
             currency = str(self._billing_stripe_obj_get(invoice_obj, "currency", "eur") or "eur").upper()
             total_cents = int(self._billing_stripe_obj_get(invoice_obj, "total", 0) or 0)
             created_epoch = int(self._billing_stripe_obj_get(invoice_obj, "created", 0) or 0)
             created_date = (
-                datetime.fromtimestamp(created_epoch, tz=UTC).date().isoformat()
+                datetime.fromtimestamp(created_epoch, tz=UTC).strftime("%d.%m.%Y")
                 if created_epoch > 0
                 else "-"
             )
             total_label = f"{total_cents / 100:.2f} {currency}"
+            badge_class = _status_badge_class.get(status, "badge-open")
             pdf_html = (
                 f"<a href='{html.escape(pdf_url, quote=True)}' target='_blank' rel='noopener noreferrer'>PDF</a>"
                 if pdf_url
-                else "<span class='muted'>-</span>"
-            )
-            hosted_html = (
-                f"<a href='{html.escape(hosted_url, quote=True)}' target='_blank' rel='noopener noreferrer'>Stripe</a>"
-                if hosted_url
                 else "<span class='muted'>-</span>"
             )
             table_rows.append(
                 "<tr>"
                 f"<td>{html.escape(invoice_number or invoice_id or '-')}</td>"
                 f"<td>{html.escape(created_date)}</td>"
-                f"<td>{html.escape(status)}</td>"
+                f"<td><span class='{badge_class}'>{html.escape(status)}</span></td>"
                 f"<td>{html.escape(total_label)}</td>"
-                f"<td>{hosted_html}</td>"
                 f"<td>{pdf_html}</td>"
                 "</tr>"
             )
 
         if not table_rows:
             table_rows.append(
-                "<tr><td colspan='6' class='muted'>Noch keine Stripe-Rechnungen vorhanden.</td></tr>"
+                "<tr><td colspan='5' class='muted'>Noch keine Stripe-Rechnungen vorhanden.</td></tr>"
             )
 
         logout_url = (
@@ -1256,15 +1273,21 @@ class _DashboardRoutesMixin:
             ".btn{display:inline-block;padding:9px 13px;border-radius:10px;text-decoration:none;font-weight:700;font-size:13px;}"
             ".btn-primary{background:#2563eb;color:#eff6ff;}"
             ".btn-ghost{background:#0b1220;color:#e2e8f0;border:1px solid #334155;}"
+            ".badge-paid{background:rgba(22,163,74,0.18);color:#86efac;"
+            "border:1px solid rgba(74,222,128,0.38);border-radius:999px;padding:3px 10px;font-size:12px;}"
+            ".badge-open{background:rgba(217,119,6,0.18);color:#fde68a;"
+            "border:1px solid rgba(251,191,36,0.38);border-radius:999px;padding:3px 10px;font-size:12px;}"
+            ".badge-void{background:rgba(220,38,38,0.18);color:#fecaca;"
+            "border:1px solid rgba(248,113,113,0.38);border-radius:999px;padding:3px 10px;font-size:12px;}"
             "</style></head><body><main class='wrap'>"
             "<div class='top'>"
-            "<div><h1>Stripe Rechnungen</h1>"
-            "<p class='muted'>Direkte Download-Links aus Stripe für deinen Account.</p></div>"
+            "<div><h1>Rechnungen</h1>"
+            "<p class='muted'>PDF-Downloads deiner Stripe-Rechnungen.</p></div>"
             f"<a class='muted' href='{logout_url}'>Logout</a>"
             "</div>"
             "<section class='card'>"
             "<table><thead><tr>"
-            "<th>Rechnung</th><th>Datum</th><th>Status</th><th>Betrag</th><th>Hosted</th><th>Download</th>"
+            "<th>Rechnungsnr</th><th>Datum</th><th>Status</th><th>Betrag</th><th>PDF</th>"
             "</tr></thead><tbody>"
             f"{''.join(table_rows)}"
             "</tbody></table>"
@@ -2951,6 +2974,7 @@ class _DashboardRoutesMixin:
                 web.get("/twitch/abbo/rechnung", self.abbo_invoice),
                 web.get("/twitch/impressum", self.abbo_impressum),
                 web.get("/twitch/datenschutz", self.abbo_datenschutz),
+                web.get("/twitch/agb", self.abbo_agb),
                 web.get("/twitch/raid/auth", self.raid_auth_start),
                 web.get("/twitch/raid/go", self.raid_auth_go),
                 web.get("/twitch/raid/requirements", self.raid_requirements),

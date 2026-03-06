@@ -215,24 +215,34 @@ def render_abbo_page(
         ".plan-actions{padding-top:10px;}"
         "}"
 
+        # === Collapsible Profile ===
+        ".profile-details{margin-top:16px;"
+        "background:rgba(255,255,255,0.05);backdrop-filter:blur(16px);"
+        "border:1px solid rgba(255,255,255,0.1);border-radius:18px;"
+        "padding:0;box-shadow:0 4px 24px rgba(0,0,0,0.4);}"
+        ".profile-summary{cursor:pointer;display:flex;justify-content:space-between;"
+        "align-items:center;padding:16px 22px;color:#e2e8f0;font-weight:700;"
+        "font-size:14px;list-style:none;user-select:none;}"
+        ".profile-summary::-webkit-details-marker{display:none;}"
+        "details[open] .profile-summary{border-bottom:1px solid rgba(255,255,255,0.1);color:#93c5fd;}"
+        ".profile-hint{font-size:12px;color:#64748b;font-weight:400;}"
+        ".profile-inner{padding:0 22px 20px;}"
+        # === Widerruf ===
+        ".widerruf-label{font-size:12px;color:#94a3b8;display:flex;gap:8px;"
+        "align-items:flex-start;margin-top:8px;line-height:1.5;}"
+        ".widerruf-label input{margin-top:2px;flex-shrink:0;}"
+        ".widerruf-label a{color:#93c5fd;}"
+
         "</style></head><body><main class='wrap'>"
 
         # --- Header ---
         "<div class='top'>"
         "<div>"
         "<h1 class='page-title'>Abonnement-Pläne</h1>"
-        "<p class='page-subtitle'>Wähle den passenden Plan für dein Wachstum auf Twitch</p>"
+        "<p class='page-subtitle'>W&auml;hle deinen Plan &middot; Raids, Analytics oder beides</p>"
         "</div>"
         f"<a class='logout-link' href='{_html.escape(logout_url)}'>Logout</a>"
         "</div>"
-
-        # --- Launch note ---
-        "<section class='card launch-note'>"
-        "<div class='launch-title'>Abo-Start in K&uuml;rze</div>"
-        "<div class='launch-text'>"
-        "Preise und Pakete sind final vorbereitet. Der offizielle Start folgt in K&uuml;rze."
-        "</div>"
-        "</section>"
 
         # --- Cycle selector ---
         "<section class='card'>"
@@ -244,25 +254,19 @@ def render_abbo_page(
 
         f"{status_notice_html}"
 
+        # --- Plan cards ---
+        "<section class='plans'>"
+        f"{plans_html}"
+        "</section>"
+
+        f"{billing_profile_form_html}"
+
         "<section class='card'>"
         "<strong style='font-size:14px;color:#e2e8f0;'>Abo Verwaltung</strong>"
         f"<div class='account-actions'>{account_actions_html}</div>"
         "<div class='action-note'>"
-        "Abrechnung laeuft ueber Stripe. Rechnungsdaten bitte vor dem Download pflegen."
+        "Abrechnung l&auml;uft &uuml;ber Stripe. Rechnungsdaten bitte vor dem Checkout pflegen."
         "</div>"
-        "</section>"
-
-        "<section class='card'>"
-        "<strong style='font-size:14px;color:#e2e8f0;'>Rechnungsdaten</strong>"
-        "<div class='muted' style='margin-top:6px;'>"
-        "Diese Daten werden für Rechnungsdownload genutzt. Stripe-Daten können als Vorschlag vorbefüllt werden."
-        "</div>"
-        f"{billing_profile_form_html}"
-        "</section>"
-
-        # --- Plan cards ---
-        "<section class='plans'>"
-        f"{plans_html}"
         "</section>"
 
         # --- Legal hints ---
@@ -295,6 +299,8 @@ def render_abbo_page(
         "<a href='/twitch/impressum'>Impressum</a>"
         " &nbsp;&middot;&nbsp; "
         "<a href='/twitch/datenschutz'>Datenschutz</a>"
+        " &nbsp;&middot;&nbsp; "
+        "<a href='/twitch/agb'>AGB</a>"
         "</div></div>"
         "</div>"
         "</section>"
