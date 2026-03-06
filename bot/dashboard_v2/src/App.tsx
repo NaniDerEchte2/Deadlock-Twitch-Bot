@@ -16,6 +16,7 @@ import { Viewers } from '@/pages/Viewers';
 import { Experimental } from '@/pages/Experimental';
 import { AIAnalysis } from '@/pages/AIAnalysis';
 import { InternalHomeLanding } from '@/pages/InternalHomeLanding';
+import { VerwaltungPage } from '@/pages/Verwaltung';
 import { useStreamerList, useAuthStatus } from '@/hooks/useAnalytics';
 import type { TimeRange } from '@/types/analytics';
 import {
@@ -282,11 +283,12 @@ function AnalyticsDashboard() {
 
 export default function App() {
   const isInternalHomeRoute = normalizePathname(window.location.pathname) === '/twitch/dashboard';
+  const isVerwaltungRoute = normalizePathname(window.location.pathname) === '/twitch/verwaltung';
 
   return (
     <QueryClientProvider client={queryClient}>
       <ErrorBoundary>
-        {isInternalHomeRoute ? <InternalHome /> : <AnalyticsDashboard />}
+        {isVerwaltungRoute ? <VerwaltungPage /> : isInternalHomeRoute ? <InternalHome /> : <AnalyticsDashboard />}
       </ErrorBoundary>
     </QueryClientProvider>
   );

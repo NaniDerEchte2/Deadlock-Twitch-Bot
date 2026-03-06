@@ -21,6 +21,8 @@ DASHBOARD_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard"
 DASHBOARD_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard"
 DASHBOARD_V2_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
 DASHBOARD_V2_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard-v2"
+DASHBOARD_VERWALTUNG_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fverwaltung"
+DASHBOARD_VERWALTUNG_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fverwaltung"
 
 
 class _AnalyticsOverviewMixin:
@@ -94,6 +96,7 @@ class _AnalyticsOverviewMixin:
         router.add_get("/twitch/dashboard", self._serve_dashboard)
         router.add_get("/twitch/dashboard-v2", self._serve_dashboard_v2)
         router.add_get("/twitch/dashboard-v2/{path:.*}", self._serve_dashboard_v2_assets)
+        router.add_get("/twitch/verwaltung", self._serve_verwaltung)
         # Public demo (no auth required)
         self._register_demo_routes(router)
 
@@ -370,6 +373,34 @@ class _AnalyticsOverviewMixin:
             response = self._dashboard_auth_redirect_or_unavailable(
                 request,
                 next_path="/twitch/dashboard",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
+        import pathlib
+
+        dist_path = pathlib.Path(__file__).parent / "dashboard_v2" / "dist" / "index.html"
+        if dist_path.exists():
+            return web.FileResponse(dist_path)
+        return web.Response(
+            text="Dashboard not built. Run npm run build in dashboard_v2/", status=404
+        )
+
+    async def _serve_verwaltung(self, request: web.Request) -> web.Response:
+        """Serve the account management page."""
+        gate_response = self._admin_dashboard_host_page_gate(request)
+        if gate_response is not None:
+            return gate_response
+        if not self._check_v2_auth(request):
+            should_use_discord = getattr(self, "_should_use_discord_admin_login", None)
+            if callable(should_use_discord) and bool(should_use_discord(request)):
+                login_url = DASHBOARD_VERWALTUNG_DISCORD_LOGIN_URL
+            else:
+                login_url = DASHBOARD_VERWALTUNG_LOGIN_URL
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/verwaltung",
                 fallback_login_url=login_url,
             )
             if isinstance(response, web.HTTPException):

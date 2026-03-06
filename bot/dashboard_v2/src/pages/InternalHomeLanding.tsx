@@ -18,6 +18,7 @@ import {
   Loader2,
   MessageSquare,
   RadioTower,
+  Settings2,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
@@ -292,12 +293,7 @@ export function InternalHomeLanding() {
   const oauthStatus = home.oauth?.status || (home.oauth?.connected ? 'connected' : hasScopeIssue ? 'missing' : 'partial');
   const oauthBannerText = oauthStatus === 'connected' ? 'OAuth verbunden' : oauthStatus === 'error' ? 'OAuth Fehler' : hasScopeIssue ? 'Scopes fehlen' : 'OAuth prüfen';
   const oauthBannerClass = oauthStatus === 'connected' ? 'border-success/35 bg-success/10 text-success' : oauthStatus === 'error' || hasScopeIssue ? 'border-error/35 bg-error/10 text-error' : 'border-accent/35 bg-accent/10 text-accent';
-  const oauthFallbackUrl = '/twitch/auth/login?next=%2Ftwitch%2Fdashboard';
-  const discordConnectFallbackUrl = '/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard';
-  const reconnectUrl = home.oauth?.reconnectUrl || oauthFallbackUrl;
-  const profileUrl = home.oauth?.profileUrl || reconnectUrl;
   const needsOauthReconnect = oauthStatus !== 'connected' || hasScopeIssue;
-  const oauthQuickHref = needsOauthReconnect ? reconnectUrl : profileUrl;
   const oauthCardStatusText = !needsOauthReconnect ? 'Verbunden' : missingScopeCount > 1 ? 'Re-Auth nötig' : 'Unvollständig';
   const oauthCardStatusClass = !needsOauthReconnect ? 'text-success' : missingScopeCount === 1 ? 'text-error' : 'text-warning';
   const oauthCardHintText = !needsOauthReconnect
@@ -313,7 +309,6 @@ export function InternalHomeLanding() {
       ? 'Genau 1 Scope fehlt.'
       : `${missingScopeCount} Scopes fehlen.`;
   const discordConnected = Boolean(home.discord?.connected);
-  const discordConnectUrl = home.discord?.connectUrl || discordConnectFallbackUrl;
   const discordCardStatusText = discordConnected ? 'Verbunden' : 'Nicht verbunden';
   const discordCardStatusClass = discordConnected ? 'text-success' : 'text-warning';
   const discordCardHintText = discordConnected
@@ -331,11 +326,11 @@ export function InternalHomeLanding() {
   const changelogEntries = (home.changelog?.entries ?? []).slice(0, 3);
   const quickActions: Array<{ id: string; title: string; description: string; href: string; icon: LucideIcon }> = [
     {
-      id: 'oauth',
-      title: 'OAuth & Profil',
-      description: needsOauthReconnect ? 'Fehlende Scopes direkt neu autorisieren' : 'Profil, Verknuepfung und Scopes pruefen',
-      href: oauthQuickHref,
-      icon: ShieldCheck,
+      id: 'verwaltung',
+      title: 'Konto verwalten',
+      description: 'OAuth, Discord-Verbindung und Profil-Details einsehen.',
+      href: '/twitch/verwaltung',
+      icon: Settings2,
     },
     {
       id: 'analysis-v2',
@@ -357,20 +352,6 @@ export function InternalHomeLanding() {
       description: 'Subscription, Rechnungen und Checkout verwalten',
       href: '/twitch/abbo',
       icon: Gauge,
-    },
-    {
-      id: 'oauth-reauth',
-      title: 'Twitch neu autorisieren',
-      description: 'Direkter Re-Auth-Link für fehlende Scopes.',
-      href: reconnectUrl,
-      icon: ShieldAlert,
-    },
-    {
-      id: 'discord-connect',
-      title: 'Discord verbinden',
-      description: discordConnected ? 'Discord erneut verbinden oder Status pruefen.' : 'Discord-Verknüpfung jetzt starten.',
-      href: discordConnectUrl,
-      icon: CheckCircle2,
     },
   ];
 
