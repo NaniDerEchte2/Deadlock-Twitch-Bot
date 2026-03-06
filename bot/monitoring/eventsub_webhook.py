@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import hashlib
 import hmac
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import UTC
+from datetime import UTC, datetime
 
 from aiohttp import web
 
@@ -21,8 +22,9 @@ MSG_TYPE_REVOCATION = "revocation"
 # Max allowed age for incoming messages (Twitch recommendation: 10 minutes)
 _MAX_MESSAGE_AGE_SECONDS = 600
 
-# How many message IDs to keep in the deduplication set
-_SEEN_ID_LIMIT = 2000
+# Optional hard limit for in-memory dedupe entries.
+# If set to an int, new IDs are rejected once full until old entries expire.
+_SEEN_ID_HARD_LIMIT: int | None = None
 
 
 class EventSubWebhookHandler:
@@ -39,8 +41,8 @@ class EventSubWebhookHandler:
         self._secret = secret.encode("utf-8")
         self.log = logger or logging.getLogger("TwitchStreams.EventSubWebhook")
         self._callbacks: dict[str, EventCallback] = {}
-        self._seen_message_ids: set[str] = set()
-        self._seen_ids_list: list = []  # für LRU-style Begrenzung
+        self._seen_message_ids: dict[str, float] = {}
+        self._seen_expiry_heap: list[tuple[float, str]] = []
 
     def set_callback(self, sub_type: str, callback: EventCallback) -> None:
         """Registriert einen Callback für einen bestimmten EventSub-Typ."""
@@ -65,8 +67,6 @@ class EventSubWebhookHandler:
     def _is_message_too_old(self, timestamp: str) -> bool:
         """Prüft ob der Timestamp älter als _MAX_MESSAGE_AGE_SECONDS ist (Replay-Schutz)."""
         try:
-            from datetime import datetime
-
             dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
             age = (datetime.now(UTC) - dt).total_seconds()
             return age > _MAX_MESSAGE_AGE_SECONDS
@@ -74,20 +74,41 @@ class EventSubWebhookHandler:
             self.log.debug("EventSub Webhook: Konnte Timestamp nicht parsen: %r", timestamp)
             return True  # Bei Parse-Fehler: Nachricht ablehnen
 
+    def _now_timestamp(self) -> float:
+        """Aktuellen UTC-Zeitstempel in Sekunden liefern (testbar überschreibbar)."""
+        return datetime.now(UTC).timestamp()
+
+    def _cleanup_expired_message_ids(self, now: float | None = None) -> None:
+        """Entfernt alle abgelaufenen Message-IDs aus dem Replay-Cache."""
+        if now is None:
+            now = self._now_timestamp()
+        while self._seen_expiry_heap and self._seen_expiry_heap[0][0] <= now:
+            expiry, message_id = heapq.heappop(self._seen_expiry_heap)
+            current_expiry = self._seen_message_ids.get(message_id)
+            # Nur entfernen, wenn dieser Heap-Eintrag noch aktuell ist.
+            if current_expiry == expiry:
+                self._seen_message_ids.pop(message_id, None)
+
     def _is_duplicate(self, message_id: str) -> bool:
         """Duplikat-Erkennung anhand der Message-ID."""
-        return message_id in self._seen_message_ids
+        now = self._now_timestamp()
+        self._cleanup_expired_message_ids(now)
+        expiry = self._seen_message_ids.get(message_id)
+        return bool(expiry is not None and expiry > now)
 
-    def _track_message_id(self, message_id: str) -> None:
-        """Speichert Message-ID für spätere Duplikat-Erkennung (LRU-Begrenzung)."""
+    def _track_message_id(self, message_id: str) -> bool:
+        """Speichert Message-ID für spätere Duplikat-Erkennung (TTL-basiert)."""
+        now = self._now_timestamp()
+        self._cleanup_expired_message_ids(now)
         if message_id in self._seen_message_ids:
-            return
-        self._seen_message_ids.add(message_id)
-        self._seen_ids_list.append(message_id)
-        # Übergelaufene IDs entfernen
-        while len(self._seen_ids_list) > _SEEN_ID_LIMIT:
-            old_id = self._seen_ids_list.pop(0)
-            self._seen_message_ids.discard(old_id)
+            return True
+        if _SEEN_ID_HARD_LIMIT is not None and len(self._seen_message_ids) >= _SEEN_ID_HARD_LIMIT:
+            return False
+
+        expiry = now + _MAX_MESSAGE_AGE_SECONDS
+        self._seen_message_ids[message_id] = expiry
+        heapq.heappush(self._seen_expiry_heap, (expiry, message_id))
+        return True
 
     async def handle_request(self, request: web.Request) -> web.Response:
         """
@@ -177,7 +198,12 @@ class EventSubWebhookHandler:
         if self._is_duplicate(message_id):
             self.log.debug("EventSub Webhook: Duplikat-Nachricht ignoriert (id=%r)", message_id)
             return web.Response(status=204)
-        self._track_message_id(message_id)
+        if not self._track_message_id(message_id):
+            self.log.warning(
+                "EventSub Webhook: Replay-Cache voll (entries=%d) – Nachricht abgelehnt",
+                len(self._seen_message_ids),
+            )
+            return web.Response(status=503)
 
         # --- 8. Notification dispatchen ---
         asyncio.create_task(

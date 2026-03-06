@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import re
 import secrets
+import time as time_module
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
+from ipaddress import ip_address
 from typing import Any
 from urllib.parse import unquote, urlsplit
 from uuid import UUID
@@ -18,7 +23,15 @@ from ..core.constants import log
 
 INTERNAL_API_BASE_PATH = "/internal/twitch/v1"
 INTERNAL_TOKEN_HEADER = "X-Internal-Token"
+IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 _LOGIN_RE = re.compile(r"^[a-z0-9_]{3,25}$")
+
+
+@dataclass(slots=True)
+class _IdempotencyInFlight:
+    fingerprint: str
+    future: asyncio.Future[tuple[int, Any]]
+    created_at: float
 
 
 def _json_default(value: Any) -> Any:
@@ -98,6 +111,22 @@ class InternalApiServer:
             if callable(raid_oauth_callback_cb)
             else self._empty_raid_oauth_callback
         )
+        self._idempotency_cache: dict[str, dict[str, Any]] = {}
+        self._idempotency_inflight: dict[str, _IdempotencyInFlight] = {}
+        self._idempotency_ttl_seconds = 15 * 60
+        self._idempotency_max_entries = 2000
+        self._allowed_guild_ids = self._parse_allowlist_ids(
+            os.getenv("TWITCH_INTERNAL_API_ALLOWED_GUILD_IDS"),
+            env_name="TWITCH_INTERNAL_API_ALLOWED_GUILD_IDS",
+        )
+        self._allowed_channel_ids = self._parse_allowlist_ids(
+            os.getenv("TWITCH_INTERNAL_API_ALLOWED_CHANNEL_IDS"),
+            env_name="TWITCH_INTERNAL_API_ALLOWED_CHANNEL_IDS",
+        )
+        self._allowed_role_ids = self._parse_allowlist_ids(
+            os.getenv("TWITCH_INTERNAL_API_ALLOWED_ROLE_IDS"),
+            env_name="TWITCH_INTERNAL_API_ALLOWED_ROLE_IDS",
+        )
 
     async def _empty_add(self, _: str, __: bool) -> str:
         return "Add operation unavailable"
@@ -175,6 +204,338 @@ class InternalApiServer:
             return False
 
     @staticmethod
+    def _host_without_port(raw: str | None) -> str:
+        value = str(raw or "").strip()
+        if not value:
+            return ""
+        host = value.split(",", 1)[0].strip()
+        if not host:
+            return ""
+        if host.startswith("["):
+            end = host.find("]")
+            if end != -1:
+                host = host[1:end]
+            return host.lower().rstrip(".")
+
+        normalized = host.lower().rstrip(".")
+        if not normalized:
+            return ""
+
+        # Keep raw IPv6 literals intact (e.g. "::1", "0:0:0:0:0:0:0:1").
+        try:
+            ip_address(normalized)
+            return normalized
+        except ValueError:
+            pass
+
+        # host:port for DNS names / IPv4.
+        if normalized.count(":") == 1:
+            host_part, port_part = normalized.rsplit(":", 1)
+            if host_part and port_part.isdigit():
+                return host_part
+        return normalized
+
+    @classmethod
+    def _is_loopback_host(cls, raw: str | None) -> bool:
+        host = cls._host_without_port(raw)
+        if not host:
+            return False
+        if host == "localhost":
+            return True
+        try:
+            return ip_address(host).is_loopback
+        except ValueError:
+            return False
+
+    @classmethod
+    def _is_loopback_origin(cls, raw_origin: str | None) -> bool:
+        origin = str(raw_origin or "").strip()
+        if not origin:
+            return True
+        try:
+            parsed = urlsplit(origin)
+        except Exception:
+            return False
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return False
+        if parsed.username or parsed.password:
+            return False
+        return cls._is_loopback_host(parsed.hostname)
+
+    @staticmethod
+    def _peer_host(request: web.Request) -> str:
+        remote = str(getattr(request, "remote", "") or "").strip()
+        if remote:
+            return remote
+        transport = getattr(request, "transport", None)
+        if transport is None:
+            return ""
+        peer = transport.get_extra_info("peername")
+        if isinstance(peer, tuple) and peer:
+            return str(peer[0]).strip()
+        if isinstance(peer, str):
+            return peer.strip()
+        return ""
+
+    def _is_loopback_request(self, request: web.Request) -> bool:
+        host_header = request.headers.get("Host") or request.host or ""
+        if not self._is_loopback_host(host_header):
+            return False
+
+        if not self._is_loopback_origin(request.headers.get("Origin")):
+            return False
+
+        peer = self._peer_host(request)
+        if not self._is_loopback_host(peer):
+            return False
+
+        return True
+
+    @staticmethod
+    def _canonical_json(value: Any) -> str:
+        try:
+            return json.dumps(
+                value if value is not None else {},
+                default=_json_default,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except Exception:
+            return "{}"
+
+    @classmethod
+    def _request_fingerprint(
+        cls,
+        *,
+        request: web.Request,
+        payload: dict[str, Any] | None,
+    ) -> str:
+        return "|".join(
+            [
+                str(request.method or "").upper().strip(),
+                str(request.path_qs or request.path or "").strip(),
+                cls._canonical_json(payload if isinstance(payload, dict) else {}),
+            ]
+        )
+
+    def _cleanup_idempotency_cache(self) -> None:
+        now = time_module.time()
+        expired = [
+            key
+            for key, entry in self._idempotency_cache.items()
+            if now - float(entry.get("created_at", 0.0)) > self._idempotency_ttl_seconds
+        ]
+        for key in expired:
+            self._idempotency_cache.pop(key, None)
+
+        overflow = len(self._idempotency_cache) - self._idempotency_max_entries
+        if overflow > 0:
+            oldest = sorted(
+                self._idempotency_cache.items(),
+                key=lambda kv: float(kv[1].get("created_at", 0.0)),
+            )
+            for key, _ in oldest[:overflow]:
+                self._idempotency_cache.pop(key, None)
+
+    def _cleanup_idempotency_inflight(self) -> None:
+        now = time_module.time()
+        expired: list[str] = []
+        for key, entry in self._idempotency_inflight.items():
+            if entry.future.done():
+                expired.append(key)
+                continue
+            if now - float(entry.created_at) > self._idempotency_ttl_seconds:
+                entry.future.set_result(
+                    (
+                        503,
+                        {
+                            "error": "upstream_unavailable",
+                            "message": "idempotent request timed out",
+                        },
+                    )
+                )
+                expired.append(key)
+        for key in expired:
+            self._idempotency_inflight.pop(key, None)
+
+    def _prepare_idempotency(
+        self,
+        *,
+        request: web.Request,
+        payload: dict[str, Any] | None,
+    ) -> tuple[
+        str,
+        str,
+        web.Response | None,
+        asyncio.Future[tuple[int, Any]] | None,
+        bool,
+    ]:
+        key = str(request.headers.get(IDEMPOTENCY_KEY_HEADER) or "").strip()
+        if not key:
+            return "", "", None, None, False
+        if len(key) > 128:
+            return (
+                "",
+                "",
+                self._json_error("bad_request", 400, "invalid idempotency key"),
+                None,
+                False,
+            )
+
+        self._cleanup_idempotency_cache()
+        self._cleanup_idempotency_inflight()
+        fingerprint = self._request_fingerprint(request=request, payload=payload)
+        entry = self._idempotency_cache.get(key)
+        if entry:
+            if str(entry.get("fingerprint") or "") != fingerprint:
+                return (
+                    "",
+                    "",
+                    self._json_error(
+                        "idempotency_conflict",
+                        409,
+                        "idempotency key already used with a different request",
+                    ),
+                    None,
+                    False,
+                )
+
+            replay_payload = entry.get("payload")
+            status = int(entry.get("status", 200) or 200)
+            response = self._json_response(replay_payload, status=status)
+            response.headers["X-Idempotency-Replayed"] = "1"
+            return "", "", response, None, False
+
+        inflight = self._idempotency_inflight.get(key)
+        if inflight is not None:
+            if inflight.fingerprint != fingerprint:
+                return (
+                    "",
+                    "",
+                    self._json_error(
+                        "idempotency_conflict",
+                        409,
+                        "idempotency key already used with a different request",
+                    ),
+                    None,
+                    False,
+                )
+            return "", "", None, inflight.future, False
+
+        future: asyncio.Future[tuple[int, Any]] = asyncio.get_running_loop().create_future()
+        self._idempotency_inflight[key] = _IdempotencyInFlight(
+            fingerprint=fingerprint,
+            future=future,
+            created_at=time_module.time(),
+        )
+        return key, fingerprint, None, None, True
+
+    async def _wait_idempotency_result(
+        self,
+        *,
+        future: asyncio.Future[tuple[int, Any]],
+    ) -> web.Response:
+        try:
+            status, payload = await asyncio.wait_for(asyncio.shield(future), timeout=30.0)
+        except asyncio.TimeoutError:
+            return self._json_error(
+                "upstream_unavailable",
+                503,
+                "idempotent request timed out",
+            )
+        except Exception:
+            return self._json_error(
+                "internal_error",
+                500,
+                "failed to resolve idempotent request",
+            )
+        response = self._json_response(payload, status=int(status or 200))
+        response.headers["X-Idempotency-Replayed"] = "1"
+        return response
+
+    @staticmethod
+    def _response_payload(response: web.Response) -> Any:
+        try:
+            raw = response.text if response.text is not None else ""
+            if raw:
+                return json.loads(raw)
+        except Exception:
+            pass
+        return {}
+
+    def _store_idempotency_result(
+        self,
+        *,
+        key: str,
+        fingerprint: str,
+        status: int,
+        payload: Any,
+    ) -> None:
+        if not key:
+            return
+        status_code = int(status or 200)
+        if status_code >= 500:
+            return
+        self._cleanup_idempotency_cache()
+        self._idempotency_cache[key] = {
+            "fingerprint": str(fingerprint),
+            "status": status_code,
+            "payload": payload,
+            "created_at": time_module.time(),
+        }
+
+    def _complete_idempotency_owner(
+        self,
+        *,
+        key: str,
+        fingerprint: str,
+        response: web.Response,
+        cacheable: bool,
+    ) -> None:
+        if not key:
+            return
+        status = int(getattr(response, "status", 500) or 500)
+        payload = self._response_payload(response)
+        if cacheable and status < 500:
+            self._store_idempotency_result(
+                key=key,
+                fingerprint=fingerprint,
+                status=status,
+                payload=payload,
+            )
+
+        inflight = self._idempotency_inflight.get(key)
+        if inflight is not None and inflight.fingerprint == fingerprint:
+            if not inflight.future.done():
+                inflight.future.set_result((status, payload))
+            self._idempotency_inflight.pop(key, None)
+
+    def _release_idempotency_owner(
+        self,
+        *,
+        key: str,
+        fingerprint: str,
+        response: web.Response | None,
+        cacheable: bool,
+    ) -> None:
+        if not key:
+            return
+        fallback_response = response
+        if fallback_response is None:
+            fallback_response = self._json_error(
+                "internal_error",
+                500,
+                "idempotent request failed",
+            )
+        self._complete_idempotency_owner(
+            key=key,
+            fingerprint=fingerprint,
+            response=fallback_response,
+            cacheable=cacheable,
+        )
+
+    @staticmethod
     def _json_dumps(payload: Any) -> str:
         return json.dumps(payload, default=_json_default, ensure_ascii=False)
 
@@ -200,6 +561,94 @@ class InternalApiServer:
     ) -> web.Response:
         log.warning("internal api %s bad request: %s", context, exc)
         return self._json_error(code, 400, message)
+
+    def _safe_exception_error(
+        self,
+        *,
+        context: str,
+        exc: Exception,
+        error: str,
+        status: int,
+        message: str,
+    ) -> web.Response:
+        log.warning("internal api %s failed: %s", context, exc)
+        return self._json_error(error, status, message)
+
+    @staticmethod
+    def _parse_allowlist_ids(raw: str | None, *, env_name: str) -> set[int] | None:
+        # Env var unset => allowlist not configured (keep existing fail-open behavior).
+        if raw is None:
+            return None
+
+        value = str(raw).strip()
+        allowed: set[int] = set()
+        for token in value.replace(";", ",").split(","):
+            item = token.strip()
+            if not item:
+                continue
+            if not item.isdigit():
+                log.warning("Ignoring invalid %s entry: %r", env_name, item)
+                continue
+            parsed = int(item)
+            if parsed > 0:
+                allowed.add(parsed)
+        if not allowed:
+            log.warning(
+                "%s configured but no valid positive IDs parsed; enabling fail-closed deny-all.",
+                env_name,
+            )
+        return allowed
+
+    @staticmethod
+    def _coerce_optional_positive_int(value: Any, *, key: str) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError(f"{key} must be a positive integer")
+        if isinstance(value, int):
+            parsed = value
+        elif isinstance(value, str):
+            item = value.strip()
+            if not item:
+                return None
+            if not item.isdigit():
+                raise ValueError(f"{key} must be a positive integer")
+            parsed = int(item)
+        else:
+            raise ValueError(f"{key} must be a positive integer")
+        if parsed <= 0:
+            raise ValueError(f"{key} must be a positive integer")
+        return parsed
+
+    def _enforce_scope_allowlist(
+        self,
+        *,
+        payload: dict[str, Any],
+        key: str,
+        allowed: set[int] | None,
+    ) -> None:
+        if allowed is None:
+            return
+        value = self._coerce_optional_positive_int(payload.get(key), key=key)
+        if value is None or value not in allowed:
+            raise PermissionError(f"{key} is not allowed")
+
+    def _enforce_discord_action_scope(self, payload: dict[str, Any]) -> None:
+        self._enforce_scope_allowlist(
+            payload=payload,
+            key="guild_id",
+            allowed=self._allowed_guild_ids,
+        )
+        self._enforce_scope_allowlist(
+            payload=payload,
+            key="channel_id",
+            allowed=self._allowed_channel_ids,
+        )
+        self._enforce_scope_allowlist(
+            payload=payload,
+            key="role_id",
+            allowed=self._allowed_role_ids,
+        )
 
     @staticmethod
     def _parse_optional_int(value: str | None, *, minimum: int | None = None) -> int | None:
@@ -302,129 +751,314 @@ class InternalApiServer:
             return self._json_error("internal_error", 500, "failed to list streamers")
 
     async def streamer_add(self, request: web.Request) -> web.Response:
+        owner_key = ""
+        owner_fingerprint = ""
+        owner_response: web.Response | None = None
+        owner_cacheable = False
         try:
             body = await self._json_body(request)
+            (
+                idempotency_key,
+                idempotency_fingerprint,
+                replay,
+                wait_future,
+                is_owner,
+            ) = self._prepare_idempotency(
+                request=request,
+                payload=body,
+            )
+            if replay is not None:
+                return replay
+            if wait_future is not None:
+                return await self._wait_idempotency_result(future=wait_future)
+            if is_owner:
+                owner_key = idempotency_key
+                owner_fingerprint = idempotency_fingerprint
             login = self._normalize_login(
                 str(body.get("login") or body.get("streamer") or body.get("twitch_login") or "")
             )
             if not login:
-                return self._json_error("bad_request", 400, "invalid or missing login")
+                owner_response = self._json_error("bad_request", 400, "invalid or missing login")
+                return owner_response
             require_link = self._parse_bool(body.get("require_link"), default=False)
             message = await self._add(login, require_link)
-            return self._json_response(
-                {
-                    "ok": True,
-                    "login": login,
-                    "message": str(message or "added"),
-                },
-                status=201,
-            )
+            response_payload = {
+                "ok": True,
+                "login": login,
+                "message": str(message or "added"),
+            }
+            owner_cacheable = True
+            owner_response = self._json_response(response_payload, status=201)
+            return owner_response
         except ValueError as exc:
-            return self._safe_bad_request(
+            owner_response = self._safe_bad_request(
                 context="add streamer",
                 exc=exc,
                 message="invalid request body",
             )
+            return owner_response
         except Exception:
             log.exception("internal api add streamer failed")
-            return self._json_error("internal_error", 500, "failed to add streamer")
+            owner_response = self._json_error("internal_error", 500, "failed to add streamer")
+            return owner_response
+        finally:
+            self._release_idempotency_owner(
+                key=owner_key,
+                fingerprint=owner_fingerprint,
+                response=owner_response,
+                cacheable=owner_cacheable,
+            )
 
     async def streamer_remove(self, request: web.Request) -> web.Response:
-        raw_login = request.match_info.get("login", "")
-        login = self._normalize_login(raw_login)
-        if not login:
-            return self._json_error("bad_request", 400, "invalid login")
+        (
+            idempotency_key,
+            idempotency_fingerprint,
+            replay,
+            wait_future,
+            is_owner,
+        ) = self._prepare_idempotency(
+            request=request,
+            payload=None,
+        )
+        owner_key = idempotency_key if is_owner else ""
+        owner_fingerprint = idempotency_fingerprint if is_owner else ""
+        owner_response: web.Response | None = None
+        owner_cacheable = False
+        if replay is not None:
+            return replay
+        if wait_future is not None:
+            return await self._wait_idempotency_result(future=wait_future)
         try:
+            raw_login = request.match_info.get("login", "")
+            login = self._normalize_login(raw_login)
+            if not login:
+                owner_response = self._json_error("bad_request", 400, "invalid login")
+                return owner_response
             message = await self._remove(login)
-            return self._json_response(
-                {"ok": True, "login": login, "message": str(message or "removed")}
-            )
+            response_payload = {"ok": True, "login": login, "message": str(message or "removed")}
+            owner_cacheable = True
+            owner_response = self._json_response(response_payload)
+            return owner_response
         except Exception:
             log.exception("internal api remove streamer failed")
-            return self._json_error("internal_error", 500, "failed to remove streamer")
+            owner_response = self._json_error("internal_error", 500, "failed to remove streamer")
+            return owner_response
+        finally:
+            self._release_idempotency_owner(
+                key=owner_key,
+                fingerprint=owner_fingerprint,
+                response=owner_response,
+                cacheable=owner_cacheable,
+            )
 
     async def streamer_verify(self, request: web.Request) -> web.Response:
         raw_login = request.match_info.get("login", "")
         login = self._normalize_login(raw_login)
         if not login:
             return self._json_error("bad_request", 400, "invalid login")
+        owner_key = ""
+        owner_fingerprint = ""
+        owner_response: web.Response | None = None
+        owner_cacheable = False
         try:
             body = await self._json_body(request)
+            (
+                idempotency_key,
+                idempotency_fingerprint,
+                replay,
+                wait_future,
+                is_owner,
+            ) = self._prepare_idempotency(
+                request=request,
+                payload=body,
+            )
+            if replay is not None:
+                return replay
+            if wait_future is not None:
+                return await self._wait_idempotency_result(future=wait_future)
+            if is_owner:
+                owner_key = idempotency_key
+                owner_fingerprint = idempotency_fingerprint
             mode = str(body.get("mode") or "permanent").strip().lower()
             if not mode:
                 mode = "permanent"
             message = await self._verify(login, mode)
-            return self._json_response(
-                {"ok": True, "login": login, "message": str(message or "verified")}
-            )
+            response_payload = {"ok": True, "login": login, "message": str(message or "verified")}
+            owner_cacheable = True
+            owner_response = self._json_response(response_payload)
+            return owner_response
         except ValueError as exc:
-            return self._safe_bad_request(
+            owner_response = self._safe_bad_request(
                 context="verify streamer",
                 exc=exc,
                 message="invalid request body",
             )
+            return owner_response
         except Exception:
             log.exception("internal api verify streamer failed")
-            return self._json_error("internal_error", 500, "failed to verify streamer")
+            owner_response = self._json_error("internal_error", 500, "failed to verify streamer")
+            return owner_response
+        finally:
+            self._release_idempotency_owner(
+                key=owner_key,
+                fingerprint=owner_fingerprint,
+                response=owner_response,
+                cacheable=owner_cacheable,
+            )
 
     async def streamer_archive(self, request: web.Request) -> web.Response:
         raw_login = request.match_info.get("login", "")
         login = self._normalize_login(raw_login)
         if not login:
             return self._json_error("bad_request", 400, "invalid login")
+        owner_key = ""
+        owner_fingerprint = ""
+        owner_response: web.Response | None = None
+        owner_cacheable = False
         try:
             body = await self._json_body(request)
+            (
+                idempotency_key,
+                idempotency_fingerprint,
+                replay,
+                wait_future,
+                is_owner,
+            ) = self._prepare_idempotency(
+                request=request,
+                payload=body,
+            )
+            if replay is not None:
+                return replay
+            if wait_future is not None:
+                return await self._wait_idempotency_result(future=wait_future)
+            if is_owner:
+                owner_key = idempotency_key
+                owner_fingerprint = idempotency_fingerprint
             mode = str(body.get("mode") or "toggle").strip().lower()
             if not mode:
                 mode = "toggle"
             message = await self._archive(login, mode)
-            return self._json_response(
-                {"ok": True, "login": login, "message": str(message or "updated")}
-            )
+            response_payload = {"ok": True, "login": login, "message": str(message or "updated")}
+            owner_cacheable = True
+            owner_response = self._json_response(response_payload)
+            return owner_response
         except ValueError as exc:
-            return self._safe_bad_request(
+            owner_response = self._safe_bad_request(
                 context="archive streamer",
                 exc=exc,
                 message="invalid request body",
             )
+            return owner_response
         except Exception:
             log.exception("internal api archive streamer failed")
-            return self._json_error("internal_error", 500, "failed to update archive state")
+            owner_response = self._json_error("internal_error", 500, "failed to update archive state")
+            return owner_response
+        finally:
+            self._release_idempotency_owner(
+                key=owner_key,
+                fingerprint=owner_fingerprint,
+                response=owner_response,
+                cacheable=owner_cacheable,
+            )
 
     async def streamer_discord_flag(self, request: web.Request) -> web.Response:
         raw_login = request.match_info.get("login", "")
         login = self._normalize_login(raw_login)
         if not login:
             return self._json_error("bad_request", 400, "invalid login")
+        owner_key = ""
+        owner_fingerprint = ""
+        owner_response: web.Response | None = None
+        owner_cacheable = False
         try:
             body = await self._json_body(request)
+            (
+                idempotency_key,
+                idempotency_fingerprint,
+                replay,
+                wait_future,
+                is_owner,
+            ) = self._prepare_idempotency(
+                request=request,
+                payload=body,
+            )
+            if replay is not None:
+                return replay
+            if wait_future is not None:
+                return await self._wait_idempotency_result(future=wait_future)
+            if is_owner:
+                owner_key = idempotency_key
+                owner_fingerprint = idempotency_fingerprint
+            self._enforce_discord_action_scope(body)
             if "is_on_discord" not in body and "enabled" not in body and "value" not in body:
-                return self._json_error("bad_request", 400, "is_on_discord is required")
+                owner_response = self._json_error("bad_request", 400, "is_on_discord is required")
+                return owner_response
             enabled = self._parse_bool(
                 body.get("is_on_discord", body.get("enabled", body.get("value"))),
                 default=False,
             )
             message = await self._discord_flag(login, enabled)
-            return self._json_response(
-                {"ok": True, "login": login, "message": str(message or "updated")}
-            )
+            response_payload = {"ok": True, "login": login, "message": str(message or "updated")}
+            owner_cacheable = True
+            owner_response = self._json_response(response_payload)
+            return owner_response
         except ValueError as exc:
-            return self._safe_bad_request(
+            owner_response = self._safe_bad_request(
                 context="discord flag",
                 exc=exc,
                 message="invalid request body",
             )
+            return owner_response
+        except PermissionError as exc:
+            owner_response = self._safe_exception_error(
+                context="discord flag scope",
+                exc=exc,
+                error="forbidden",
+                status=403,
+                message="action outside configured scope",
+            )
+            return owner_response
         except Exception:
             log.exception("internal api discord flag failed")
-            return self._json_error("internal_error", 500, "failed to update discord flag")
+            owner_response = self._json_error("internal_error", 500, "failed to update discord flag")
+            return owner_response
+        finally:
+            self._release_idempotency_owner(
+                key=owner_key,
+                fingerprint=owner_fingerprint,
+                response=owner_response,
+                cacheable=owner_cacheable,
+            )
 
     async def streamer_discord_profile(self, request: web.Request) -> web.Response:
         raw_login = request.match_info.get("login", "")
         login = self._normalize_login(raw_login)
         if not login:
             return self._json_error("bad_request", 400, "invalid login")
+        owner_key = ""
+        owner_fingerprint = ""
+        owner_response: web.Response | None = None
+        owner_cacheable = False
         try:
             body = await self._json_body(request)
+            (
+                idempotency_key,
+                idempotency_fingerprint,
+                replay,
+                wait_future,
+                is_owner,
+            ) = self._prepare_idempotency(
+                request=request,
+                payload=body,
+            )
+            if replay is not None:
+                return replay
+            if wait_future is not None:
+                return await self._wait_idempotency_result(future=wait_future)
+            if is_owner:
+                owner_key = idempotency_key
+                owner_fingerprint = idempotency_fingerprint
+            self._enforce_discord_action_scope(body)
             discord_user_id = body.get("discord_user_id")
             if discord_user_id is not None:
                 discord_user_id = str(discord_user_id).strip() or None
@@ -441,18 +1075,37 @@ class InternalApiServer:
                 discord_display_name=discord_display_name,
                 mark_member=mark_member,
             )
-            return self._json_response(
-                {"ok": True, "login": login, "message": str(message or "updated")}
-            )
+            response_payload = {"ok": True, "login": login, "message": str(message or "updated")}
+            owner_cacheable = True
+            owner_response = self._json_response(response_payload)
+            return owner_response
         except ValueError as exc:
-            return self._safe_bad_request(
+            owner_response = self._safe_bad_request(
                 context="discord profile",
                 exc=exc,
                 message="invalid request body",
             )
+            return owner_response
+        except PermissionError as exc:
+            owner_response = self._safe_exception_error(
+                context="discord profile scope",
+                exc=exc,
+                error="forbidden",
+                status=403,
+                message="action outside configured scope",
+            )
+            return owner_response
         except Exception:
             log.exception("internal api discord profile failed")
-            return self._json_error("internal_error", 500, "failed to update discord profile")
+            owner_response = self._json_error("internal_error", 500, "failed to update discord profile")
+            return owner_response
+        finally:
+            self._release_idempotency_owner(
+                key=owner_key,
+                fingerprint=owner_fingerprint,
+                response=owner_response,
+                cacheable=owner_cacheable,
+            )
 
     async def stats(self, request: web.Request) -> web.Response:
         try:
@@ -547,11 +1200,29 @@ class InternalApiServer:
                 message="invalid request parameters",
             )
         except LookupError as exc:
-            return self._json_error("not_found", 404, str(exc) or "resource not found")
+            return self._safe_exception_error(
+                context="raid auth url not found",
+                exc=exc,
+                error="not_found",
+                status=404,
+                message="resource not found",
+            )
         except PermissionError as exc:
-            return self._json_error("forbidden", 403, str(exc) or "forbidden")
+            return self._safe_exception_error(
+                context="raid auth url forbidden",
+                exc=exc,
+                error="forbidden",
+                status=403,
+                message="forbidden",
+            )
         except RuntimeError as exc:
-            return self._json_error("upstream_unavailable", 503, str(exc) or "upstream unavailable")
+            return self._safe_exception_error(
+                context="raid auth url runtime",
+                exc=exc,
+                error="upstream_unavailable",
+                status=503,
+                message="upstream unavailable",
+            )
         except Exception:
             log.exception("internal api raid auth url failed")
             return self._json_error("internal_error", 500, "failed to generate raid auth url")
@@ -573,42 +1244,124 @@ class InternalApiServer:
                 message="invalid request parameters",
             )
         except RuntimeError as exc:
-            return self._json_error("upstream_unavailable", 503, str(exc) or "upstream unavailable")
+            return self._safe_exception_error(
+                context="raid go url runtime",
+                exc=exc,
+                error="upstream_unavailable",
+                status=503,
+                message="upstream unavailable",
+            )
         except Exception:
             log.exception("internal api raid go url failed")
             return self._json_error("internal_error", 500, "failed to resolve raid auth url")
 
     async def raid_requirements(self, request: web.Request) -> web.Response:
+        owner_key = ""
+        owner_fingerprint = ""
+        owner_response: web.Response | None = None
+        owner_cacheable = False
         try:
             body = await self._json_body(request)
+            (
+                idempotency_key,
+                idempotency_fingerprint,
+                replay,
+                wait_future,
+                is_owner,
+            ) = self._prepare_idempotency(
+                request=request,
+                payload=body,
+            )
+            if replay is not None:
+                return replay
+            if wait_future is not None:
+                return await self._wait_idempotency_result(future=wait_future)
+            if is_owner:
+                owner_key = idempotency_key
+                owner_fingerprint = idempotency_fingerprint
+            self._enforce_discord_action_scope(body)
             login = self._normalize_login(
                 str(body.get("login") or body.get("streamer") or body.get("twitch_login") or "")
             )
             if not login:
-                return self._json_error("bad_request", 400, "invalid or missing login")
+                owner_response = self._json_error("bad_request", 400, "invalid or missing login")
+                return owner_response
             message = await self._raid_requirements(login)
-            return self._json_response(
-                {"ok": True, "login": login, "message": str(message or "sent")},
-            )
+            response_payload = {"ok": True, "login": login, "message": str(message or "sent")}
+            owner_cacheable = True
+            owner_response = self._json_response(response_payload)
+            return owner_response
         except ValueError as exc:
-            return self._safe_bad_request(
+            owner_response = self._safe_bad_request(
                 context="raid requirements",
                 exc=exc,
                 message="invalid request body",
             )
-        except LookupError as exc:
-            return self._json_error("not_found", 404, str(exc) or "resource not found")
+            return owner_response
         except PermissionError as exc:
-            return self._json_error("forbidden", 403, str(exc) or "forbidden")
+            owner_response = self._safe_exception_error(
+                context="raid requirements forbidden",
+                exc=exc,
+                error="forbidden",
+                status=403,
+                message="action outside configured scope",
+            )
+            return owner_response
+        except LookupError as exc:
+            owner_response = self._safe_exception_error(
+                context="raid requirements not found",
+                exc=exc,
+                error="not_found",
+                status=404,
+                message="resource not found",
+            )
+            return owner_response
         except RuntimeError as exc:
-            return self._json_error("upstream_unavailable", 503, str(exc) or "upstream unavailable")
+            owner_response = self._safe_exception_error(
+                context="raid requirements runtime",
+                exc=exc,
+                error="upstream_unavailable",
+                status=503,
+                message="upstream unavailable",
+            )
+            return owner_response
         except Exception:
             log.exception("internal api raid requirements failed")
-            return self._json_error("internal_error", 500, "failed to send raid requirements")
+            owner_response = self._json_error("internal_error", 500, "failed to send raid requirements")
+            return owner_response
+        finally:
+            self._release_idempotency_owner(
+                key=owner_key,
+                fingerprint=owner_fingerprint,
+                response=owner_response,
+                cacheable=owner_cacheable,
+            )
 
     async def raid_oauth_callback(self, request: web.Request) -> web.Response:
+        owner_key = ""
+        owner_fingerprint = ""
+        owner_response: web.Response | None = None
+        owner_cacheable = False
         try:
             body = await self._json_body(request)
+            (
+                idempotency_key,
+                idempotency_fingerprint,
+                replay,
+                wait_future,
+                is_owner,
+            ) = self._prepare_idempotency(
+                request=request,
+                payload=body,
+            )
+            if replay is not None:
+                return replay
+            if wait_future is not None:
+                return await self._wait_idempotency_result(future=wait_future)
+            if is_owner:
+                owner_key = idempotency_key
+                owner_fingerprint = idempotency_fingerprint
+            self._enforce_discord_action_scope(body)
             result = await self._raid_oauth_callback(
                 code=str(body.get("code") or ""),
                 state=str(body.get("state") or ""),
@@ -627,16 +1380,36 @@ class InternalApiServer:
                 status_code = 200
             status_code = max(200, min(status_code, 599))
             result["status"] = status_code
-            return self._json_response(result)
+            owner_cacheable = True
+            owner_response = self._json_response(result)
+            return owner_response
         except ValueError as exc:
-            return self._safe_bad_request(
+            owner_response = self._safe_bad_request(
                 context="raid oauth callback",
                 exc=exc,
                 message="invalid request body",
             )
+            return owner_response
+        except PermissionError as exc:
+            owner_response = self._safe_exception_error(
+                context="raid oauth callback forbidden",
+                exc=exc,
+                error="forbidden",
+                status=403,
+                message="action outside configured scope",
+            )
+            return owner_response
         except Exception:
             log.exception("internal api raid oauth callback failed")
-            return self._json_error("internal_error", 500, "failed to process raid oauth callback")
+            owner_response = self._json_error("internal_error", 500, "failed to process raid oauth callback")
+            return owner_response
+        finally:
+            self._release_idempotency_owner(
+                key=owner_key,
+                fingerprint=owner_fingerprint,
+                response=owner_response,
+                cacheable=owner_cacheable,
+            )
 
     def attach(self, app: web.Application) -> None:
         base = self._base_path
@@ -707,6 +1480,17 @@ def build_internal_api_app(
         raid_requirements_cb=raid_requirements_cb,
         raid_oauth_callback_cb=raid_oauth_callback_cb,
     )
+
+    @web.middleware
+    async def _loopback_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
+        if not server._is_loopback_request(request):
+            return server._json_error(
+                error="forbidden",
+                status=403,
+                message="internal API accepts loopback traffic only",
+            )
+        return await handler(request)
+
     @web.middleware
     async def _auth_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
         if not server._is_authorized(request):
@@ -717,13 +1501,14 @@ def build_internal_api_app(
             )
         return await handler(request)
 
-    app = web.Application(middlewares=[_auth_middleware])
+    app = web.Application(middlewares=[_loopback_middleware, _auth_middleware])
     server.attach(app)
     return app
 
 
 __all__ = [
     "INTERNAL_API_BASE_PATH",
+    "IDEMPOTENCY_KEY_HEADER",
     "INTERNAL_TOKEN_HEADER",
     "InternalApiServer",
     "build_internal_api_app",

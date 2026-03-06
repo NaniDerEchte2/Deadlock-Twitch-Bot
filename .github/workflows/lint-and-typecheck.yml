@@ -12,41 +12,72 @@ permissions:
 jobs:
   ruff:
     name: "⚡ Ruff (Lint & Format)"
-    if: hashFiles('**/*.py') != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Detect Python files
+        id: detect_py
+        shell: bash
+        run: |
+          if git ls-files '*.py' | grep -q .; then
+            echo "has_python=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_python=false" >> "$GITHUB_OUTPUT"
+            echo "No Python files tracked in this repository."
+          fi
+
       - name: Set up Python
+        if: steps.detect_py.outputs.has_python == 'true'
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.13'
 
       - name: Install lint tooling
+        if: steps.detect_py.outputs.has_python == 'true'
         run: python -m pip install --require-hashes -r .github/requirements-tools-locked.txt
 
       - name: Run Ruff Check
+        if: steps.detect_py.outputs.has_python == 'true'
         run: ruff check . --output-format=github --target-version=py311
 
       - name: Run Ruff Format Check
+        if: steps.detect_py.outputs.has_python == 'true'
         run: ruff format . --check --target-version=py311
+
+      - name: Skip (no Python files)
+        if: steps.detect_py.outputs.has_python != 'true'
+        run: echo "Skipping Ruff because no Python files were found."
 
   mypy:
     name: "🎯 Mypy (Static Type Check)"
-    if: hashFiles('**/*.py') != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Detect Python files
+        id: detect_py
+        shell: bash
+        run: |
+          if git ls-files '*.py' | grep -q .; then
+            echo "has_python=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_python=false" >> "$GITHUB_OUTPUT"
+            echo "No Python files tracked in this repository."
+          fi
+
       - name: Set up Python
+        if: steps.detect_py.outputs.has_python == 'true'
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.13'
 
       - name: Install typing tooling
+        if: steps.detect_py.outputs.has_python == 'true'
         run: python -m pip install --require-hashes -r .github/requirements-tools-locked.txt
 
       - name: Run Mypy on detected source directories
+        if: steps.detect_py.outputs.has_python == 'true'
         run: |
           targets=()
           for dir in bot cogs service src twitch_cog tests scripts; do
@@ -63,3 +94,7 @@ jobs:
 
           printf 'Detected mypy targets: %s\n' "${targets[*]}"
           mypy "${targets[@]}" --ignore-missing-imports --follow-imports=skip --install-types --non-interactive
+
+      - name: Skip (no Python files)
+        if: steps.detect_py.outputs.has_python != 'true'
+        run: echo "Skipping Mypy because no Python files were found."

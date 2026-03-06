@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from ipaddress import ip_address
 from typing import Any
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import unquote, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 
 from ..core.constants import log
 from ..internal_api import INTERNAL_API_BASE_PATH, INTERNAL_TOKEN_HEADER
+
+_LOGIN_SEGMENT_RE = re.compile(r"^[a-z0-9_]{3,25}$")
 
 
 class BotApiClientError(RuntimeError):
@@ -220,6 +223,7 @@ class BotApiClient:
                 url=url,
                 headers=headers,
                 json=payload,
+                allow_redirects=False,
             )
         except asyncio.TimeoutError as exc:
             raise BotApiClientError(
@@ -261,6 +265,17 @@ class BotApiClient:
                 return str(message)
         return fallback
 
+    @staticmethod
+    def _normalize_login_path_segment(login: str) -> str:
+        normalized = unquote(str(login or "")).strip().lower()
+        if not _LOGIN_SEGMENT_RE.fullmatch(normalized):
+            raise BotApiClientError(
+                status=400,
+                code="bad_request",
+                message="Streamer login is invalid.",
+            )
+        return normalized
+
     async def healthz(self) -> dict[str, Any]:
         payload = await self._request_json("GET", f"{INTERNAL_API_BASE_PATH}/healthz")
         if not isinstance(payload, dict):
@@ -292,32 +307,36 @@ class BotApiClient:
         return self._message_or_default(payload, fallback="added")
 
     async def remove_streamer(self, login: str) -> str:
+        normalized_login = self._normalize_login_path_segment(login)
         payload = await self._request_json(
             "DELETE",
-            f"{INTERNAL_API_BASE_PATH}/streamers/{login}",
+            f"{INTERNAL_API_BASE_PATH}/streamers/{normalized_login}",
         )
         return self._message_or_default(payload, fallback="removed")
 
     async def verify_streamer(self, login: str, *, mode: str) -> str:
+        normalized_login = self._normalize_login_path_segment(login)
         payload = await self._request_json(
             "POST",
-            f"{INTERNAL_API_BASE_PATH}/streamers/{login}/verify",
+            f"{INTERNAL_API_BASE_PATH}/streamers/{normalized_login}/verify",
             payload={"mode": mode},
         )
         return self._message_or_default(payload, fallback="verified")
 
     async def archive_streamer(self, login: str, *, mode: str) -> str:
+        normalized_login = self._normalize_login_path_segment(login)
         payload = await self._request_json(
             "POST",
-            f"{INTERNAL_API_BASE_PATH}/streamers/{login}/archive",
+            f"{INTERNAL_API_BASE_PATH}/streamers/{normalized_login}/archive",
             payload={"mode": mode},
         )
         return self._message_or_default(payload, fallback="updated")
 
     async def set_discord_flag(self, login: str, *, is_on_discord: bool) -> str:
+        normalized_login = self._normalize_login_path_segment(login)
         payload = await self._request_json(
             "POST",
-            f"{INTERNAL_API_BASE_PATH}/streamers/{login}/discord-flag",
+            f"{INTERNAL_API_BASE_PATH}/streamers/{normalized_login}/discord-flag",
             payload={"is_on_discord": bool(is_on_discord)},
         )
         return self._message_or_default(payload, fallback="updated")
@@ -330,9 +349,10 @@ class BotApiClient:
         discord_display_name: str | None,
         mark_member: bool,
     ) -> str:
+        normalized_login = self._normalize_login_path_segment(login)
         payload = await self._request_json(
             "POST",
-            f"{INTERNAL_API_BASE_PATH}/streamers/{login}/discord-profile",
+            f"{INTERNAL_API_BASE_PATH}/streamers/{normalized_login}/discord-profile",
             payload={
                 "discord_user_id": discord_user_id,
                 "discord_display_name": discord_display_name,
@@ -366,9 +386,10 @@ class BotApiClient:
         return payload
 
     async def get_streamer_analytics(self, login: str, *, days: int = 30) -> dict[str, Any]:
+        normalized_login = self._normalize_login_path_segment(login)
         payload = await self._request_json(
             "GET",
-            f"{INTERNAL_API_BASE_PATH}/analytics/streamer/{login}",
+            f"{INTERNAL_API_BASE_PATH}/analytics/streamer/{normalized_login}",
             query={"days": int(days)},
         )
         if not isinstance(payload, dict):

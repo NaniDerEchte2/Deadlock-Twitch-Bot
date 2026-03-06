@@ -36,21 +36,38 @@ $env:TWITCH_INTERNAL_API_PORT = '8776'
 $env:TWITCH_INTERNAL_API_BASE_URL = 'http://127.0.0.1:8776'
 ```
 
+## Script Security Baseline (Admin PowerShell)
+Use signed scripts where possible and run with a restrictive policy:
+```powershell
+# Default for local operations
+$ExecutionPolicy = 'RemoteSigned'
+# Stricter option when all scripts are signed
+# $ExecutionPolicy = 'AllSigned'
+```
+Verify script signature before execution when `AllSigned` is used:
+```powershell
+Get-AuthenticodeSignature C:/nssm/*.ps1 | Select-Object Path, Status, SignerCertificate
+```
+Keep script ACLs restricted (admins/system write access only):
+```powershell
+icacls C:/nssm
+```
+
 ## Install (Admin PowerShell)
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File C:/nssm/install-deadlock-twitch-bot-services.ps1
+powershell -NoProfile -ExecutionPolicy $ExecutionPolicy -File C:/nssm/install-deadlock-twitch-bot-services.ps1
 ```
 
 ## Update Service Definitions (Admin PowerShell)
 Use this after changing command paths, env vars, ports, or log settings.
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File C:/nssm/update-deadlock-twitch-bot-services.ps1
+powershell -NoProfile -ExecutionPolicy $ExecutionPolicy -File C:/nssm/update-deadlock-twitch-bot-services.ps1
 ```
 
 ## Restart Commands (Admin PowerShell)
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File C:/nssm/restart-dashboard-only.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File C:/nssm/restart-bot-only.ps1
+powershell -NoProfile -ExecutionPolicy $ExecutionPolicy -File C:/nssm/restart-dashboard-only.ps1
+powershell -NoProfile -ExecutionPolicy $ExecutionPolicy -File C:/nssm/restart-bot-only.ps1
 ```
 
 ## EventSub Routing Decision
@@ -68,7 +85,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:/nssm/restart-bot-only.ps1
 ## Verification
 1. Service-level healthcheck:
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File C:/nssm/healthcheck-deadlock-twitch-bot.ps1
+powershell -NoProfile -ExecutionPolicy $ExecutionPolicy -File C:/nssm/healthcheck-deadlock-twitch-bot.ps1
 ```
 2. Direct local checks:
 ```powershell
@@ -82,6 +99,13 @@ C:/caddy/caddy.exe validate --config C:/caddy/Caddyfile
 C:/caddy/caddy.exe reload --config C:/caddy/Caddyfile
 ```
 
+## Exception (Break-Glass Only)
+Only if operations are blocked and there is no signed/remotesigned path available:
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:/nssm/<script>.ps1
+```
+Risk: `Bypass` disables script trust enforcement and increases the chance of running tampered code. Require explicit approval, short-lived use, and post-incident review.
+
 ## Rollback
 1. Restore previous Caddy include file:
 ```powershell
@@ -90,6 +114,6 @@ Copy-Item C:/caddy/Caddyfile.deadlock-twitch-bot.bak C:/caddy/Caddyfile.deadlock
 2. Restore previous NSSM script revisions if you keep backups.
 3. Restart services:
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File C:/nssm/restart-dashboard-only.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File C:/nssm/restart-bot-only.ps1
+powershell -NoProfile -ExecutionPolicy $ExecutionPolicy -File C:/nssm/restart-dashboard-only.ps1
+powershell -NoProfile -ExecutionPolicy $ExecutionPolicy -File C:/nssm/restart-bot-only.ps1
 ```

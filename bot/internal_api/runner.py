@@ -10,6 +10,7 @@ from typing import Any
 from aiohttp import web
 
 from ..core.constants import log
+from ..runtime_mode import enforce_internal_api_runtime
 from .app import INTERNAL_API_BASE_PATH, build_internal_api_app
 
 
@@ -62,6 +63,7 @@ class InternalApiRunner:
 
         self._runner: web.AppRunner | None = None
         self._app: web.Application | None = None
+        self._missing_token_warning_emitted = False
 
     @property
     def is_running(self) -> bool:
@@ -71,10 +73,19 @@ class InternalApiRunner:
         if self._runner is not None:
             return
 
+        try:
+            enforce_internal_api_runtime(port=self.port)
+        except RuntimeError as exc:
+            log.error("%s", exc)
+            return
+
         if not self.token:
-            log.error(
-                "TWITCH_INTERNAL_API_TOKEN is empty. Internal API will start in fail-closed mode."
-            )
+            if not self._missing_token_warning_emitted:
+                self._missing_token_warning_emitted = True
+                log.warning(
+                    "TWITCH_INTERNAL_API_TOKEN is empty. "
+                    "Internal API is running in fail-closed mode."
+                )
 
         max_retries = 5
         retry_delay = 0.5
@@ -114,6 +125,11 @@ class InternalApiRunner:
                     self.base_path.rstrip("/"),
                 )
                 return
+            except asyncio.CancelledError:
+                if runner is not None:
+                    await runner.cleanup()
+                log.info("Internal API startup cancelled")
+                return
             except OSError as exc:
                 if runner is not None:
                     await runner.cleanup()
@@ -143,6 +159,8 @@ class InternalApiRunner:
             return
         try:
             await self._runner.cleanup()
+        except asyncio.CancelledError:
+            log.info("Internal API shutdown cancelled")
         finally:
             self._runner = None
             self._app = None

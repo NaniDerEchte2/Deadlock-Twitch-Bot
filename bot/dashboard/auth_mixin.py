@@ -341,6 +341,43 @@ class _DashboardAuthMixin:
             path="/",
         )
 
+    @staticmethod
+    def _is_valid_oauth_context_token(token: str) -> bool:
+        candidate = (token or "").strip()
+        if len(candidate) < 16 or len(candidate) > 128:
+            return False
+        return all(ch.isalnum() or ch in {"-", "_"} for ch in candidate)
+
+    def _oauth_context_cookie_name(self) -> str:
+        base_name = str(getattr(self, "_session_cookie_name", "") or "").strip()
+        if not base_name:
+            base_name = "twitch_dash_session"
+        return f"{base_name}_oauth_ctx"
+
+    def _set_oauth_context_cookie(
+        self, response: web.StreamResponse, request: web.Request, token: str
+    ) -> None:
+        response.set_cookie(
+            self._oauth_context_cookie_name(),
+            token,
+            max_age=self._oauth_state_ttl_seconds,
+            httponly=True,
+            secure=self._is_secure_request(request),
+            samesite="Lax",
+            path="/twitch/auth/callback",
+        )
+
+    def _clear_oauth_context_cookie(
+        self, response: web.StreamResponse, request: web.Request
+    ) -> None:
+        response.del_cookie(
+            self._oauth_context_cookie_name(),
+            path="/twitch/auth/callback",
+            httponly=True,
+            samesite="Lax",
+            secure=self._is_secure_request(request),
+        )
+
     def _clear_session_cookie(self, response: web.StreamResponse, request: web.Request) -> None:
         response.del_cookie(
             self._session_cookie_name,
@@ -703,15 +740,27 @@ class _DashboardAuthMixin:
                 ),
                 status=503,
             )
+        request_cookies = getattr(request, "cookies", {}) or {}
+        existing_context_token = (
+            request_cookies.get(self._oauth_context_cookie_name()) or ""
+        ).strip()
+        context_token = (
+            existing_context_token
+            if self._is_valid_oauth_context_token(existing_context_token)
+            else secrets.token_urlsafe(24)
+        )
         state = secrets.token_urlsafe(24)
         self._oauth_states[state] = {
             "created_at": time.time(),
             "next_path": next_path,
             "redirect_uri": redirect_uri,
+            "context_token": context_token,
         }
         auth_url = f"{TWITCH_OAUTH_AUTHORIZE_URL}?{urlencode({'client_id': self._oauth_client_id, 'redirect_uri': redirect_uri, 'response_type': 'code', 'state': state})}"
         safe_auth_url = self._safe_oauth_authorize_redirect(auth_url)
-        raise web.HTTPFound(safe_auth_url)
+        response = web.HTTPFound(safe_auth_url)
+        self._set_oauth_context_cookie(response, request, context_token)
+        raise response
 
     async def auth_callback(self, request: web.Request) -> web.StreamResponse:
         """Handle Twitch OAuth callback, verify partner status, and create session."""
@@ -738,6 +787,26 @@ class _DashboardAuthMixin:
         state_data = self._oauth_states.pop(state, None)
         if not state_data:
             return web.Response(text="OAuth state ungültig oder abgelaufen.", status=400)
+        created_at = float(state_data.get("created_at", 0.0) or 0.0)
+        if created_at <= 0.0 or time.time() - created_at > self._oauth_state_ttl_seconds:
+            response = web.Response(text="OAuth state ungültig oder abgelaufen.", status=400)
+            self._clear_oauth_context_cookie(response, request)
+            return response
+
+        expected_context_token = str(state_data.get("context_token") or "").strip()
+        request_cookies = getattr(request, "cookies", {}) or {}
+        presented_context_token = (
+            request_cookies.get(self._oauth_context_cookie_name()) or ""
+        ).strip()
+        if (
+            not expected_context_token
+            or not self._is_valid_oauth_context_token(expected_context_token)
+            or not presented_context_token
+            or not secrets.compare_digest(expected_context_token, presented_context_token)
+        ):
+            response = web.Response(text="OAuth state ungültig oder abgelaufen.", status=400)
+            self._clear_oauth_context_cookie(response, request)
+            return response
 
         user = await self._exchange_code_for_user(code, str(state_data.get("redirect_uri") or ""))
         if not user:
@@ -782,6 +851,7 @@ class _DashboardAuthMixin:
         )
         response = web.HTTPFound(destination)
         self._set_session_cookie(response, request, session_id)
+        self._clear_oauth_context_cookie(response, request)
         raise response
 
     # ------------------------------------------------------------------ #

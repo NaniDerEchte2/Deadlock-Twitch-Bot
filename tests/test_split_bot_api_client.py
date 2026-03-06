@@ -121,6 +121,61 @@ class BotApiClientErrorMappingTests(unittest.IsolatedAsyncioTestCase):
             "http://127.0.0.1:8766/internal/twitch/v1/streamers",
         )
 
+    async def test_rejects_path_confusing_logins_for_streamer_path_segments(self) -> None:
+        session = _FakeSession(
+            response=_FakeResponse(status=200, text='{"message":"removed"}')
+        )
+        client = BotApiClient(
+            base_url="http://127.0.0.1:8766",
+            token="secret",
+            session=session,
+        )
+
+        for login in ("..", "foo/bar", "foo%2fbar", "foo%5cbar", "ab"):
+            with self.subTest(login=login):
+                with self.assertRaises(BotApiClientError) as ctx:
+                    await client.remove_streamer(login)
+                self.assertEqual(ctx.exception.status, 400)
+                self.assertEqual(ctx.exception.code, "bad_request")
+
+        self.assertEqual(session.calls, [])
+
+    async def test_normalizes_valid_login_before_using_path_segment(self) -> None:
+        session = _FakeSession(
+            response=_FakeResponse(status=200, text='{"message":"verified"}')
+        )
+        client = BotApiClient(
+            base_url="http://127.0.0.1:8766",
+            token="secret",
+            session=session,
+        )
+
+        message = await client.verify_streamer("Early_Salty", mode="manual")
+
+        self.assertEqual(message, "verified")
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(
+            session.calls[0]["url"],
+            "http://127.0.0.1:8766/internal/twitch/v1/streamers/early_salty/verify",
+        )
+
+    async def test_disables_redirect_following_to_protect_internal_token(self) -> None:
+        session = _FakeSession(
+            response=_FakeResponse(status=200, text='{"ok":true}')
+        )
+        client = BotApiClient(
+            base_url="http://127.0.0.1:8766",
+            token="secret",
+            session=session,
+        )
+
+        payload = await client.healthz()
+
+        self.assertEqual(payload, {"ok": True})
+        self.assertEqual(len(session.calls), 1)
+        self.assertIn("kwargs", session.calls[0])
+        self.assertFalse(session.calls[0]["kwargs"].get("allow_redirects", True))
+
     def test_rejects_non_loopback_base_url_by_default(self) -> None:
         with self.assertRaises(ValueError) as ctx:
             BotApiClient(
@@ -167,6 +222,56 @@ class BotApiClientErrorMappingTests(unittest.IsolatedAsyncioTestCase):
         ):
             app = build_dashboard_service_app()
         self.assertIsNotNone(app)
+
+    def test_dashboard_service_starts_in_degraded_mode_when_internal_token_missing(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "TWITCH_DASHBOARD_NOAUTH": "0",
+                "TWITCH_INTERNAL_API_TOKEN": "",
+                "TWITCH_INTERNAL_API_BASE_URL": "http://127.0.0.1:8776",
+            },
+            clear=False,
+        ):
+            with self.assertLogs("TwitchStreams", level="WARNING") as captured:
+                app = build_dashboard_service_app(
+                    noauth=False,
+                    oauth_client_id="client-id",
+                    oauth_client_secret="client-secret",
+                )
+
+        self.assertIsNotNone(app)
+        degraded_warnings = [
+            line
+            for line in captured.output
+            if "Dashboard service degraded startup" in line
+            and "TWITCH_INTERNAL_API_TOKEN missing" in line
+        ]
+        self.assertEqual(len(degraded_warnings), 1)
+
+    def test_dashboard_service_warns_once_when_oauth_credentials_missing(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "TWITCH_DASHBOARD_NOAUTH": "0",
+                "TWITCH_INTERNAL_API_TOKEN": "secret",
+                "TWITCH_INTERNAL_API_BASE_URL": "http://127.0.0.1:8776",
+                "TWITCH_CLIENT_ID": "",
+                "TWITCH_CLIENT_SECRET": "",
+            },
+            clear=False,
+        ):
+            with self.assertLogs("TwitchStreams", level="WARNING") as captured:
+                app = build_dashboard_service_app(noauth=False)
+
+        self.assertIsNotNone(app)
+        oauth_warnings = [
+            line
+            for line in captured.output
+            if "Dashboard service degraded startup" in line
+            and "TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET missing" in line
+        ]
+        self.assertEqual(len(oauth_warnings), 1)
 
 
 if __name__ == "__main__":

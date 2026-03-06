@@ -17,7 +17,11 @@ from ..core.constants import (
     log,
 )
 from ..dashboard.server_v2 import build_v2_app
-from .client import BotApiClient
+from ..runtime_mode import (
+    INTERNAL_API_PORT as RUNTIME_INTERNAL_API_PORT,
+    enforce_dashboard_service_runtime,
+)
+from .client import BotApiClient, BotApiClientError
 
 
 def _parse_env_bool(name: str, default: bool) -> bool:
@@ -67,7 +71,10 @@ def _default_internal_api_base_url() -> str:
     if explicit:
         return explicit
     host = (os.getenv("TWITCH_INTERNAL_API_HOST") or TWITCH_INTERNAL_API_HOST or "127.0.0.1").strip()
-    port = _parse_env_int("TWITCH_INTERNAL_API_PORT", int(TWITCH_INTERNAL_API_PORT or 8766))
+    port = _parse_env_int(
+        "TWITCH_INTERNAL_API_PORT",
+        int(TWITCH_INTERNAL_API_PORT or RUNTIME_INTERNAL_API_PORT),
+    )
     return f"http://{host}:{port}"
 
 
@@ -111,63 +118,6 @@ def build_dashboard_service_app(
         if internal_api_allow_non_loopback is not None
         else _parse_env_bool("TWITCH_INTERNAL_API_ALLOW_NON_LOOPBACK", False)
     )
-    client = BotApiClient(
-        base_url=resolved_internal_base,
-        token=resolved_internal_token,
-        allow_non_loopback=allow_non_loopback,
-        timeout_seconds=timeout_seconds,
-    )
-
-    async def _add_cb(login: str, require_link: bool) -> str:
-        return await client.add_streamer(login, require_link=require_link)
-
-    async def _remove_cb(login: str) -> str:
-        return await client.remove_streamer(login)
-
-    async def _list_cb() -> list[dict[str, Any]]:
-        return await client.get_streamers()
-
-    async def _stats_cb(**kwargs: Any) -> dict[str, Any]:
-        return await client.get_stats(
-            hour_from=kwargs.get("hour_from"),
-            hour_to=kwargs.get("hour_to"),
-            streamer=kwargs.get("streamer"),
-        )
-
-    async def _verify_cb(login: str, mode: str) -> str:
-        return await client.verify_streamer(login, mode=mode)
-
-    async def _archive_cb(login: str, mode: str) -> str:
-        return await client.archive_streamer(login, mode=mode)
-
-    async def _discord_flag_cb(login: str, is_on_discord: bool) -> str:
-        return await client.set_discord_flag(login, is_on_discord=is_on_discord)
-
-    async def _discord_profile_cb(
-        login: str,
-        discord_user_id: str | None,
-        discord_display_name: str | None,
-        mark_member: bool,
-    ) -> str:
-        return await client.save_discord_profile(
-            login,
-            discord_user_id=discord_user_id,
-            discord_display_name=discord_display_name,
-            mark_member=mark_member,
-        )
-
-    async def _raid_auth_url_cb(login: str) -> str:
-        return await client.get_raid_auth_url(login)
-
-    async def _raid_go_url_cb(state: str) -> str | None:
-        return await client.get_raid_go_url(state)
-
-    async def _raid_requirements_cb(login: str) -> str:
-        return await client.send_raid_requirements(login)
-
-    async def _raid_oauth_callback_cb(*, code: str, state: str, error: str) -> dict[str, Any]:
-        return await client.process_raid_oauth_callback(code=code, state=state, error=error)
-
     resolved_dashboard_token = (
         dashboard_token
         if dashboard_token is not None
@@ -202,6 +152,183 @@ def build_dashboard_service_app(
         if legacy_stats_url is not None
         else (os.getenv("TWITCH_LEGACY_STATS_URL") or "").strip() or None
     )
+    degraded_startup_reasons: list[str] = []
+    if not resolved_internal_token:
+        degraded_startup_reasons.append(
+            "TWITCH_INTERNAL_API_TOKEN missing; dashboard will run in degraded upstream mode."
+        )
+    if not resolved_noauth and (not resolved_oauth_client_id or not resolved_oauth_client_secret):
+        degraded_startup_reasons.append(
+            "TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET missing; Twitch OAuth login will return 503."
+        )
+    for reason in degraded_startup_reasons:
+        log.warning("Dashboard service degraded startup: %s", reason)
+
+    client: BotApiClient | None = None
+    if resolved_internal_token:
+        try:
+            client = BotApiClient(
+                base_url=resolved_internal_base,
+                token=resolved_internal_token,
+                allow_non_loopback=allow_non_loopback,
+                timeout_seconds=timeout_seconds,
+            )
+        except ValueError as exc:
+            log.warning(
+                "Dashboard service degraded startup: invalid internal API config (%s). "
+                "Dependent actions will report upstream_unavailable.",
+                exc,
+            )
+
+    upstream_warning_emitted = False
+
+    def _warn_upstream_once(context: str, exc: Exception) -> None:
+        nonlocal upstream_warning_emitted
+        if upstream_warning_emitted:
+            return
+        upstream_warning_emitted = True
+        log.warning(
+            "Dashboard internal API unavailable (degraded mode). First failure in %s: %s",
+            context,
+            exc,
+        )
+
+    def _upstream_unavailable_error() -> BotApiClientError:
+        return BotApiClientError(
+            status=503,
+            code="upstream_unavailable",
+            message="Bot internal API is unavailable.",
+        )
+
+    async def _add_cb(login: str, require_link: bool) -> str:
+        if client is None:
+            return "Bot internal API unavailable; action not applied."
+        try:
+            return await client.add_streamer(login, require_link=require_link)
+        except BotApiClientError as exc:
+            _warn_upstream_once("streamer_add", exc)
+            return "Bot internal API unavailable; action not applied."
+
+    async def _remove_cb(login: str) -> str:
+        if client is None:
+            return "Bot internal API unavailable; action not applied."
+        try:
+            return await client.remove_streamer(login)
+        except BotApiClientError as exc:
+            _warn_upstream_once("streamer_remove", exc)
+            return "Bot internal API unavailable; action not applied."
+
+    async def _list_cb() -> list[dict[str, Any]]:
+        if client is None:
+            return []
+        try:
+            return await client.get_streamers()
+        except BotApiClientError as exc:
+            _warn_upstream_once("streamers_list", exc)
+            return []
+
+    async def _stats_cb(**kwargs: Any) -> dict[str, Any]:
+        if client is None:
+            return {}
+        try:
+            return await client.get_stats(
+                hour_from=kwargs.get("hour_from"),
+                hour_to=kwargs.get("hour_to"),
+                streamer=kwargs.get("streamer"),
+            )
+        except BotApiClientError as exc:
+            _warn_upstream_once("stats", exc)
+            return {}
+
+    async def _verify_cb(login: str, mode: str) -> str:
+        if client is None:
+            return "Bot internal API unavailable; action not applied."
+        try:
+            return await client.verify_streamer(login, mode=mode)
+        except BotApiClientError as exc:
+            _warn_upstream_once("streamer_verify", exc)
+            return "Bot internal API unavailable; action not applied."
+
+    async def _archive_cb(login: str, mode: str) -> str:
+        if client is None:
+            return "Bot internal API unavailable; action not applied."
+        try:
+            return await client.archive_streamer(login, mode=mode)
+        except BotApiClientError as exc:
+            _warn_upstream_once("streamer_archive", exc)
+            return "Bot internal API unavailable; action not applied."
+
+    async def _discord_flag_cb(login: str, is_on_discord: bool) -> str:
+        if client is None:
+            return "Bot internal API unavailable; action not applied."
+        try:
+            return await client.set_discord_flag(login, is_on_discord=is_on_discord)
+        except BotApiClientError as exc:
+            _warn_upstream_once("discord_flag", exc)
+            return "Bot internal API unavailable; action not applied."
+
+    async def _discord_profile_cb(
+        login: str,
+        discord_user_id: str | None,
+        discord_display_name: str | None,
+        mark_member: bool,
+    ) -> str:
+        if client is None:
+            return "Bot internal API unavailable; action not applied."
+        try:
+            return await client.save_discord_profile(
+                login,
+                discord_user_id=discord_user_id,
+                discord_display_name=discord_display_name,
+                mark_member=mark_member,
+            )
+        except BotApiClientError as exc:
+            _warn_upstream_once("discord_profile", exc)
+            return "Bot internal API unavailable; action not applied."
+
+    async def _raid_auth_url_cb(login: str) -> str:
+        if client is None:
+            return ""
+        try:
+            return await client.get_raid_auth_url(login)
+        except BotApiClientError as exc:
+            _warn_upstream_once("raid_auth_url", exc)
+            return ""
+
+    async def _raid_go_url_cb(state: str) -> str | None:
+        if client is None:
+            raise _upstream_unavailable_error()
+        try:
+            return await client.get_raid_go_url(state)
+        except BotApiClientError as exc:
+            _warn_upstream_once("raid_go_url", exc)
+            raise _upstream_unavailable_error() from exc
+
+    async def _raid_requirements_cb(login: str) -> str:
+        if client is None:
+            raise _upstream_unavailable_error()
+        try:
+            return await client.send_raid_requirements(login)
+        except BotApiClientError as exc:
+            _warn_upstream_once("raid_requirements", exc)
+            raise _upstream_unavailable_error() from exc
+
+    async def _raid_oauth_callback_cb(*, code: str, state: str, error: str) -> dict[str, Any]:
+        if client is None:
+            return {
+                "status": 503,
+                "title": "Twitch OAuth nicht verfügbar",
+                "body_html": "<p>Der interne Bot-Service ist aktuell nicht verfügbar.</p>",
+            }
+        try:
+            return await client.process_raid_oauth_callback(code=code, state=state, error=error)
+        except BotApiClientError as exc:
+            _warn_upstream_once("raid_oauth_callback", exc)
+            return {
+                "status": 503,
+                "title": "Twitch OAuth nicht verfügbar",
+                "body_html": "<p>Der interne Bot-Service ist aktuell nicht verfügbar.</p>",
+            }
 
     app = build_v2_app(
         noauth=resolved_noauth,
@@ -231,6 +358,8 @@ def build_dashboard_service_app(
     )
 
     async def _close_client(_: web.Application) -> None:
+        if client is None:
+            return
         await client.close()
 
     app["bot_api_client"] = client
@@ -252,6 +381,7 @@ async def run_dashboard_service(
         if port is not None
         else _parse_env_int("TWITCH_DASHBOARD_PORT", int(TWITCH_DASHBOARD_PORT or 8765))
     )
+    enforce_dashboard_service_runtime(port=resolved_port)
     dashboard_app = app or build_dashboard_service_app()
     runner = web.AppRunner(dashboard_app)
     await runner.setup()
@@ -265,6 +395,8 @@ async def run_dashboard_service(
     )
     try:
         await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        log.info("Standalone dashboard service shutdown requested")
     finally:
         await runner.cleanup()
 
