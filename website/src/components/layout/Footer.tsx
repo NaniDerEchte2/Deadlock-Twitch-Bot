@@ -64,7 +64,7 @@ export function Footer() {
               EarlySalty
             </span>
             <p className="text-text-secondary text-sm leading-relaxed">
-              Erstellt fuer die Deadlock-Community
+              Erstellt für die Deadlock-Community
             </p>
           </div>
 

@@ -32,7 +32,7 @@ export const features: Feature[] = [
     icon: "Users",
     title: "Community",
     description:
-      "Belohne treue Zuschauer automatisch, und sprich deine Lurker direkt im Chat automatisier an.",
+      "Belohne treue Zuschauer automatisch und aktiviere Lurker gezielt im Chat — für eine Community, die wächst.",
   },
   {
     id: "monitoring",

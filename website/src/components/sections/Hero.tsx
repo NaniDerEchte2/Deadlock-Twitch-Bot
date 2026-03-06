@@ -8,13 +8,13 @@ import {
 
 const HERO_STATS = [
   {
-    title: "1900+ Mitglieder - in der deutschen Deadlock-Community"
+    title: "1900+ Mitglieder — in der deutschen Deadlock-Community"
   },
   {
     title: "Automatisierung für Raids, Analytics, Clips und Moderation",
   },
   {
-    title: "Größtes Deadlock-Raid-Netzwerk - auf Twitch im deutschsprachigen Raum",
+    title: "Größtes Deadlock-Raid-Netzwerk — auf Twitch im deutschsprachigen Raum",
   },
 ];
 
@@ -66,7 +66,7 @@ export function Hero() {
             className="mt-6 text-xl text-[var(--color-text-secondary)] max-w-2xl mx-auto"
           >
             Auto-Raid, Echtzeit-Analytics, Clip Manager und Community Tools —
-            alles in einem Bot fuer die Deadlock-Community.
+            Auto-Raid, Echtzeit-Analytics, Clip Manager und Community Tools — alles, was du brauchst, um in der Deadlock-Community zu wachsen.
           </motion.p>
 
           {/* CTA Buttons */}

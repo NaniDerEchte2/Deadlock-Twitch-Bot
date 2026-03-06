@@ -62,7 +62,7 @@ export function Community() {
           <CommunityCard
             icon={<Bell size={20} className="text-white" />}
             title="Live-Benachrichtigungen"
-            description="Automatische Notifications in Discord wenn du live gehst"
+            description="Automatische Benachrichtigungen in Discord, wenn du live gehst"
             delay={0.3}
           />
         </div>

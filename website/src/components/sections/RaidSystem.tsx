@@ -12,7 +12,7 @@ const features = [
   {
     title: "Viewer-Tracking",
     description:
-      "Echtzeit-Erfassung der Viewer-Zahlen aller Partner-Kanaele",
+      "Echtzeit-Erfassung der Viewer-Zahlen aller Partner-Kanäle",
   },
   {
     title: "Erfolgsstatistiken",
@@ -22,7 +22,7 @@ const features = [
   {
     title: "Silent Mode",
     description:
-      "Automatische Raids ohne Chat-Ankuendigung moeglich",
+      "Automatische Raids ohne Chat-Ankündigung möglich",
   },
 ];
 
@@ -64,7 +64,7 @@ export function RaidSystem() {
 
             <p className="text-[var(--color-text-secondary)] text-lg mb-8 leading-relaxed">
               Unser Raid-System nutzt einen fairen Algorithmus, der sicherstellt,
-              dass alle Partner gleichmaessig Raids erhalten.
+              dass alle Partner gleichmäßig Raids erhalten.
             </p>
 
             <ul className="space-y-4">

@@ -22,7 +22,7 @@ export function CTA() {
           </h2>
 
           <p className="text-xl text-[var(--color-text-secondary)] mb-10">
-            Werde Partner und nutze alle Features kostenlos.
+            Werde Teil der größten deutschen Deadlock-Community auf Twitch — kostenlos.
           </p>
 
           <div className="flex gap-4 justify-center flex-wrap">

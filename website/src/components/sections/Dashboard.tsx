@@ -9,14 +9,14 @@ import { ScrollReveal } from "@/components/ui/ScrollReveal";
 // Tab definitions
 // ---------------------------------------------------------------------------
 
-const TABS = ["Uebersicht", "Performance", "Heatmap", "Audience", "Health Score"] as const;
+const TABS = ["Übersicht", "Performance", "Heatmap", "Audience", "Health Score"] as const;
 type Tab = (typeof TABS)[number];
 
 // ---------------------------------------------------------------------------
 // Tab mock content
 // ---------------------------------------------------------------------------
 
-function TabUebersicht() {
+function TabÜbersicht() {
   return (
     <div className="h-full flex flex-col gap-4">
       {/* KPI row */}
@@ -94,7 +94,7 @@ function TabHeatmap() {
   const rows = 6;
   return (
     <div className="h-full flex flex-col gap-3">
-      <p className="text-xs text-[var(--color-text-secondary)]">Viewer-Aktivitaet nach Stunde / Wochentag</p>
+      <p className="text-xs text-[var(--color-text-secondary)]">Viewer-Aktivität nach Stunde / Wochentag</p>
       <div className="flex-1 flex flex-col gap-1">
         {Array.from({ length: rows }).map((_, r) => (
           <div key={r} className="flex gap-1 flex-1">
@@ -223,7 +223,7 @@ function TabHealthScore() {
       <div className="grid grid-cols-3 gap-3 w-full max-w-xs">
         {[
           { label: "Wachstum", v: 91, c: "#2ecc71" },
-          { label: "Aktivitaet", v: 84, c: "#ff7a18" },
+          { label: "Aktivität", v: 84, c: "#ff7a18" },
           { label: "Bindung", v: 86, c: "#10b7ad" },
         ].map(({ label, v, c }) => (
           <div
@@ -247,7 +247,7 @@ function TabHealthScore() {
 function TabContent({ tab }: { tab: Tab }) {
   return (
     <div className="aspect-video bg-gradient-to-br from-[var(--color-card)] to-[var(--color-bg)] rounded-lg p-8">
-      {tab === "Uebersicht" && <TabUebersicht />}
+      {tab === "Übersicht" && <TabÜbersicht />}
       {tab === "Performance" && <TabPerformance />}
       {tab === "Heatmap" && <TabHeatmap />}
       {tab === "Audience" && <TabAudience />}
@@ -265,13 +265,13 @@ const callouts = [
     Icon: Sparkles,
     title: "KI-Coaching",
     description:
-      "Personalisierte Verbesserungsvorschlaege basierend auf deinen Stream-Daten",
+      "Personalisierte Verbesserungsvorschläge basierend auf deinen Stream-Daten",
   },
   {
     Icon: Flame,
     title: "Echtzeit-Heatmaps",
     description:
-      "Visualisiere Viewer-Aktivitaet ueber den gesamten Stream",
+      "Visualisiere Viewer-Aktivität ueber den gesamten Stream",
   },
   {
     Icon: Heart,
@@ -286,7 +286,7 @@ const callouts = [
 // ---------------------------------------------------------------------------
 
 export function Dashboard() {
-  const [activeTab, setActiveTab] = useState<Tab>("Uebersicht");
+  const [activeTab, setActiveTab] = useState<Tab>("Übersicht");
 
   return (
     <section id="dashboard" className="py-24">
@@ -296,7 +296,7 @@ export function Dashboard() {
         <SectionHeading
           badge="Analytics"
           title="Analytics auf einem neuen Level"
-          subtitle="13 spezialisierte Tabs fuer jeden Aspekt deines Streams."
+          subtitle="13 spezialisierte Tabs für jeden Aspekt deines Streams."
         />
 
         {/* Tab selector */}
