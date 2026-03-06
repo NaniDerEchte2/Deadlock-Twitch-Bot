@@ -545,9 +545,10 @@ class AnalyticsV2Mixin(
         local_path = Path("logs") / _INTERNAL_HOME_AUTOBAN_LOG_FILENAME
         project_root = Path(__file__).resolve().parents[2]
         project_path = project_root / "logs" / _INTERNAL_HOME_AUTOBAN_LOG_FILENAME
-        if project_path == local_path:
-            return (local_path,)
-        return local_path, project_path
+        # Twitch-Bot läuft mit CWD = Deadlock/ (Geschwister-Verzeichnis)
+        sibling_path = project_root.parent / "Deadlock" / "logs" / _INTERNAL_HOME_AUTOBAN_LOG_FILENAME
+        candidates = dict.fromkeys([local_path, project_path, sibling_path])
+        return tuple(candidates)
 
     @staticmethod
     def _internal_home_service_warning_title(severity_code: str) -> str:
