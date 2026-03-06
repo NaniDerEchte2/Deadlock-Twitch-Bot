@@ -898,6 +898,30 @@ class _DashboardRoutesMixin:
             )
         plans_html = "".join(plan_cards)
 
+        # --- Bundle toggle + promo message data ---
+        is_bundle = current_plan_id == "bundle_analysis_raid_boost"
+        promo_disabled = False
+        promo_message = ""
+
+        session = self._get_dashboard_auth_session(request)
+        twitch_login = (session or {}).get("twitch_login", "")
+
+        if twitch_login:
+            try:
+                with storage.get_conn() as conn:
+                    row = conn.execute(
+                        "SELECT promo_disabled, promo_message FROM streamer_plans WHERE LOWER(twitch_login) = LOWER(?)",
+                        (twitch_login,),
+                    ).fetchone()
+                    if row:
+                        promo_disabled = bool(row[0])
+                        promo_message = str(row[1] or "")
+            except Exception:
+                pass
+
+        promo_error = str(request.query.get("promo_error") or "").strip()
+        promo_saved = str(request.query.get("promo_saved") or "").strip() == "1"
+
         page_html = render_abbo_page(
             logout_url=logout_url,
             cycle_switch_html=cycle_switch_html,
@@ -906,6 +930,12 @@ class _DashboardRoutesMixin:
             status_notice_html=status_notice_html,
             plans_html=plans_html,
             csrf_token=csrf_token,
+            is_bundle=is_bundle,
+            promo_disabled=promo_disabled,
+            promo_message=promo_message,
+            promo_error=promo_error,
+            promo_saved=promo_saved,
+            is_authenticated=bool(twitch_login),
         )
         return web.Response(text=page_html, content_type="text/html")
 
@@ -2938,6 +2968,89 @@ class _DashboardRoutesMixin:
         except Exception:
             log.exception("Failed to register Social Media Dashboard routes")
 
+    async def abbo_promo_settings(self, request: web.Request) -> web.StreamResponse:
+        """POST /twitch/abbo/promo-settings — toggle promo_disabled for bundle plan."""
+        if not self._check_v2_auth(request):
+            login_url = (
+                TWITCH_ABBO_DISCORD_LOGIN_URL
+                if self._should_use_discord_admin_login(request)
+                else TWITCH_ABBO_LOGIN_URL
+            )
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/abbo",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
+
+        current_plan = self._billing_current_plan_for_request(request)
+        current_plan_id = str(current_plan.get("plan_id") or "").strip()
+        if current_plan_id != "bundle_analysis_raid_boost":
+            raise web.HTTPFound("/twitch/abbo")
+
+        data = await request.post()
+        promo_disabled = int(data.get("promo_disabled") or 0)
+
+        session = self._get_dashboard_auth_session(request)
+        twitch_login = (session or {}).get("twitch_login", "")
+        if not twitch_login:
+            raise web.HTTPFound("/twitch/abbo")
+
+        try:
+            with storage.get_conn() as conn:
+                conn.execute(
+                    "UPDATE streamer_plans SET promo_disabled = ? WHERE LOWER(twitch_login) = LOWER(?)",
+                    (promo_disabled, twitch_login),
+                )
+        except Exception:
+            log.exception("promo_disabled update failed for %s", twitch_login)
+
+        raise web.HTTPFound("/twitch/abbo?profile=saved")
+
+    async def abbo_promo_message(self, request: web.Request) -> web.StreamResponse:
+        """POST /twitch/abbo/promo-message — set custom promo message."""
+        if not self._check_v2_auth(request):
+            login_url = (
+                TWITCH_ABBO_DISCORD_LOGIN_URL
+                if self._should_use_discord_admin_login(request)
+                else TWITCH_ABBO_LOGIN_URL
+            )
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/abbo",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
+
+        session = self._get_dashboard_auth_session(request)
+        twitch_login = (session or {}).get("twitch_login", "")
+        if not twitch_login:
+            raise web.HTTPFound("/twitch/abbo")
+
+        data = await request.post()
+        promo_message = str(data.get("promo_message") or "").strip()
+
+        if promo_message and "{invite}" not in promo_message:
+            raise web.HTTPFound("/twitch/abbo?promo_error=missing_invite")
+
+        try:
+            with storage.get_conn() as conn:
+                val = promo_message if promo_message else None
+                updated = conn.execute(
+                    "UPDATE streamer_plans SET promo_message = ? WHERE LOWER(twitch_login) = LOWER(?)",
+                    (val, twitch_login),
+                ).rowcount
+                if not updated:
+                    log.warning("promo_message: no streamer_plans row for %s, skipping", twitch_login)
+        except Exception:
+            log.exception("promo_message update failed for %s", twitch_login)
+
+        raise web.HTTPFound("/twitch/abbo?promo_saved=1")
+
     def attach(self, app: web.Application) -> None:
         app.add_routes(
             [
@@ -2971,6 +3084,8 @@ class _DashboardRoutesMixin:
                 web.post("/twitch/abbo/kündigen", self.abbo_cancel),
                 web.get("/twitch/abbo/rechnungen", self.abbo_invoices),
                 web.get("/twitch/abbo/stripe-settings", self.abbo_stripe_settings),
+                web.post("/twitch/abbo/promo-settings", self.abbo_promo_settings),
+                web.post("/twitch/abbo/promo-message", self.abbo_promo_message),
                 web.get("/twitch/abbo/rechnung", self.abbo_invoice),
                 web.get("/twitch/impressum", self.abbo_impressum),
                 web.get("/twitch/datenschutz", self.abbo_datenschutz),

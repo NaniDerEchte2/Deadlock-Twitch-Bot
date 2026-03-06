@@ -1739,3 +1739,5 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_streamer_plans_login ON streamer_plans(twitch_login)"
     )
+    conn.execute("ALTER TABLE streamer_plans ADD COLUMN IF NOT EXISTS raid_boost_enabled INTEGER NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE streamer_plans ADD COLUMN IF NOT EXISTS promo_message TEXT")

@@ -27,7 +27,31 @@ from .api_chat_deep import _AnalyticsChatDeepMixin
 from .api_raids import _AnalyticsRaidsMixin
 from .api_viewers import _AnalyticsViewersMixin
 
+from ..storage import pg as storage
+
 log = logging.getLogger("TwitchStreams.AnalyticsV2")
+
+# ---------------------------------------------------------------------------
+# Plan-gating for extended analytics endpoints
+# ---------------------------------------------------------------------------
+EXTENDED_PLANS = {"analysis_dashboard", "bundle_analysis_raid_boost"}
+
+
+def _get_plan_for_login(login: str) -> str:
+    """Return the plan_id for *login*, falling back to ``'raid_free'``."""
+    with storage.get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT plan_id FROM twitch_billing_subscriptions
+            WHERE LOWER(customer_reference) = LOWER(?)
+              AND status IN ('active', 'trialing', 'past_due')
+            ORDER BY updated_at DESC LIMIT 1
+            """,
+            (login,),
+        ).fetchone()
+    return str((row or {}).get("plan_id") or "raid_free")
+
+
 INTERNAL_HOME_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard"
 INTERNAL_HOME_DISCORD_CONNECT_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard"
 DASHBOARD_V2_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
@@ -66,9 +90,6 @@ _INTERNAL_HOME_AUTOBAN_LOG_FILENAME = "twitch_autobans.log"
 _INTERNAL_HOME_AUTOBAN_MAX_SCAN_LINES = 5000
 _INTERNAL_HOME_AUTOBAN_MAX_EVENTS = 20
 _INTERNAL_HOME_ACTIVITY_MAX_EVENTS = 10
-_INTERNAL_HOME_ACTIVITY_PRIORITY_TYPES: frozenset[str] = frozenset(
-    {"ban", "ban_keyword_hit", "unban", "service_pitch_warning"}
-)
 
 
 def _is_loopback_host(raw_value: str) -> bool:
@@ -130,6 +151,31 @@ class AnalyticsV2Mixin(
     _AnalyticsAIMixin,
 ):
     """Mixin providing v2 analytics API endpoints for the dashboard."""
+
+    # ------------------------------------------------------------------
+    # Plan-gating helper for extended analytics
+    # ------------------------------------------------------------------
+
+    def _require_extended_plan(self, request: web.Request) -> None:
+        """Raise 403 if the queried streamer lacks an extended-analytics plan."""
+        streamer = (request.query.get("streamer") or request.query.get("login") or "").strip().lower()
+        if not streamer:
+            session = self._get_dashboard_session(request)
+            if session:
+                streamer = str(session.get("twitch_login") or "").strip().lower()
+        if not streamer:
+            return  # no streamer context → skip gating
+        # Admins / localhost bypass plan checks
+        if self._get_auth_level(request) in ("localhost", "admin"):
+            return
+        if _get_plan_for_login(streamer) not in EXTENDED_PLANS:
+            raise web.HTTPForbidden(
+                text=json.dumps({
+                    "error": "plan_required",
+                    "required_plans": sorted(EXTENDED_PLANS),
+                }),
+                content_type="application/json",
+            )
 
     # Reusable SQL: filter out sessions where Twitch API returned 0 followers (missing token)
     _FOLLOWER_DELTA_SUM = """SUM(CASE WHEN s.follower_delta IS NOT NULL
@@ -1452,15 +1498,7 @@ class AnalyticsV2Mixin(
             bot_events.extend(service_warning_events)
 
         bot_events.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
-        prioritized_events: list[dict[str, Any]] = []
-        regular_events: list[dict[str, Any]] = []
-        for event in bot_events:
-            event_type = str(event.get("event_type") or event.get("type") or "").strip().lower()
-            if event_type in _INTERNAL_HOME_ACTIVITY_PRIORITY_TYPES:
-                prioritized_events.append(event)
-            else:
-                regular_events.append(event)
-        bot_events = (prioritized_events + regular_events)[:_INTERNAL_HOME_ACTIVITY_MAX_EVENTS]
+        bot_events = bot_events[:_INTERNAL_HOME_ACTIVITY_MAX_EVENTS]
 
         overview_query = {"days": days}
         if resolved_login:

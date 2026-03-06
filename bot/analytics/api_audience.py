@@ -527,6 +527,7 @@ class _AnalyticsAudienceMixin:
     async def _api_v2_follower_funnel(self, request: web.Request) -> web.Response:
         """Get follower conversion funnel data."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip() or None
         days = min(max(int(request.query.get("days", "30")), 7), 365)
@@ -840,6 +841,7 @@ class _AnalyticsAudienceMixin:
     async def _api_v2_audience_insights(self, request: web.Request) -> web.Response:
         """Get combined audience insights (all in one call)."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip() or None
         days = min(max(int(request.query.get("days", "30")), 7), 365)
@@ -983,6 +985,7 @@ class _AnalyticsAudienceMixin:
     async def _api_v2_audience_demographics(self, request: web.Request) -> web.Response:
         """Get estimated audience demographics based on available data."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip() or None
         days = min(max(int(request.query.get("days", "30")), 7), 365)
@@ -1516,6 +1519,7 @@ class _AnalyticsAudienceMixin:
     async def _api_v2_loyalty_curve(self, request: web.Request) -> web.Response:
         """Loyalty/churn distribution: how many chatters came 1x, 2x, 3x, 10x+."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip().lower()
         if not streamer:

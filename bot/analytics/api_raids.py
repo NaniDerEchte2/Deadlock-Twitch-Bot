@@ -28,6 +28,7 @@ class _AnalyticsRaidsMixin:
     async def _api_v2_raid_analytics(self, request: web.Request) -> web.Response:
         """Raid analytics: per-source performance, retention curves, follow attribution."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip().lower()
         days = min(max(int(request.query.get("days", "30")), 7), 365)

@@ -69,6 +69,7 @@ class _AnalyticsViewersMixin:
     async def _api_v2_viewer_directory(self, request: web.Request) -> web.Response:
         """Paginated viewer directory with aggregated profile data."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip().lower()
         if not streamer:
@@ -306,6 +307,7 @@ class _AnalyticsViewersMixin:
     async def _api_v2_viewer_detail(self, request: web.Request) -> web.Response:
         """Deep-dive into a single viewer's activity and cross-channel presence."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip().lower()
         login = request.query.get("login", "").strip().lower()
@@ -513,6 +515,7 @@ class _AnalyticsViewersMixin:
     async def _api_v2_viewer_segments(self, request: web.Request) -> web.Response:
         """Viewer segmentation with churn risk and cross-channel stats."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip().lower()
         if not streamer:

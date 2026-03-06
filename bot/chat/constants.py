@@ -210,4 +210,4 @@ INVITE_GAME_CONTEXT_RE = re.compile(
 #
 # Verfügbare Plan-Features (werden nur geprüft wenn SUBSCRIPTION_PLANS_ENABLED=True):
 #   promo_disabled  – Chat-Promos werden für diesen Streamer nicht gesendet
-SUBSCRIPTION_PLANS_ENABLED: bool = False
+SUBSCRIPTION_PLANS_ENABLED: bool = True

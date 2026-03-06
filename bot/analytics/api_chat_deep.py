@@ -448,6 +448,7 @@ class _AnalyticsChatDeepMixin:
     async def _api_v2_chat_hype_timeline(self, request: web.Request) -> web.Response:
         """Chat velocity + viewer overlay per session, spike detection, correlation."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip().lower()
         if not streamer:
@@ -667,6 +668,7 @@ class _AnalyticsChatDeepMixin:
     async def _api_v2_chat_content_analysis(self, request: web.Request) -> web.Response:
         """Hero mentions, topic breakdown, sentiment trend over time period."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip().lower()
         if not streamer:
@@ -930,6 +932,7 @@ class _AnalyticsChatDeepMixin:
     async def _api_v2_chat_social_graph(self, request: web.Request) -> web.Response:
         """@Mention network: hubs, top pairs, distribution."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip().lower()
         if not streamer:

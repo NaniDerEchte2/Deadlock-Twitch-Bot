@@ -251,6 +251,7 @@ class _AnalyticsPerformanceMixin:
     async def _api_v2_tag_analysis_extended(self, request: web.Request) -> web.Response:
         """Get extended tag performance with trends."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip() or None
         days = min(max(int(request.query.get("days", "30")), 7), 365)
@@ -377,6 +378,7 @@ class _AnalyticsPerformanceMixin:
     async def _api_v2_title_performance(self, request: web.Request) -> web.Response:
         """Get stream title performance analysis."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip() or None
         days = min(max(int(request.query.get("days", "30")), 7), 365)
@@ -764,6 +766,7 @@ class _AnalyticsPerformanceMixin:
     async def _api_v2_viewer_timeline(self, request: web.Request) -> web.Response:
         """Return bucketed viewer data from twitch_stats_tracked."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip()
         days_raw = (request.query.get("days", "7") or "7").strip()
@@ -850,6 +853,7 @@ class _AnalyticsPerformanceMixin:
     async def _api_v2_category_leaderboard(self, request: web.Request) -> web.Response:
         """Top-N streamers from twitch_stats_category."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip()
         days_raw = (request.query.get("days", "30") or "30").strip()
@@ -953,6 +957,7 @@ class _AnalyticsPerformanceMixin:
         Einzelne Streamer mit extrem hohen Viewerzahlen verzerren so das Ergebnis nicht.
         """
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
         days = min(max(int(request.query.get("days", "30")), 7), 90)
         source = request.query.get("source", "category")  # 'category' | 'tracked'
 
@@ -1083,6 +1088,7 @@ class _AnalyticsPerformanceMixin:
         Provides hourly and weekday rows with average and peak values.
         """
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
         days = min(max(int(request.query.get("days", "30")), 7), 365)
         cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
 
@@ -1242,6 +1248,7 @@ class _AnalyticsPerformanceMixin:
     async def _api_v2_retention_curve(self, request: web.Request) -> web.Response:
         """Aggregated viewer retention curve from twitch_session_viewers."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip().lower()
         days = min(max(int(request.query.get("days", "30")), 7), 365)

@@ -202,7 +202,23 @@ class PromoMixin:
         if not invite:
             return False
 
-        msg = secrets.choice(PROMO_MESSAGES).format(invite=invite)
+        # Custom-Message aus streamer_plans prüfen
+        custom_msg = None
+        try:
+            with get_conn() as conn:
+                row = conn.execute(
+                    "SELECT promo_message FROM streamer_plans WHERE LOWER(twitch_login) = LOWER(?)",
+                    (login,)
+                ).fetchone()
+                if row and row["promo_message"]:
+                    custom_msg = row["promo_message"]
+        except Exception:
+            log.debug("Custom promo_message lookup failed for %s", login, exc_info=True)
+
+        if custom_msg:
+            msg = custom_msg.format(invite=invite)
+        else:
+            msg = secrets.choice(PROMO_MESSAGES).format(invite=invite)
         ok = await self._send_announcement(
             self._make_promo_channel(login, channel_id),
             msg,
@@ -518,7 +534,24 @@ class PromoMixin:
             invite, is_specific = await self._get_promo_invite(login)
             if not invite:
                 continue
-            msg = secrets.choice(PROMO_MESSAGES).format(invite=invite)
+
+            # Custom-Message aus streamer_plans prüfen
+            custom_msg = None
+            try:
+                with get_conn() as conn:
+                    row = conn.execute(
+                        "SELECT promo_message FROM streamer_plans WHERE LOWER(twitch_login) = LOWER(?)",
+                        (login,)
+                    ).fetchone()
+                    if row and row["promo_message"]:
+                        custom_msg = row["promo_message"]
+            except Exception:
+                log.debug("Custom promo_message lookup failed for %s", login, exc_info=True)
+
+            if custom_msg:
+                msg = custom_msg.format(invite=invite)
+            else:
+                msg = secrets.choice(PROMO_MESSAGES).format(invite=invite)
 
             class _Channel:
                 __slots__ = ("name", "id")

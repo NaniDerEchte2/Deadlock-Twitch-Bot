@@ -458,6 +458,33 @@ class _DashboardBillingMixin:
         }
 
 
+    def _billing_sync_plan_to_streamer_plans(self, customer_reference: str, plan_id: str, status: str) -> None:
+        """Sync twitch_billing_subscriptions -> streamer_plans nach Webhook."""
+        if not customer_reference:
+            return
+        is_active = status in ("active", "trialing")
+        plan_name = {
+            "raid_boost": "raid_boost",
+            "analysis_dashboard": "analysis",
+            "bundle_analysis_raid_boost": "bundle",
+        }.get(plan_id, "free")
+        effective_plan = plan_name if is_active else "free"
+        try:
+            with storage.get_conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO streamer_plans (twitch_user_id, twitch_login, plan_name, expires_at)
+                    SELECT twitch_user_id, twitch_login, ?, NULL
+                    FROM twitch_streamers WHERE LOWER(twitch_login) = LOWER(?)
+                    ON CONFLICT(twitch_user_id) DO UPDATE SET
+                        plan_name = EXCLUDED.plan_name,
+                        expires_at = EXCLUDED.expires_at
+                    """,
+                    (effective_plan, customer_reference),
+                )
+        except Exception:
+            log.debug("billing sync plan to streamer_plans failed", exc_info=True)
+
     def _billing_apply_webhook_event(
         self,
         conn: Any,
@@ -475,6 +502,11 @@ class _DashboardBillingMixin:
             payload = self._billing_subscription_payload_from_object(event_object)
             payload["last_event_id"] = event_id
             self._billing_upsert_subscription_state(conn, **payload)
+            self._billing_sync_plan_to_streamer_plans(
+                customer_reference=str(payload.get("customer_reference") or ""),
+                plan_id=str(payload.get("plan_id") or ""),
+                status=str(payload.get("status") or ""),
+            )
             return "subscription_state_updated"
 
         if event_name == "checkout.session.completed":
@@ -529,6 +561,11 @@ class _DashboardBillingMixin:
                     payload["last_event_id"] = event_id
 
             self._billing_upsert_subscription_state(conn, **payload)
+            self._billing_sync_plan_to_streamer_plans(
+                customer_reference=str(payload.get("customer_reference") or ""),
+                plan_id=str(payload.get("plan_id") or ""),
+                status=str(payload.get("status") or ""),
+            )
             return "checkout_subscription_recorded"
 
         if event_name == "invoice.payment_succeeded":

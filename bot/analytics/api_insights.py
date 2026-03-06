@@ -693,6 +693,7 @@ class _AnalyticsInsightsMixin:
     async def _api_v2_coaching(self, request: web.Request) -> web.Response:
         """Get personalized coaching data for a streamer."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip()
         days = min(max(int(request.query.get("days", "30")), 7), 365)
@@ -725,6 +726,7 @@ class _AnalyticsInsightsMixin:
     async def _api_v2_monetization(self, request: web.Request) -> web.Response:
         """Monetization & Hype Train overview for the last N days."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
         streamer = request.query.get("streamer", "").strip().lower()
         days = min(max(int(request.query.get("days", "30")), 7), 90)
 

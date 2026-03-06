@@ -240,6 +240,7 @@ class DashboardLiveAnnouncementMixin:
             allowed_editor_role_ids=row["allowed_editor_role_ids"],
             preview=preview,
             streamer_ping_role_id=streamer_ping_role_id,
+            streamer_ping_role_name=str(role_state.get("role_name") or "") or None,
             role_status_message=str(role_state.get("message") or ""),
         )
         return web.Response(text=page, content_type="text/html")
@@ -272,6 +273,7 @@ class DashboardLiveAnnouncementMixin:
                 "config": row["config"],
                 "allowed_editor_role_ids": row["allowed_editor_role_ids"],
                 "streamer_ping_role_id": streamer_ping_role_id,
+                "streamer_ping_role_name": str(role_state.get("role_name") or ""),
                 "role_status_message": str(role_state.get("message") or ""),
                 "validation": _validate_config_dict(row["config"]),
             }
@@ -347,6 +349,7 @@ class DashboardLiveAnnouncementMixin:
                 "updated_by": actor,
                 "preview": preview,
                 "streamer_ping_role_id": streamer_ping_role_id,
+                "streamer_ping_role_name": str(role_state.get("role_name") or ""),
                 "role_status_message": str(role_state.get("message") or ""),
                 "validation": [],
             }
@@ -396,6 +399,7 @@ class DashboardLiveAnnouncementMixin:
                     "message": "Kein Discord-User fuer den Testversand gefunden.",
                     "preview": preview,
                     "streamer_ping_role_id": streamer_ping_role_id,
+                    "streamer_ping_role_name": str(role_state.get("role_name") or ""),
                 },
                 status=404,
             )
@@ -407,6 +411,7 @@ class DashboardLiveAnnouncementMixin:
                 "message": message,
                 "preview": preview,
                 "streamer_ping_role_id": streamer_ping_role_id,
+                "streamer_ping_role_name": str(role_state.get("role_name") or ""),
             },
             status=(200 if sent else 503),
         )
@@ -449,6 +454,7 @@ class DashboardLiveAnnouncementMixin:
             {
                 "streamer_login": streamer,
                 "streamer_ping_role_id": streamer_ping_role_id,
+                "streamer_ping_role_name": "",
                 "preview": preview,
                 "validation": issues,
             }
@@ -742,13 +748,14 @@ class DashboardLiveAnnouncementMixin:
     ) -> dict[str, Any]:
         login = str(streamer_login or "").strip().lower()
         if not login:
-            return {"role_id": None, "created": False, "message": "Kein Streamer gewaehlt."}
+            return {"role_id": None, "role_name": None, "created": False, "message": "Kein Streamer gewaehlt."}
 
         entry = self._la_load_streamer_entry(login)
         existing_role_id = self._la_coerce_role_id(entry.get("live_ping_role_id"))
         if not self._la_is_live_ping_enabled(entry.get("live_ping_enabled", 1)):
             return {
                 "role_id": existing_role_id,
+                "role_name": None,
                 "created": False,
                 "message": "Live-Ping ist fuer diesen Streamer deaktiviert.",
             }
@@ -757,6 +764,7 @@ class DashboardLiveAnnouncementMixin:
         if bot is None:
             return {
                 "role_id": existing_role_id,
+                "role_name": None,
                 "created": False,
                 "message": "Discord-Bot nicht verbunden. Rolle wird beim naechsten Live-Event erstellt.",
             }
@@ -766,6 +774,7 @@ class DashboardLiveAnnouncementMixin:
         if guild is None:
             return {
                 "role_id": existing_role_id,
+                "role_name": None,
                 "created": False,
                 "message": "Discord-Guild nicht verfuegbar. Rolle kann aktuell nicht synchronisiert werden.",
             }
@@ -791,6 +800,7 @@ class DashboardLiveAnnouncementMixin:
         if role is None:
             return {
                 "role_id": existing_role_id,
+                "role_name": None,
                 "created": False,
                 "message": "Keine Ping-Rolle gefunden. Sie wird beim Live-Post automatisch erstellt.",
             }
@@ -830,7 +840,7 @@ class DashboardLiveAnnouncementMixin:
             message = f"Ping-Rolle automatisch erstellt: {role.name}"
         else:
             message = f"Ping-Rolle aktiv: {role.name}"
-        return {"role_id": role_id, "created": created, "message": message}
+        return {"role_id": role_id, "role_name": role.name if role else None, "created": created, "message": message}
 
     def _la_csrf_generate(self, request: web.Request) -> str:
         generator = getattr(self, "_csrf_generate_token", None)
@@ -1130,6 +1140,7 @@ class DashboardLiveAnnouncementMixin:
         allowed_editor_role_ids: list[int],
         preview: dict[str, Any],
         streamer_ping_role_id: int | None,
+        streamer_ping_role_name: str | None,
         role_status_message: str,
     ) -> str:
         options = "".join(
@@ -1144,6 +1155,7 @@ class DashboardLiveAnnouncementMixin:
                 "config": config,
                 "allowed_editor_role_ids": allowed_editor_role_ids,
                 "streamer_ping_role_id": streamer_ping_role_id,
+                "streamer_ping_role_name": streamer_ping_role_name or "",
                 "role_status_message": role_status_message,
                 "preview": preview,
                 "placeholders": list(SUPPORTED_PLACEHOLDERS),
@@ -1303,11 +1315,6 @@ class DashboardLiveAnnouncementMixin:
     .small {{ font-size:12px; color:var(--muted); }}
     #roleStatus {{
       margin-top:4px;
-      padding:8px 10px;
-      border-radius:10px;
-      border:1px solid var(--bd);
-      background:rgba(16,183,173,.08);
-      color:#c6f4f1;
     }}
     details.advanced {{
       margin-top:10px;
@@ -1408,32 +1415,64 @@ class DashboardLiveAnnouncementMixin:
       </div>
 
       <div id='builderBlocks' class='builder-stack'>
-        <section class='cfg-block' data-block='ping'>
+        <section class='cfg-block' data-block='ping' style='border-color:var(--accent); background:linear-gradient(160deg, rgba(16,183,173,.08), rgba(8,27,39,.78));'>
           <div class='cfg-head'>
-            <h3>Ping-Rolle & Zugriff</h3>
+            <h3 style='font-size:15px; display:flex; align-items:center; gap:6px;'>
+              <span style='font-size:18px;'>&#128276;</span> Ping-Rolle
+            </h3>
             <div class='cfg-tools'>
-              <button type='button' class='move-btn' data-move='up' aria-label='Block nach oben'>↑</button>
-              <button type='button' class='move-btn' data-move='down' aria-label='Block nach unten'>↓</button>
+              <button type='button' class='move-btn' data-move='up' aria-label='Block nach oben'>&#8593;</button>
+              <button type='button' class='move-btn' data-move='down' aria-label='Block nach unten'>&#8595;</button>
             </div>
           </div>
-          <div class='row'>
-            <input id='pingRoleId' readonly placeholder='Wird automatisch erstellt'>
-            <input id='editorRoles' placeholder='Editor Role IDs (CSV)'>
+          <div style='display:grid; gap:8px;'>
+            <div style='display:grid; grid-template-columns:auto 1fr auto; gap:8px; align-items:center;'>
+              <span class='small' style='white-space:nowrap; font-weight:700;'>Rolle:</span>
+              <span id='pingRoleName' style='font-weight:600; color:var(--accent);'>&mdash;</span>
+              <span class='small' style='color:var(--muted);'>ID:</span>
+            </div>
+            <div style='display:flex; gap:6px; align-items:center;'>
+              <input id='pingRoleId' readonly placeholder='Wird automatisch beim ersten Go-Live erstellt' style='flex:1; font-family:monospace; font-size:13px;'>
+              <button type='button' class='btn ghost' id='copyRoleIdBtn' style='padding:7px 10px; font-size:12px; white-space:nowrap;' title='Rolle-ID kopieren'>Kopieren</button>
+            </div>
+            <div id='roleStatus' style='padding:8px 10px; border-radius:10px; border:1px solid var(--bd); background:rgba(16,183,173,.08); color:#c6f4f1; font-size:13px;'></div>
+            <div class='small' style='color:var(--muted); line-height:1.5;'>
+              User koennen sich selbst fuer Go-Live-Benachrichtigungen eintragen &mdash;
+              ueber das <strong>Self-Role-Menue</strong> im Discord oder per <strong>Bot-Command</strong>.
+              Die Rolle wird automatisch vom Bot erstellt und verwaltet.
+            </div>
+            <label class='small'><input id='mentionsEnabled' type='checkbox'> Rolle in der Go-Live-Nachricht erwaehnen (<code style='background:rgba(255,255,255,.08); padding:1px 5px; border-radius:4px;'>{{{{rolle}}}}</code>)</label>
           </div>
-          <div class='small' id='roleStatus'></div>
-          <label class='small'><input id='mentionsEnabled' type='checkbox'> Benachrichtigungs-Rolle in Nachricht aktivieren (`{{rolle}}`)</label>
+          <details class='advanced' style='margin-top:8px;'>
+            <summary>Zugriff &amp; Editor-Rollen</summary>
+            <div style='margin-top:6px;'>
+              <input id='editorRoles' placeholder='Editor Role IDs (kommagetrennt)'>
+              <div class='small' style='margin-top:4px; color:var(--muted);'>Discord-Rollen-IDs, die diese Konfiguration bearbeiten duerfen.</div>
+            </div>
+          </details>
         </section>
 
         <section class='cfg-block' data-block='message'>
           <div class='cfg-head'>
-            <h3>Nachricht & Embed</h3>
+            <h3>Nachricht</h3>
             <div class='cfg-tools'>
-              <button type='button' class='move-btn' data-move='up' aria-label='Block nach oben'>↑</button>
-              <button type='button' class='move-btn' data-move='down' aria-label='Block nach unten'>↓</button>
+              <button type='button' class='move-btn' data-move='up' aria-label='Block nach oben'>&#8593;</button>
+              <button type='button' class='move-btn' data-move='down' aria-label='Block nach unten'>&#8595;</button>
+            </div>
+          </div>
+          <textarea id='contentTpl' placeholder='Nachrichtentext ueber dem Embed (Platzhalter: {{{{channel}}}}, {{{{rolle}}}}, ...)'></textarea>
+          <div id='placeholderPills' style='margin-top:6px;'></div>
+        </section>
+
+        <section class='cfg-block' data-block='embed'>
+          <div class='cfg-head'>
+            <h3>Embed-Designer</h3>
+            <div class='cfg-tools'>
+              <button type='button' class='move-btn' data-move='up' aria-label='Block nach oben'>&#8593;</button>
+              <button type='button' class='move-btn' data-move='down' aria-label='Block nach unten'>&#8595;</button>
             </div>
           </div>
           <div class='row'>
-            <textarea id='contentTpl' placeholder='Nachrichtentext ueber dem Embed'></textarea>
             <input id='embedColor' placeholder='#18c5e5'>
             <input id='authorName' placeholder='LIVE: {{channel}}'>
             <select id='authorIconMode'>
@@ -1459,7 +1498,6 @@ class DashboardLiveAnnouncementMixin:
             <label class='small'><input id='titleLinkEnabled' type='checkbox'> Titel-Link auf {{url}}</label>
             <label class='small'><input id='shortenEnabled' type='checkbox'> Zu lange Texte kuerzen</label>
           </div>
-          <div id='placeholderPills'></div>
         </section>
 
         <section class='cfg-block' data-block='button'>
@@ -1554,13 +1592,14 @@ class DashboardLiveAnnouncementMixin:
 
   <script>
     const ST = {initial};
-    const DEFAULT_BLOCK_ORDER = ['ping', 'message', 'button', 'advanced'];
+    const DEFAULT_BLOCK_ORDER = ['ping', 'message', 'embed', 'button', 'advanced'];
     const S = {{
       streamer: ST.streamer_login || '',
       csrf: ST.csrf_token || '',
       config: structuredClone(ST.config || {{}}),
       allowedRoles: [...(ST.allowed_editor_role_ids || [])],
       streamerPingRoleId: Number(ST.streamer_ping_role_id || 0) || null,
+      streamerPingRoleName: String(ST.streamer_ping_role_name || ''),
       roleStatusMessage: String(ST.role_status_message || ''),
       preview: ST.preview || {{}},
       blockOrder: [],
@@ -1692,10 +1731,15 @@ class DashboardLiveAnnouncementMixin:
 
     function renderRoleInfo() {{
       const roleIdText = S.streamerPingRoleId ? String(S.streamerPingRoleId) : '';
+      const roleName = S.streamerPingRoleName || '';
       E('pingRoleId').value = roleIdText;
+      E('pingRoleName').textContent = roleName || (roleIdText ? `ID: ${{roleIdText}}` : 'Noch nicht erstellt');
+      E('pingRoleName').style.color = roleName ? 'var(--accent)' : 'var(--muted)';
+      const copyBtn = E('copyRoleIdBtn');
+      if (copyBtn) {{ copyBtn.style.display = roleIdText ? '' : 'none'; }}
       const fallbackStatus = roleIdText
         ? `Ping-Rolle verknuepft (ID: ${{roleIdText}}).`
-        : 'Ping-Rolle wird automatisch vom Bot erstellt und gespeichert.';
+        : 'Wird automatisch beim ersten Go-Live erstellt.';
       E('roleStatus').textContent = S.roleStatusMessage || fallbackStatus;
     }}
 
@@ -1919,6 +1963,7 @@ class DashboardLiveAnnouncementMixin:
         const data = await res.json();
         if (!res.ok) {{ setStatus(data.error || 'Preview fehlgeschlagen.', true); return; }}
         S.streamerPingRoleId = Number(data.streamer_ping_role_id || S.streamerPingRoleId || 0) || null;
+        if (data.streamer_ping_role_name) {{ S.streamerPingRoleName = String(data.streamer_ping_role_name); }}
         if (typeof data.role_status_message === 'string' && data.role_status_message) {{
           S.roleStatusMessage = data.role_status_message;
         }}
@@ -1944,6 +1989,7 @@ class DashboardLiveAnnouncementMixin:
         const data = await res.json();
         if (!res.ok) {{ renderValidation(data.validation || []); setStatus(data.message || data.error || 'Speichern fehlgeschlagen.', true); return; }}
         S.streamerPingRoleId = Number(data.streamer_ping_role_id || S.streamerPingRoleId || 0) || null;
+        if (data.streamer_ping_role_name) {{ S.streamerPingRoleName = String(data.streamer_ping_role_name); }}
         if (typeof data.role_status_message === 'string' && data.role_status_message) {{
           S.roleStatusMessage = data.role_status_message;
         }}
@@ -1969,6 +2015,7 @@ class DashboardLiveAnnouncementMixin:
         }});
         const data = await res.json();
         S.streamerPingRoleId = Number(data.streamer_ping_role_id || S.streamerPingRoleId || 0) || null;
+        if (data.streamer_ping_role_name) {{ S.streamerPingRoleName = String(data.streamer_ping_role_name); }}
         renderRoleInfo();
         setStatus(data.message || (data.ok ? 'Test versendet.' : 'Test fehlgeschlagen.'), !data.ok);
       }} catch (_err) {{
@@ -1992,6 +2039,11 @@ class DashboardLiveAnnouncementMixin:
       E('presetMetaBtn').addEventListener('click', () => {{ S.config.embed.fields = [{{ name: 'Startzeit', value: '{{started_at}}', inline: true }}, {{ name: 'Sprache', value: '{{language}}', inline: true }}, {{ name: 'Tags', value: '{{tags}}', inline: false }}]; renderFields(); onMutate(); }});
       E('saveBtn').addEventListener('click', saveConfig);
       E('testBtn').addEventListener('click', sendTestDm);
+      const copyBtn = E('copyRoleIdBtn');
+      if (copyBtn) {{ copyBtn.addEventListener('click', () => {{
+        const rid = E('pingRoleId').value;
+        if (rid) {{ navigator.clipboard.writeText(rid).then(() => {{ copyBtn.textContent = 'Kopiert!'; setTimeout(() => {{ copyBtn.textContent = 'Kopieren'; }}, 1500); }}); }}
+      }}); }}
     }}
 
     fillForm();

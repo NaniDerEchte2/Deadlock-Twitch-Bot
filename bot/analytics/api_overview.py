@@ -1232,6 +1232,7 @@ class _AnalyticsOverviewMixin:
     async def _api_v2_lurker_analysis(self, request: web.Request) -> web.Response:
         """Return basic lurker metrics for a streamer or fall back to demo data."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip() or None
         days = min(max(int(request.query.get("days", "30")), 7), 365)
@@ -1420,6 +1421,7 @@ class _AnalyticsOverviewMixin:
     async def _api_v2_raid_retention(self, request: web.Request) -> web.Response:
         """Return retention stats for outgoing raids for a streamer."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip().lower() or None
         days = min(max(int(request.query.get("days", "90")), 7), 365)
@@ -1598,6 +1600,7 @@ class _AnalyticsOverviewMixin:
     async def _api_v2_viewer_profiles(self, request: web.Request) -> web.Response:
         """Viewer behavioral profiles based on cross-streamer exclusivity."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip().lower() or None
         if not streamer:
@@ -1694,6 +1697,7 @@ class _AnalyticsOverviewMixin:
     async def _api_v2_audience_sharing(self, request: web.Request) -> web.Response:
         """Cross-streamer audience overlap with inflow/outflow and Jaccard similarity."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip().lower() or None
         days = min(max(int(request.query.get("days", "30")), 7), 365)

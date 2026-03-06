@@ -28,6 +28,7 @@ class _AnalyticsExperimentalMixin:
     async def _api_v2_exp_overview(self, request: web.Request) -> web.Response:
         """KPI overview from exp_sessions."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip().lower() or None
         if not streamer:
@@ -100,6 +101,7 @@ class _AnalyticsExperimentalMixin:
     async def _api_v2_exp_game_breakdown(self, request: web.Request) -> web.Response:
         """Per-game aggregated stats from exp_sessions."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip().lower() or None
         if not streamer:
@@ -158,6 +160,7 @@ class _AnalyticsExperimentalMixin:
     async def _api_v2_exp_game_transitions(self, request: web.Request) -> web.Response:
         """Game switch events with viewer impact from exp_game_transitions."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip().lower() or None
         if not streamer:
@@ -215,6 +218,7 @@ class _AnalyticsExperimentalMixin:
     async def _api_v2_exp_growth_curves(self, request: web.Request) -> web.Response:
         """Average viewer curves per game (minutes_from_start bucketed)."""
         self._require_v2_auth(request)
+        self._require_extended_plan(request)
 
         streamer = request.query.get("streamer", "").strip().lower() or None
         if not streamer:

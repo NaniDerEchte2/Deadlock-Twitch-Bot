@@ -14,8 +14,68 @@ def render_abbo_page(
     status_notice_html: str,
     plans_html: str,
     csrf_token: str = "",
+    is_bundle: bool = False,
+    promo_disabled: bool = False,
+    promo_message: str = "",
+    promo_error: str = "",
+    promo_saved: bool = False,
+    is_authenticated: bool = False,
 ) -> str:
     """Return the complete HTML for the Abonnement-Pläne page."""
+    # --- Bundle feature toggle card ---
+    bundle_toggle_html = ""
+    if is_bundle:
+        checked = " checked" if promo_disabled else ""
+        bundle_toggle_html = (
+            "<section class='card'>"
+            "<strong style='font-size:14px;color:#e2e8f0;'>Bundle-Features</strong>"
+            f"<form method='post' action='/twitch/abbo/promo-settings'>"
+            f"<input type='hidden' name='csrf_token' value='{_html.escape(csrf_token, quote=True)}'>"
+            "<label class='toggle-label'>"
+            "<input type='hidden' name='promo_disabled' value='0'>"
+            f"<input type='checkbox' name='promo_disabled' value='1'{checked}>"
+            "<span>Chat-Promos deaktivieren"
+            "<span class='muted'>Der Bot postet keinen Discord-Invite mehr in deinen Twitch-Chat bei Viewer-Spikes.</span>"
+            "</span>"
+            "</label>"
+            "<button type='submit' class='profile-save-btn'>Speichern</button>"
+            "</form>"
+            "</section>"
+        )
+
+    # --- Discord promo message card ---
+    promo_message_html = ""
+    if is_authenticated:
+        promo_error_html = ""
+        if promo_error == "missing_invite":
+            promo_error_html = (
+                "<div class='notice notice-error' style='margin-bottom:8px;'>"
+                "Die Nachricht muss <code>{invite}</code> enthalten.</div>"
+            )
+        promo_success_html = ""
+        if promo_saved:
+            promo_success_html = (
+                "<div class='notice notice-ok' style='margin-bottom:8px;'>"
+                "Promo-Nachricht gespeichert.</div>"
+            )
+        escaped_msg = _html.escape(promo_message)
+        promo_message_html = (
+            "<section class='card'>"
+            "<strong style='font-size:14px;color:#e2e8f0;'>Discord-Promo anpassen</strong>"
+            "<p class='muted'>Der Bot postet gelegentlich eine Nachricht in deinem Twitch-Chat. "
+            "Du kannst den Text anpassen &mdash; <code>{invite}</code> muss immer enthalten bleiben.</p>"
+            f"<form method='post' action='/twitch/abbo/promo-message'>"
+            f"<input type='hidden' name='csrf_token' value='{_html.escape(csrf_token, quote=True)}'>"
+            f"{promo_success_html}"
+            f"{promo_error_html}"
+            f"<textarea name='promo_message' placeholder='z.B. Hey! Komm auf unseren Discord: {{invite}}'"
+            f" maxlength='400'>{escaped_msg}</textarea>"
+            "<button type='submit' class='profile-save-btn'>Speichern</button>"
+            "</form>"
+            "<small class='muted'>Leer lassen = Standard-Nachrichten des Bots werden verwendet.</small>"
+            "</section>"
+        )
+
     return (
         "<!doctype html><html lang='de'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -202,6 +262,19 @@ def render_abbo_page(
         "background:linear-gradient(135deg,#2563eb,#3b82f6);color:#eff6ff;}"
         ".profile-help{font-size:12px;color:#94a3b8;}"
 
+        # === Toggle label ===
+        ".toggle-label{display:flex;gap:10px;align-items:flex-start;margin:12px 0;"
+        "font-size:13px;color:#e2e8f0;cursor:pointer;line-height:1.5;}"
+        ".toggle-label input[type=checkbox]{margin-top:3px;flex-shrink:0;}"
+        ".toggle-label .muted{display:block;margin-top:2px;}"
+
+        # === Textarea ===
+        "textarea{width:100%;min-height:80px;border-radius:10px;"
+        "border:1px solid rgba(255,255,255,0.18);background:rgba(15,23,42,0.5);"
+        "color:#e2e8f0;padding:9px 10px;font-size:13px;font-family:inherit;"
+        "outline:none;resize:vertical;box-sizing:border-box;margin:8px 0;}"
+        "textarea:focus{border-color:#60a5fa;box-shadow:0 0 0 2px rgba(96,165,250,0.25);}"
+
         # === Footer ===
         ".site-footer{margin-top:32px;text-align:center;font-size:12px;color:#475569;"
         "padding-top:16px;border-top:1px solid rgba(255,255,255,0.06);}"
@@ -268,6 +341,9 @@ def render_abbo_page(
         "Abrechnung l&auml;uft &uuml;ber Stripe. Rechnungsdaten bitte vor dem Checkout pflegen."
         "</div>"
         "</section>"
+
+        f"{bundle_toggle_html}"
+        f"{promo_message_html}"
 
         # --- Legal hints ---
         "<section class='legal-section'>"
