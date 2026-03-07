@@ -94,9 +94,10 @@ export default function AffiliatePortal() {
         fetch("/twitch/api/affiliate/claims"),
         fetch("/twitch/api/affiliate/commissions"),
       ]);
-      setClaims(await claimsRes.json());
+      const claimsData = await claimsRes.json();
+      setClaims(claimsData.claims ?? []);
       const commData = await commissionsRes.json();
-      setCommissions(commData.items ?? []);
+      setCommissions(commData.commissions ?? []);
     } catch {
       setView("login");
     } finally {

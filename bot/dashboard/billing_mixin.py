@@ -821,8 +821,9 @@ class _DashboardBillingMixin:
             invoice_id = str(self._billing_stripe_obj_get(event_object, "id", "") or "").strip()
             period_start_ts = self._billing_stripe_obj_get(event_object, "period_start", None)
             period_end_ts = self._billing_stripe_obj_get(event_object, "period_end", None)
-            period_start = str(period_start_ts) if period_start_ts else None
-            period_end = str(period_end_ts) if period_end_ts else None
+            from datetime import datetime, timezone as _tz
+            period_start = datetime.fromtimestamp(int(period_start_ts), tz=_tz.utc).isoformat() if period_start_ts else None
+            period_end = datetime.fromtimestamp(int(period_end_ts), tz=_tz.utc).isoformat() if period_end_ts else None
             try:
                 self._affiliate_process_commission(
                     conn,
