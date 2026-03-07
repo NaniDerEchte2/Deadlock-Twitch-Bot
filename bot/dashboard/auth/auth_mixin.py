@@ -378,6 +378,36 @@ class _DashboardAuthMixin:
             secure=self._is_secure_request(request),
         )
 
+    def _discord_oauth_context_cookie_name(self) -> str:
+        base_name = str(getattr(self, "_session_cookie_name", "") or "").strip()
+        if not base_name:
+            base_name = "twitch_dash_session"
+        return f"{base_name}_discord_oauth_ctx"
+
+    def _set_discord_oauth_context_cookie(
+        self, response: web.StreamResponse, request: web.Request, token: str
+    ) -> None:
+        response.set_cookie(
+            self._discord_oauth_context_cookie_name(),
+            token,
+            max_age=self._oauth_state_ttl_seconds,
+            httponly=True,
+            secure=self._is_secure_request(request),
+            samesite="Lax",
+            path="/twitch/auth/discord/callback",
+        )
+
+    def _clear_discord_oauth_context_cookie(
+        self, response: web.StreamResponse, request: web.Request
+    ) -> None:
+        response.del_cookie(
+            self._discord_oauth_context_cookie_name(),
+            path="/twitch/auth/discord/callback",
+            httponly=True,
+            samesite="Lax",
+            secure=self._is_secure_request(request),
+        )
+
     def _clear_session_cookie(self, response: web.StreamResponse, request: web.Request) -> None:
         response.del_cookie(
             self._session_cookie_name,
@@ -895,10 +925,12 @@ class _DashboardAuthMixin:
 
         self._cleanup_discord_admin_state()
         state = secrets.token_urlsafe(32)
+        context_token = secrets.token_urlsafe(24)
         self._discord_admin_oauth_states[state] = {
             "created_at": time.time(),
             "next_path": next_path,
             "redirect_uri": redirect_uri,
+            "context_token": context_token,
         }
         query = urlencode(
             {
@@ -909,7 +941,9 @@ class _DashboardAuthMixin:
                 "state": state,
             }
         )
-        raise web.HTTPFound(f"{DISCORD_API_BASE_URL}/oauth2/authorize?{query}")
+        response = web.HTTPFound(f"{DISCORD_API_BASE_URL}/oauth2/authorize?{query}")
+        self._set_discord_oauth_context_cookie(response, request, context_token)
+        raise response
 
     async def discord_auth_callback(self, request: web.Request) -> web.StreamResponse:
         if not self._check_rate_limit(request, max_requests=20, window_seconds=60.0):
@@ -940,6 +974,21 @@ class _DashboardAuthMixin:
         state_data = self._discord_admin_oauth_states.pop(state, None)
         if not state_data:
             return web.Response(text="OAuth state ungültig oder abgelaufen.", status=400)
+
+        expected_context_token = str(state_data.get("context_token") or "").strip()
+        request_cookies = getattr(request, "cookies", {}) or {}
+        presented_context_token = (
+            request_cookies.get(self._discord_oauth_context_cookie_name()) or ""
+        ).strip()
+        if (
+            not expected_context_token
+            or not self._is_valid_oauth_context_token(expected_context_token)
+            or not presented_context_token
+            or not secrets.compare_digest(expected_context_token, presented_context_token)
+        ):
+            response = web.Response(text="OAuth state ungültig oder abgelaufen.", status=400)
+            self._clear_discord_oauth_context_cookie(response, request)
+            return response
 
         token_data = await self._exchange_discord_admin_code(
             code,
@@ -1013,6 +1062,7 @@ class _DashboardAuthMixin:
         destination = self._canonical_discord_admin_post_login_path(state_data.get("next_path"))
         response = web.HTTPFound(destination)
         self._set_discord_admin_cookie(response, request, session_id)
+        self._clear_discord_oauth_context_cookie(response, request)
         raise response
 
     async def discord_auth_logout(self, request: web.Request) -> web.StreamResponse:
