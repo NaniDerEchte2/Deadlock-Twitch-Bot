@@ -312,11 +312,11 @@ class _DashboardAffiliateMixin:
         display_name = session.get("display_name", twitch_login)
 
         data = await request.post()
-        email = str(data.get("email") or "").strip()
-        full_name = str(data.get("full_name") or "").strip()
-        address_line1 = str(data.get("address_line1") or "").strip()
-        address_city = str(data.get("address_city") or "").strip()
-        address_zip = str(data.get("address_zip") or "").strip()
+        email = str(data.get("email") or "").strip()[:255]
+        full_name = str(data.get("full_name") or "").strip()[:255]
+        address_line1 = str(data.get("address_line1") or "").strip()[:255]
+        address_city = str(data.get("address_city") or "").strip()[:255]
+        address_zip = str(data.get("address_zip") or "").strip()[:20]
 
         if not all([email, full_name, address_line1, address_city, address_zip]):
             return web.Response(
@@ -553,8 +553,11 @@ class _DashboardAffiliateMixin:
             return web.json_response({"error": "unauthorized"}, status=401)
 
         twitch_login = session.get("twitch_login", "")
-        page = max(1, int(request.query.get("page", "1")))
-        page_size = min(100, max(1, int(request.query.get("page_size", "25"))))
+        try:
+            page = max(1, int(request.query.get("page", "1")))
+            page_size = min(100, max(1, int(request.query.get("page_size", "25"))))
+        except (ValueError, TypeError):
+            page, page_size = 1, 25
         offset = (page - 1) * page_size
 
         with storage.get_conn() as conn:
@@ -634,7 +637,11 @@ class _DashboardAffiliateMixin:
             return "no_affiliate"
         affiliate_login = str(claim["affiliate_twitch_login"] or "")
 
+        if amount_paid_cents <= 0:
+            return "skipped"
         commission_cents = int(amount_paid_cents * _COMMISSION_RATE)
+        if commission_cents <= 0:
+            return "skipped"
         now = datetime.now(UTC).isoformat()
 
         try:
