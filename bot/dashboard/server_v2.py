@@ -15,6 +15,7 @@ from aiohttp import web
 
 from ..analytics.api_v2 import AnalyticsV2Mixin
 from ..core.constants import log
+from .affiliate_mixin import _DashboardAffiliateMixin
 from .auth_mixin import _DashboardAuthMixin
 from .billing_mixin import _DashboardBillingMixin
 from .legal_mixin import _DashboardLegalMixin
@@ -75,6 +76,7 @@ _DEMO_EMBED_ALLOWED_ANCESTORS: tuple[str, ...] = tuple(
 
 class DashboardV2Server(
     _DashboardAuthMixin,
+    _DashboardAffiliateMixin,
     _DashboardRaidMixin,
     _DashboardLegalMixin,
     _DashboardBillingMixin,
@@ -149,6 +151,10 @@ class DashboardV2Server(
             "STRIPE_PRODUCT_ID_MAP",
             "TWITCH_BILLING_STRIPE_PRODUCT_ID_MAP",
         )
+        self._stripe_connect_client_id = self._load_secret_value("STRIPE_CONNECT_CLIENT_ID")
+        self._affiliate_oauth_states: dict = {}
+        self._affiliate_connect_states: dict = {}
+        self._affiliate_sessions: dict = {}
         self._session_ttl_seconds = max(6 * 3600, int(session_ttl_seconds or 6 * 3600))
         self._legacy_stats_url = (legacy_stats_url or "").strip() or None
         self._reload_cb = reload_cb

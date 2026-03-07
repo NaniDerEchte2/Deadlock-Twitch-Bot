@@ -3067,6 +3067,8 @@ class _DashboardRoutesMixin:
                 web.post("/twitch/add_login/{login}", self.add_login),
                 web.post("/twitch/add_streamer", self.add_streamer),
                 web.post("/twitch/admin/chat_action", self.admin_partner_chat_action),
+                web.post("/twitch/admin/manual-plan", self.admin_manual_plan_save),
+                web.post("/twitch/admin/manual-plan/clear", self.admin_manual_plan_clear),
                 web.post("/twitch/remove", self.remove),
                 web.post("/twitch/verify", self.verify),
                 web.post("/twitch/archive", self.archive),
@@ -3120,4 +3122,5 @@ class _DashboardRoutesMixin:
             ]
         )
         self._register_v2_routes(app.router)
+        self._affiliate_register_routes(app)
         self._register_social_media_routes(app)

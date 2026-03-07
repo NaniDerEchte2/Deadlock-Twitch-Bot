@@ -29,6 +29,244 @@ from .billing_plans import (
 class _DashboardBillingMixin:
     """Shared billing helper methods for dashboard route handlers."""
 
+    @staticmethod
+    def _billing_valid_plan_ids() -> set[str]:
+        return {
+            str(plan.get("id") or "").strip()
+            for plan in _BILLING_PLANS
+            if str(plan.get("id") or "").strip()
+        }
+
+
+    @staticmethod
+    def _billing_plan_name_from_id(plan_id: str) -> str:
+        return {
+            "raid_boost": "raid_boost",
+            "analysis_dashboard": "analysis",
+            "bundle_analysis_raid_boost": "bundle",
+        }.get(str(plan_id or "").strip(), "free")
+
+
+    @staticmethod
+    def _billing_row_value(row: Any, key: str, index: int, default: Any = None) -> Any:
+        if row is None:
+            return default
+        if hasattr(row, "get"):
+            return row.get(key, default)
+        values = tuple(row)
+        return values[index] if index < len(values) else default
+
+
+    @staticmethod
+    def _billing_parse_datetime_value(raw_value: Any) -> datetime | None:
+        if raw_value is None:
+            return None
+        if isinstance(raw_value, datetime):
+            parsed = raw_value
+        else:
+            text = str(raw_value).strip()
+            if not text:
+                return None
+            if len(text) == 10 and text[4] == "-" and text[7] == "-":
+                text = f"{text}T23:59:59+00:00"
+            normalized = text.replace("Z", "+00:00")
+            try:
+                parsed = datetime.fromisoformat(normalized)
+            except ValueError:
+                return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+
+    def _billing_normalize_plan_id(self, raw_plan_id: Any) -> str:
+        plan_id = str(raw_plan_id or "").strip()
+        return plan_id if plan_id in self._billing_valid_plan_ids() else ""
+
+
+    def _billing_ensure_streamer_plan_columns(self, conn: Any) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS streamer_plans (
+                twitch_user_id TEXT PRIMARY KEY,
+                twitch_login TEXT,
+                plan_name TEXT NOT NULL DEFAULT 'free',
+                promo_disabled INTEGER NOT NULL DEFAULT 0,
+                activated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at TEXT,
+                notes TEXT,
+                raid_boost_enabled INTEGER NOT NULL DEFAULT 0,
+                promo_message TEXT,
+                manual_plan_id TEXT,
+                manual_plan_expires_at TEXT,
+                manual_plan_notes TEXT NOT NULL DEFAULT '',
+                manual_plan_updated_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_streamer_plans_login ON streamer_plans(twitch_login)"
+        )
+        for column_sql in (
+            "raid_boost_enabled INTEGER NOT NULL DEFAULT 0",
+            "promo_message TEXT",
+            "manual_plan_id TEXT",
+            "manual_plan_expires_at TEXT",
+            "manual_plan_notes TEXT NOT NULL DEFAULT ''",
+            "manual_plan_updated_at TEXT",
+        ):
+            try:
+                conn.execute(
+                    "ALTER TABLE streamer_plans "
+                    f"ADD COLUMN IF NOT EXISTS {column_sql}"
+                )
+            except Exception:
+                try:
+                    conn.execute(f"ALTER TABLE streamer_plans ADD COLUMN {column_sql}")
+                except Exception:
+                    pass
+
+
+    def _billing_manual_override_from_row(self, row: Any) -> dict[str, Any] | None:
+        plan_id = self._billing_normalize_plan_id(
+            self._billing_row_value(row, "manual_plan_id", 2, "")
+        )
+        if not plan_id:
+            return None
+        expires_at_raw = self._billing_row_value(row, "manual_plan_expires_at", 3)
+        expires_at = self._billing_parse_datetime_value(expires_at_raw)
+        now_utc = datetime.now(UTC)
+        is_active = not bool(expires_at and expires_at < now_utc)
+        return {
+            "twitch_user_id": str(self._billing_row_value(row, "twitch_user_id", 0, "") or "").strip(),
+            "twitch_login": str(self._billing_row_value(row, "twitch_login", 1, "") or "").strip(),
+            "plan_id": plan_id,
+            "expires_at": expires_at.isoformat() if expires_at else None,
+            "notes": str(self._billing_row_value(row, "manual_plan_notes", 4, "") or "").strip(),
+            "updated_at": str(self._billing_row_value(row, "manual_plan_updated_at", 5, "") or "").strip()
+            or None,
+            "is_active": is_active,
+            "is_expired": not is_active,
+        }
+
+
+    def _billing_active_subscription_for_refs(
+        self,
+        conn: Any,
+        refs: list[str],
+    ) -> dict[str, Any] | None:
+        active_like_statuses = ("active", "trialing", "past_due")
+        for ref in refs:
+            ref_value = str(ref or "").strip()
+            if not ref_value:
+                continue
+            row = conn.execute(
+                """
+                SELECT customer_reference, plan_id, status, updated_at
+                FROM twitch_billing_subscriptions
+                WHERE LOWER(customer_reference) = LOWER(?)
+                  AND status IN (?, ?, ?)
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (ref_value, *active_like_statuses),
+            ).fetchone()
+            if not row:
+                continue
+            plan_id = self._billing_normalize_plan_id(
+                self._billing_row_value(row, "plan_id", 1, "")
+            )
+            status = str(self._billing_row_value(row, "status", 2, "") or "").strip().lower()
+            if status not in active_like_statuses:
+                continue
+            return {
+                "customer_reference": str(
+                    self._billing_row_value(row, "customer_reference", 0, ref_value) or ref_value
+                ).strip(),
+                "plan_id": plan_id or "raid_free",
+                "status": status,
+                "updated_at": str(self._billing_row_value(row, "updated_at", 3, "") or "").strip()
+                or None,
+            }
+        return None
+
+
+    def _billing_manual_override_for_refs(
+        self,
+        conn: Any,
+        refs: list[str],
+    ) -> dict[str, Any] | None:
+        for ref in refs:
+            ref_value = str(ref or "").strip()
+            if not ref_value:
+                continue
+            row = conn.execute(
+                """
+                SELECT
+                    twitch_user_id,
+                    twitch_login,
+                    manual_plan_id,
+                    manual_plan_expires_at,
+                    manual_plan_notes,
+                    manual_plan_updated_at
+                FROM streamer_plans
+                WHERE TRIM(COALESCE(twitch_user_id, '')) = ?
+                   OR LOWER(COALESCE(twitch_login, '')) = LOWER(?)
+                ORDER BY
+                    CASE WHEN TRIM(COALESCE(twitch_user_id, '')) = ? THEN 0 ELSE 1 END,
+                    manual_plan_updated_at DESC
+                LIMIT 1
+                """,
+                (ref_value, ref_value, ref_value),
+            ).fetchone()
+            payload = self._billing_manual_override_from_row(row)
+            if payload:
+                return payload
+        return None
+
+
+    def _billing_effective_plan_payload(
+        self,
+        *,
+        manual_override: dict[str, Any] | None = None,
+        billing_subscription: dict[str, Any] | None = None,
+        fallback_ref: str = "",
+    ) -> dict[str, Any]:
+        fallback = {
+            "plan_id": "raid_free",
+            "status": "active",
+            "source": "default_basic",
+            "customer_reference": str(fallback_ref or "").strip(),
+            "manual_override": manual_override,
+            "billing_subscription": billing_subscription,
+        }
+        if manual_override and bool(manual_override.get("is_active")):
+            return {
+                "plan_id": str(manual_override.get("plan_id") or "raid_free").strip() or "raid_free",
+                "status": "active",
+                "source": "manual_override",
+                "customer_reference": str(
+                    manual_override.get("twitch_login")
+                    or manual_override.get("twitch_user_id")
+                    or fallback_ref
+                    or ""
+                ).strip(),
+                "manual_override": manual_override,
+                "billing_subscription": billing_subscription,
+            }
+        if billing_subscription:
+            return {
+                "plan_id": str(billing_subscription.get("plan_id") or "raid_free").strip() or "raid_free",
+                "status": str(billing_subscription.get("status") or "active").strip() or "active",
+                "source": "billing_subscription",
+                "customer_reference": str(
+                    billing_subscription.get("customer_reference") or fallback_ref or ""
+                ).strip(),
+                "manual_override": manual_override,
+                "billing_subscription": billing_subscription,
+            }
+        return fallback
+
     def _billing_refresh_runtime_secrets(self) -> None:
         loader = getattr(self, "_load_secret_value", None)
         if not callable(loader):
@@ -463,14 +701,11 @@ class _DashboardBillingMixin:
         if not customer_reference:
             return
         is_active = status in ("active", "trialing")
-        plan_name = {
-            "raid_boost": "raid_boost",
-            "analysis_dashboard": "analysis",
-            "bundle_analysis_raid_boost": "bundle",
-        }.get(plan_id, "free")
+        plan_name = self._billing_plan_name_from_id(plan_id)
         effective_plan = plan_name if is_active else "free"
         try:
             with storage.get_conn() as conn:
+                self._billing_ensure_streamer_plan_columns(conn)
                 conn.execute(
                     """
                     INSERT INTO streamer_plans (twitch_user_id, twitch_login, plan_name, expires_at)
@@ -582,6 +817,26 @@ class _DashboardBillingMixin:
                 status="active",
                 last_event_id=event_id,
             )
+            amount_paid = int(self._billing_stripe_obj_get(event_object, "amount_paid", 0) or 0)
+            invoice_id = str(self._billing_stripe_obj_get(event_object, "id", "") or "").strip()
+            period_start_ts = self._billing_stripe_obj_get(event_object, "period_start", None)
+            period_end_ts = self._billing_stripe_obj_get(event_object, "period_end", None)
+            period_start = str(period_start_ts) if period_start_ts else None
+            period_end = str(period_end_ts) if period_end_ts else None
+            try:
+                self._affiliate_process_commission(
+                    conn,
+                    stripe=stripe,
+                    stripe_event_id=event_id,
+                    stripe_customer_id=customer_id,
+                    amount_paid_cents=amount_paid,
+                    currency=str(self._billing_stripe_obj_get(event_object, "currency", "eur") or "eur"),
+                    invoice_id=invoice_id,
+                    period_start=period_start,
+                    period_end=period_end,
+                )
+            except Exception:
+                log.exception("affiliate commission processing failed for event %s", event_id)
             return "invoice_payment_recorded"
 
         if event_name == "invoice.payment_failed":
@@ -929,63 +1184,245 @@ class _DashboardBillingMixin:
 
     def _billing_current_plan_for_request(self, request: Any) -> dict[str, Any]:
         """Resolve current plan for authenticated user; fallback to Basic (raid_free)."""
-        fallback = {
-            "plan_id": "raid_free",
-            "status": "active",
-            "source": "default_basic",
-            "customer_reference": "",
-        }
         candidate_refs = self._billing_candidate_refs_for_request(request)
         if not candidate_refs:
-            return fallback
-
-        valid_plan_ids = {
-            str(plan.get("id") or "").strip() for plan in _BILLING_PLANS if str(plan.get("id") or "").strip()
-        }
-        active_like_statuses = ("active", "trialing", "past_due")
+            return self._billing_effective_plan_payload()
 
         try:
             with storage.get_conn() as conn:
                 self._billing_ensure_storage_tables(conn)
-                for ref in candidate_refs:
-                    row = conn.execute(
-                        """
-                        SELECT customer_reference, plan_id, status, updated_at
-                        FROM twitch_billing_subscriptions
-                        WHERE LOWER(customer_reference) = LOWER(?)
-                          AND status IN (?, ?, ?)
-                        ORDER BY updated_at DESC
-                        LIMIT 1
-                        """,
-                        (ref, *active_like_statuses),
-                    ).fetchone()
-                    if not row:
-                        continue
-
-                    if hasattr(row, "get"):
-                        plan_id = str(row.get("plan_id") or "").strip()
-                        status = str(row.get("status") or "").strip().lower()
-                        customer_reference = str(row.get("customer_reference") or ref).strip()
-                    else:
-                        values = tuple(row)
-                        plan_id = str(values[1] if len(values) > 1 else "").strip()
-                        status = str(values[2] if len(values) > 2 else "").strip().lower()
-                        customer_reference = str(values[0] if len(values) > 0 else ref).strip()
-
-                    if status not in active_like_statuses:
-                        continue
-                    if plan_id not in valid_plan_ids:
-                        plan_id = "raid_free"
-                    return {
-                        "plan_id": plan_id,
-                        "status": status,
-                        "source": "billing_subscription",
-                        "customer_reference": customer_reference,
-                    }
+                self._billing_ensure_streamer_plan_columns(conn)
+                manual_override = self._billing_manual_override_for_refs(conn, candidate_refs)
+                billing_subscription = self._billing_active_subscription_for_refs(
+                    conn,
+                    candidate_refs,
+                )
+                return self._billing_effective_plan_payload(
+                    manual_override=manual_override,
+                    billing_subscription=billing_subscription,
+                    fallback_ref=candidate_refs[0],
+                )
         except Exception:
             log.debug("billing current-plan lookup failed; fallback to basic", exc_info=True)
 
-        return fallback
+        return self._billing_effective_plan_payload(fallback_ref=candidate_refs[0] if candidate_refs else "")
+
+
+    def _billing_admin_plan_rows_for_all_streamers(self) -> list[dict[str, Any]]:
+        rows_payload: list[dict[str, Any]] = []
+        try:
+            with storage.get_conn() as conn:
+                self._billing_ensure_storage_tables(conn)
+                self._billing_ensure_streamer_plan_columns(conn)
+                base_rows = conn.execute(
+                    """
+                    SELECT
+                        s.twitch_login,
+                        s.twitch_user_id,
+                        s.manual_partner_opt_out,
+                        s.archived_at,
+                        s.is_on_discord,
+                        p.plan_name,
+                        p.manual_plan_id,
+                        p.manual_plan_expires_at,
+                        p.manual_plan_notes,
+                        p.manual_plan_updated_at
+                    FROM twitch_streamers s
+                    LEFT JOIN streamer_plans p
+                      ON (
+                           s.twitch_user_id IS NOT NULL
+                           AND s.twitch_user_id = p.twitch_user_id
+                         )
+                      OR (
+                           s.twitch_user_id IS NULL
+                           AND LOWER(COALESCE(p.twitch_login, '')) = LOWER(s.twitch_login)
+                         )
+                    ORDER BY LOWER(s.twitch_login) ASC
+                    """
+                ).fetchall()
+                for row in list(base_rows or []):
+                    twitch_login = str(self._billing_row_value(row, "twitch_login", 0, "") or "").strip()
+                    twitch_user_id = str(self._billing_row_value(row, "twitch_user_id", 1, "") or "").strip()
+                    refs = [value for value in (twitch_user_id, twitch_login) if value]
+                    manual_override = self._billing_manual_override_from_row(
+                        {
+                            "twitch_user_id": twitch_user_id,
+                            "twitch_login": twitch_login,
+                            "manual_plan_id": self._billing_row_value(row, "manual_plan_id", 6, ""),
+                            "manual_plan_expires_at": self._billing_row_value(
+                                row,
+                                "manual_plan_expires_at",
+                                7,
+                            ),
+                            "manual_plan_notes": self._billing_row_value(row, "manual_plan_notes", 8, ""),
+                            "manual_plan_updated_at": self._billing_row_value(
+                                row,
+                                "manual_plan_updated_at",
+                                9,
+                            ),
+                        }
+                    )
+                    billing_subscription = self._billing_active_subscription_for_refs(conn, refs)
+                    effective_plan = self._billing_effective_plan_payload(
+                        manual_override=manual_override,
+                        billing_subscription=billing_subscription,
+                        fallback_ref=twitch_login or twitch_user_id,
+                    )
+                    rows_payload.append(
+                        {
+                            "twitch_login": twitch_login,
+                            "twitch_user_id": twitch_user_id,
+                            "manual_partner_opt_out": bool(
+                                self._billing_row_value(row, "manual_partner_opt_out", 2, 0)
+                            ),
+                            "archived_at": str(
+                                self._billing_row_value(row, "archived_at", 3, "") or ""
+                            ).strip()
+                            or None,
+                            "is_on_discord": bool(self._billing_row_value(row, "is_on_discord", 4, 0)),
+                            "legacy_plan_name": str(
+                                self._billing_row_value(row, "plan_name", 5, "free") or "free"
+                            ).strip()
+                            or "free",
+                            "manual_override": manual_override,
+                            "billing_subscription": billing_subscription,
+                            "effective_plan": effective_plan,
+                            "effective_plan_id": str(effective_plan.get("plan_id") or "raid_free"),
+                            "effective_plan_source": str(
+                                effective_plan.get("source") or "default_basic"
+                            ),
+                        }
+                    )
+        except Exception:
+            log.exception("billing admin plan rows lookup failed")
+            return []
+        return rows_payload
+
+
+    def _billing_admin_set_manual_plan(
+        self,
+        *,
+        twitch_login: str,
+        plan_id: Any,
+        expires_at: Any = None,
+        notes: Any = None,
+    ) -> dict[str, Any]:
+        normalized_login = str(twitch_login or "").strip().lower()
+        if not normalized_login:
+            raise ValueError("twitch_login_required")
+        normalized_plan_id = self._billing_normalize_plan_id(plan_id)
+        if not normalized_plan_id:
+            raise ValueError("unknown_plan_id")
+        expires_at_dt = self._billing_parse_datetime_value(expires_at)
+        expires_at_iso = expires_at_dt.isoformat() if expires_at_dt else None
+        notes_value = str(notes or "").strip()
+        if len(notes_value) > 1000:
+            notes_value = notes_value[:1000]
+        updated_at_iso = datetime.now(UTC).isoformat()
+
+        with storage.get_conn() as conn:
+            self._billing_ensure_storage_tables(conn)
+            self._billing_ensure_streamer_plan_columns(conn)
+            streamer_row = conn.execute(
+                """
+                SELECT twitch_user_id, twitch_login
+                FROM twitch_streamers
+                WHERE LOWER(twitch_login) = LOWER(?)
+                LIMIT 1
+                """,
+                (normalized_login,),
+            ).fetchone()
+            if not streamer_row:
+                raise ValueError("unknown_streamer")
+            twitch_user_id = str(
+                self._billing_row_value(streamer_row, "twitch_user_id", 0, "") or ""
+            ).strip()
+            canonical_login = str(
+                self._billing_row_value(streamer_row, "twitch_login", 1, normalized_login)
+                or normalized_login
+            ).strip()
+            if not twitch_user_id:
+                raise ValueError("streamer_user_id_missing")
+
+            conn.execute(
+                """
+                INSERT INTO streamer_plans (twitch_user_id, twitch_login, activated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT (twitch_user_id) DO UPDATE SET
+                    twitch_login = EXCLUDED.twitch_login
+                """,
+                (twitch_user_id, canonical_login),
+            )
+            conn.execute(
+                """
+                UPDATE streamer_plans
+                SET
+                    twitch_login = ?,
+                    manual_plan_id = ?,
+                    manual_plan_expires_at = ?,
+                    manual_plan_notes = ?,
+                    manual_plan_updated_at = ?
+                WHERE twitch_user_id = ?
+                """,
+                (
+                    canonical_login,
+                    normalized_plan_id,
+                    expires_at_iso,
+                    notes_value,
+                    updated_at_iso,
+                    twitch_user_id,
+                ),
+            )
+
+        for row in self._billing_admin_plan_rows_for_all_streamers():
+            if str(row.get("twitch_login") or "").strip().lower() == normalized_login:
+                return row
+        raise ValueError("manual_plan_save_failed")
+
+
+    def _billing_admin_clear_manual_plan(self, *, twitch_login: str) -> dict[str, Any]:
+        normalized_login = str(twitch_login or "").strip().lower()
+        if not normalized_login:
+            raise ValueError("twitch_login_required")
+        updated_at_iso = datetime.now(UTC).isoformat()
+
+        with storage.get_conn() as conn:
+            self._billing_ensure_storage_tables(conn)
+            self._billing_ensure_streamer_plan_columns(conn)
+            streamer_row = conn.execute(
+                """
+                SELECT twitch_user_id, twitch_login
+                FROM twitch_streamers
+                WHERE LOWER(twitch_login) = LOWER(?)
+                LIMIT 1
+                """,
+                (normalized_login,),
+            ).fetchone()
+            if not streamer_row:
+                raise ValueError("unknown_streamer")
+            twitch_user_id = str(
+                self._billing_row_value(streamer_row, "twitch_user_id", 0, "") or ""
+            ).strip()
+            if not twitch_user_id:
+                raise ValueError("streamer_user_id_missing")
+
+            conn.execute(
+                """
+                UPDATE streamer_plans
+                SET
+                    manual_plan_id = NULL,
+                    manual_plan_expires_at = NULL,
+                    manual_plan_notes = '',
+                    manual_plan_updated_at = ?
+                WHERE twitch_user_id = ?
+                """,
+                (updated_at_iso, twitch_user_id),
+            )
+
+        for row in self._billing_admin_plan_rows_for_all_streamers():
+            if str(row.get("twitch_login") or "").strip().lower() == normalized_login:
+                return row
+        raise ValueError("manual_plan_clear_failed")
 
 
     def _billing_build_invoice_preview(

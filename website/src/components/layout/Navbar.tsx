@@ -11,6 +11,7 @@ const NAV_LINKS: NavLink[] = [
   { label: 'Features', id: 'features' },
   { label: 'Dashboard', id: 'dashboard' },
   { label: 'Community', id: 'community' },
+  { label: 'Vertriebler', id: 'affiliate' },
   { label: 'Befehle', id: 'commands' },
 ];
 
