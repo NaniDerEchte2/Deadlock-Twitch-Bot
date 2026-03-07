@@ -11,27 +11,13 @@ import aiohttp
 import discord
 from aiohttp import web
 
-from ..storage import pg as storage
 from ..analytics.backend_extended import AnalyticsBackendExtended
 from ..core.constants import TWITCH_TARGET_GAME_NAME, log
+from ..discord_role_sync import normalize_discord_user_id, sync_streamer_role
+from ..raid.integration_state import RaidIntegrationStateResolver
+from ..storage import pg as storage
 from ..raid.views import RaidAuthGenerateView, build_raid_requirements_embed
 from .server_v2 import build_v2_app
-
-
-def _parse_env_int(var_name: str, default: int = 0) -> int:
-    raw = os.getenv(var_name, "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        log.warning("Invalid integer for %s=%r – falling back to %s", var_name, raw, default)
-        return default
-
-
-STREAMER_ROLE_ID = _parse_env_int("STREAMER_ROLE_ID", 1313624729466441769)
-STREAMER_GUILD_ID = _parse_env_int("STREAMER_GUILD_ID", 0)
-FALLBACK_MAIN_GUILD_ID = _parse_env_int("MAIN_GUILD_ID", 0)
 TWITCH_HELIX_USERS_URL = "https://api.twitch.tv/helix/users"
 RAID_OAUTH_SUCCESS_REDIRECT_URL = "https://twitch.earlysalty.com/twitch/dashboard"
 
@@ -405,6 +391,33 @@ class TwitchDashboardMixin:
                     await session.close()
                 except Exception:
                     log.debug("Could not close temporary OAuth callback session", exc_info=True)
+
+    def _raid_integration_state_resolver(self) -> RaidIntegrationStateResolver:
+        raid_bot = getattr(self, "_raid_bot", None)
+        auth_manager = getattr(raid_bot, "auth_manager", None) if raid_bot else None
+        token_error_handler = (
+            getattr(auth_manager, "token_error_handler", None) if auth_manager else None
+        )
+        return RaidIntegrationStateResolver(
+            auth_manager=auth_manager,
+            token_error_handler=token_error_handler,
+        )
+
+    async def _integration_raid_auth_state(self, discord_user_id: str) -> dict[str, object]:
+        state = self._raid_integration_state_resolver().resolve_auth_state(discord_user_id)
+        return state.to_payload()
+
+    async def _integration_raid_block_state(
+        self,
+        *,
+        discord_user_id: str | None = None,
+        twitch_login: str | None = None,
+    ) -> dict[str, object]:
+        state = self._raid_integration_state_resolver().resolve_block_state(
+            discord_user_id=discord_user_id,
+            twitch_login=twitch_login,
+        )
+        return state.to_payload()
 
     async def _dashboard_analytics_suggestions(
         self,
@@ -1522,8 +1535,6 @@ class TwitchDashboardMixin:
 
     async def _ensure_streamer_role(self, row_data: dict | None) -> str:
         """Assign the streamer role when available; return a short status hint."""
-        if STREAMER_ROLE_ID <= 0:
-            return ""
         if not row_data:
             return ""
 
@@ -1535,83 +1546,19 @@ class TwitchDashboardMixin:
             )
             return ""
 
-        try:
-            user_id = int(str(user_id_raw))
-        except (TypeError, ValueError):
+        normalized_id = normalize_discord_user_id(str(user_id_raw))
+        if not normalized_id:
             log.warning("Streamer verification: invalid Discord ID %r", user_id_raw)
             return "(Streamer-Rolle konnte nicht vergeben werden – ungültige Discord-ID)"
 
-        guild_candidates: list[discord.Guild] = []
-        seen: set[int] = set()
-
-        for guild_id in (STREAMER_GUILD_ID, FALLBACK_MAIN_GUILD_ID):
-            if guild_id and guild_id not in seen:
-                seen.add(guild_id)
-                guild = self.bot.get_guild(guild_id)
-                if guild:
-                    guild_candidates.append(guild)
-
-        if not guild_candidates:
-            guild_candidates.extend(self.bot.guilds)
-
-        for guild in guild_candidates:
-            role = guild.get_role(STREAMER_ROLE_ID)
-            if role is None:
-                continue
-
-            member = guild.get_member(user_id)
-            if member is None:
-                try:
-                    member = await guild.fetch_member(user_id)
-                except discord.NotFound:
-                    member = None
-                except discord.HTTPException as exc:
-                    log.warning(
-                        "Streamer verification: fetch_member failed in guild %s: %s",
-                        guild.id,
-                        exc,
-                    )
-                    member = None
-
-            if member is None:
-                continue
-
-            if role in member.roles:
-                return ""
-
-            try:
-                await member.add_roles(
-                    role, reason="Streamer-Verifizierung über Dashboard bestätigt"
-                )
-                log.info(
-                    "Streamer verification: assigned role %s to %s in guild %s",
-                    STREAMER_ROLE_ID,
-                    user_id,
-                    guild.id,
-                )
-                return "(Streamer-Rolle vergeben)"
-            except discord.Forbidden:
-                log.warning(
-                    "Streamer verification: missing permissions to add role %s in guild %s",
-                    STREAMER_ROLE_ID,
-                    guild.id,
-                )
-                return "(Streamer-Rolle konnte nicht vergeben werden – fehlende Berechtigung)"
-            except discord.HTTPException as exc:
-                log.warning(
-                    "Streamer verification: failed to add role %s in guild %s: %s",
-                    STREAMER_ROLE_ID,
-                    guild.id,
-                    exc,
-                )
-                return "(Streamer-Rolle konnte nicht vergeben werden)"
-
-        log.info(
-            "Streamer verification: role %s or member %s not found in available guilds",
-            STREAMER_ROLE_ID,
-            user_id,
+        changed = await sync_streamer_role(
+            self.bot,
+            normalized_id,
+            should_have_role=True,
+            reason="Streamer-Verifizierung über Dashboard bestätigt",
+            logger=log,
         )
-        return "(Streamer-Rolle konnte nicht vergeben werden – Mitglied/Rolle nicht gefunden)"
+        return "(Streamer-Rolle vergeben)" if changed else ""
 
     async def _notify_verification_success(self, login: str, row_data: dict | None) -> str:
         if not row_data:

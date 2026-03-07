@@ -20,8 +20,7 @@ from aiohttp import web
 from .. import storage
 from ..core.constants import log
 from ..promo_mode import validate_streamer_promo_message
-from .abbo_html import render_abbo_page
-from .billing_plans import (
+from .billing.billing_plans import (
     BILLING_CYCLE_DISCOUNTS as _BILLING_CYCLE_DISCOUNTS,
     BILLING_STRIPE_QUICKSTART_URL as _BILLING_STRIPE_QUICKSTART_URL,
     build_billing_catalog as _build_billing_catalog,
@@ -30,7 +29,8 @@ from .billing_plans import (
     format_eur_cents as _format_eur_cents,
     normalize_billing_cycle as _normalize_billing_cycle,
 )
-from .live import DashboardLiveMixin, _REQUIRED_SCOPES, _CRITICAL_SCOPES, _SCOPE_COLUMN_LABELS
+from .core.abbo_html import render_abbo_page
+from .live.live import DashboardLiveMixin, _CRITICAL_SCOPES, _REQUIRED_SCOPES, _SCOPE_COLUMN_LABELS
 
 TWITCH_DASHBOARDS_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard"
 TWITCH_DASHBOARD_V2_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
@@ -1520,7 +1520,7 @@ class _DashboardRoutesMixin:
         stripe, import_error = self._billing_import_stripe()
         if stripe is None:
             return web.json_response(
-                {"error": "stripe_sdk_missing", "details": import_error or "stripe import failed"},
+                {"error": "stripe_sdk_missing"},
                 status=503,
             )
 
@@ -2907,7 +2907,6 @@ class _DashboardRoutesMixin:
             self._is_local_request(request)
             or self._is_discord_admin_request(request)
             or self._check_admin_token(header_token)
-            or self._check_admin_token(body_token)
         )
         if not is_authorized:
             log.warning(

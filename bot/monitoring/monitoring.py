@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -763,7 +762,7 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                         rows,
                     )
                 return
-            except sqlite3.OperationalError as exc:
+            except Exception as exc:
                 locked = "locked" in str(exc).lower()
                 if not locked or attempt == 2:
                     log.exception(

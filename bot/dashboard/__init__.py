@@ -1,3 +1,3 @@
-"""Legacy Twitch stats dashboard helpers."""
+"""Dashboard package."""
 
-__all__ = []
+__all__: list[str] = []

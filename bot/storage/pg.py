@@ -1812,9 +1812,7 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_raid_auth_login ON twitch_raid_auth(twitch_login)"
     )
-    # Legacy-Plaintext-Spalten für Backward-Compat verfügbar halten (werden bei neuen Flows nicht genutzt)
-    for _col in ("legacy_access_token", "legacy_refresh_token", "legacy_scopes", "legacy_saved_at"):
-        conn.execute(f"ALTER TABLE twitch_raid_auth ADD COLUMN IF NOT EXISTS {_col} TEXT")
+    # Legacy-Plaintext-Spalten wurden per drop_legacy_tokens.py Migration entfernt.
 
     # 15) Social media platform OAuth (encrypted)
     conn.execute(
@@ -1893,3 +1891,19 @@ def ensure_schema(conn) -> None:
         "ALTER TABLE streamer_plans ADD COLUMN IF NOT EXISTS manual_plan_notes TEXT NOT NULL DEFAULT ''"
     )
     conn.execute("ALTER TABLE streamer_plans ADD COLUMN IF NOT EXISTS manual_plan_updated_at TEXT")
+
+    # 20) Web-Sessions (migrated from SQLite)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dashboard_sessions (
+            session_id   TEXT PRIMARY KEY,
+            session_type TEXT NOT NULL DEFAULT 'twitch',
+            payload_enc  BYTEA NOT NULL,
+            created_at   DOUBLE PRECISION NOT NULL,
+            expires_at   DOUBLE PRECISION NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_expires ON dashboard_sessions(expires_at)"
+    )

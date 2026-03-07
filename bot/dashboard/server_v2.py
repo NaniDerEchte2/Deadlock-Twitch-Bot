@@ -15,17 +15,17 @@ from aiohttp import web
 
 from ..analytics.api_v2 import AnalyticsV2Mixin
 from ..core.constants import log
-from .announcement_mode_mixin import DashboardAdminAnnouncementMixin
-from .affiliate_mixin import _DashboardAffiliateMixin
-from .auth_mixin import _DashboardAuthMixin
-from .billing_mixin import _DashboardBillingMixin
-from .legal_mixin import _DashboardLegalMixin
-from .live_announcement_mixin import DashboardLiveAnnouncementMixin
-from .live import DashboardLiveMixin
-from .raid_mixin import _DashboardRaidMixin
+from .admin.legal_mixin import _DashboardLegalMixin
+from .affiliate.affiliate_mixin import _DashboardAffiliateMixin
+from .auth.auth_mixin import _DashboardAuthMixin
+from .billing.billing_mixin import _DashboardBillingMixin
+from .core.stats import DashboardStatsMixin
+from .core.templates import DashboardTemplateMixin
+from .admin.announcement_mode_mixin import DashboardAdminAnnouncementMixin
+from .live.live import DashboardLiveMixin
+from .live.live_announcement_mixin import DashboardLiveAnnouncementMixin
 from .routes_mixin import _DashboardRoutesMixin
-from .stats import DashboardStatsMixin
-from .templates import DashboardTemplateMixin
+from .raids.raid_mixin import _DashboardRaidMixin
 
 TWITCH_OAUTH_AUTHORIZE_URL = "https://id.twitch.tv/oauth2/authorize"
 TWITCH_OAUTH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"  # noqa: S105
