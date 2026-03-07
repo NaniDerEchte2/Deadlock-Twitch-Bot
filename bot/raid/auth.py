@@ -18,6 +18,11 @@ from urllib.parse import urlencode
 import aiohttp
 import discord
 
+from ..api.twitch_auth import (
+    TwitchClientConfigError,
+    is_invalid_client_response,
+    normalize_twitch_credential,
+)
 from ..api.token_error_handler import TokenErrorHandler
 from ..storage import backfill_tracked_stats_from_category, get_conn
 
@@ -130,17 +135,51 @@ class RaidAuthManager:
     """Verwaltet OAuth User Access Tokens für Raid-Autorisierung."""
 
     def __init__(self, client_id: str, client_secret: str, redirect_uri: str):
-        self.client_id = client_id
-        self.client_secret = client_secret
+        self.client_id = normalize_twitch_credential(client_id)
+        self.client_secret = normalize_twitch_credential(client_secret)
         self.redirect_uri = redirect_uri
         self._state_tokens: dict[str, tuple[str, float]] = {}  # state -> (twitch_login, timestamp)
         self._pending_auth_urls: dict[str, str] = {}  # state -> full_twitch_auth_url
         self._lock = asyncio.Lock()
         self.token_error_handler = TokenErrorHandler()
+        self._client_auth_blocked_until: float = 0.0
+        self._client_auth_block_reason: str | None = None
 
         # Basis-URL für Short-Redirect ableiten (z.B. https://raid.earlysalty.com)
         _parts = redirect_uri.split("/twitch/", 1)
         self._base_url: str = _parts[0] if len(_parts) > 1 else ""
+
+    def is_client_auth_blocked(self) -> bool:
+        return time.time() < self._client_auth_blocked_until
+
+    def _block_client_auth(
+        self,
+        reason: str,
+        *,
+        cooldown_seconds: float = 900.0,
+    ) -> TwitchClientConfigError:
+        self._client_auth_blocked_until = time.time() + float(cooldown_seconds)
+        self._client_auth_block_reason = reason
+        return TwitchClientConfigError(reason)
+
+    def _raise_if_client_auth_blocked(self) -> None:
+        if self.is_client_auth_blocked():
+            raise TwitchClientConfigError(
+                self._client_auth_block_reason
+                or "Twitch OAuth requests are temporarily blocked due to invalid client configuration."
+            )
+
+    def _ensure_client_credentials(self) -> None:
+        if self.client_id and self.client_secret:
+            return
+
+        reason = (
+            "Twitch client credentials are missing or blank after trimming whitespace. "
+            "Verify TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET, then restart the bot."
+        )
+        if not self.is_client_auth_blocked() or self._client_auth_block_reason != reason:
+            log.error(reason)
+        raise self._block_client_auth(reason)
 
     def _persist_state_token(self, state: str, twitch_login: str, created_ts: float) -> None:
         """Persist OAuth state to shared DB so callback verification works across instances/restarts."""
@@ -477,6 +516,8 @@ class RaidAuthManager:
 
     async def exchange_code_for_token(self, code: str, session: aiohttp.ClientSession) -> dict:
         """Tauscht Authorization Code gegen User Access Token."""
+        self._raise_if_client_auth_blocked()
+        self._ensure_client_credentials()
         data = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
@@ -491,13 +532,26 @@ class RaidAuthManager:
                     err_body = await r.text()
                 except Exception:
                     err_body = "<unreadable>"
+                if is_invalid_client_response(r.status, err_body):
+                    reason = (
+                        "Twitch client credentials were rejected by Twitch OAuth "
+                        "(invalid client). Verify TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET, "
+                        "rotate the secret if needed, then restart the bot. "
+                        "Suppressing additional Twitch OAuth requests for 15 minutes."
+                    )
+                    if not self.is_client_auth_blocked() or self._client_auth_block_reason != reason:
+                        log.error(reason)
+                    raise self._block_client_auth(reason)
                 log.error(
                     "OAuth exchange failed with HTTP %s: %s",
                     r.status,
                     err_body[:500],
                 )
                 r.raise_for_status()
-            return await r.json()
+            data = await r.json()
+            self._client_auth_blocked_until = 0.0
+            self._client_auth_block_reason = None
+            return data
 
     async def refresh_token(
         self,
@@ -507,6 +561,8 @@ class RaidAuthManager:
         twitch_login: str = None,
     ) -> dict:
         """Erneuert einen abgelaufenen User Access Token."""
+        self._raise_if_client_auth_blocked()
+        self._ensure_client_credentials()
         data = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
@@ -517,6 +573,16 @@ class RaidAuthManager:
         async with session.post(TWITCH_TOKEN_URL, data=data) as r:
             if r.status != 200:
                 txt = await r.text()
+                if is_invalid_client_response(r.status, txt):
+                    reason = (
+                        "Twitch client credentials were rejected by Twitch OAuth "
+                        "(invalid client). Verify TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET, "
+                        "rotate the secret if needed, then restart the bot. "
+                        "Suppressing additional Twitch OAuth refresh attempts for 15 minutes."
+                    )
+                    if not self.is_client_auth_blocked() or self._client_auth_block_reason != reason:
+                        log.error(reason)
+                    raise self._block_client_auth(reason)
                 error_msg = f"HTTP {r.status}: {txt[:300]}"
                 log.error(
                     "OAuth refresh request failed for %s with HTTP status %s",
@@ -576,13 +642,18 @@ class RaidAuthManager:
                     )
 
                 r.raise_for_status()
-            return await r.json()
+            data = await r.json()
+            self._client_auth_blocked_until = 0.0
+            self._client_auth_block_reason = None
+            return data
 
     async def refresh_all_tokens(self, session: aiohttp.ClientSession) -> int:
         """
         Refreshes tokens for all authorized users if they are close to expiry (< 2 hours).
         Returns the number of refreshed tokens.
         """
+        if self.is_client_auth_blocked():
+            return 0
         refreshed_count = 0
         with get_conn() as conn:
             # Hole alle User mit raid_enabled=TRUE
@@ -716,6 +787,8 @@ class RaidAuthManager:
                     await asyncio.sleep(0.5)
 
                 except Exception as exc:
+                    if isinstance(exc, TwitchClientConfigError):
+                        break
                     if isinstance(exc, RuntimeError) and "Session is closed" in str(exc):
                         log.warning(
                             "Background refresh aborted for %s: shared HTTP session is closed",
@@ -868,6 +941,8 @@ class RaidAuthManager:
         Erneuert den Token automatisch, falls abgelaufen.
         Wird bewusst auch genutzt, wenn raid_enabled=0 (Chat-Bot/Moderation).
         """
+        if self.is_client_auth_blocked():
+            return None
         # Blacklist check
         if self.token_error_handler.is_token_blacklisted(twitch_user_id):
             return None

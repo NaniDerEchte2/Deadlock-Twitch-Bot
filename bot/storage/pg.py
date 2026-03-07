@@ -43,6 +43,15 @@ def _monkey_patch_psycopg() -> None:
 
         psycopg.Connection.executemany = _conn_executemany  # type: ignore[attr-defined]
 
+    if not hasattr(psycopg.Connection, "executescript"):
+        def _conn_executescript(self, script):
+            last_cursor = None
+            for statement in _split_sql_script(script or ""):
+                last_cursor = self.execute(statement)
+            return last_cursor
+
+        psycopg.Connection.executescript = _conn_executescript  # type: ignore[attr-defined]
+
     # No-op stub that mirrors SQLite's `changes()` to avoid UndefinedFunction errors
     # when someone runs "SELECT changes()" on a raw connection.
     if not hasattr(psycopg.Connection, "_deadlock_changes_stub"):

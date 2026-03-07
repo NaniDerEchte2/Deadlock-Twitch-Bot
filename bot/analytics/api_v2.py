@@ -17,7 +17,9 @@ from urllib.parse import urlencode, urlsplit
 from aiohttp import web
 
 from ..core.chat_bots import build_known_chat_bot_not_in_clause
+from ..logging_setup import log_path
 from .api_ai import _AnalyticsAIMixin
+from .api_admin import _AnalyticsAdminMixin
 from .api_audience import _AnalyticsAudienceMixin
 from .api_experimental import _AnalyticsExperimentalMixin
 from .api_insights import _AnalyticsInsightsMixin
@@ -206,6 +208,7 @@ def _is_localhost(request: web.Request) -> bool:
 
 
 class AnalyticsV2Mixin(
+    _AnalyticsAdminMixin,
     _AnalyticsOverviewMixin,
     _AnalyticsAudienceMixin,
     _AnalyticsPerformanceMixin,
@@ -218,6 +221,12 @@ class AnalyticsV2Mixin(
     _AnalyticsRoadmapMixin,
 ):
     """Mixin providing v2 analytics API endpoints for the dashboard."""
+
+    def _register_v2_routes(self, router: web.UrlDispatcher) -> None:
+        super()._register_v2_routes(router)
+        register_admin_routes = getattr(self, "_register_v2_admin_api_routes", None)
+        if callable(register_admin_routes):
+            register_admin_routes(router)
 
     # ------------------------------------------------------------------
     # Plan-gating helper for extended analytics
@@ -646,21 +655,19 @@ class AnalyticsV2Mixin(
 
     @classmethod
     def _internal_home_service_warning_log_candidates(cls) -> tuple[Path, ...]:
-        local_path = Path("logs") / _INTERNAL_HOME_SERVICE_WARNING_LOG_FILENAME
-        project_root = Path(__file__).resolve().parents[2]
-        project_path = project_root / "logs" / _INTERNAL_HOME_SERVICE_WARNING_LOG_FILENAME
-        if project_path == local_path:
-            return (local_path,)
-        return local_path, project_path
+        project_path = log_path(_INTERNAL_HOME_SERVICE_WARNING_LOG_FILENAME)
+        legacy_cwd_path = Path("logs") / _INTERNAL_HOME_SERVICE_WARNING_LOG_FILENAME
+        candidates = dict.fromkeys([project_path, legacy_cwd_path])
+        return tuple(candidates)
 
     @classmethod
     def _internal_home_autoban_log_candidates(cls) -> tuple[Path, ...]:
-        local_path = Path("logs") / _INTERNAL_HOME_AUTOBAN_LOG_FILENAME
         project_root = Path(__file__).resolve().parents[2]
-        project_path = project_root / "logs" / _INTERNAL_HOME_AUTOBAN_LOG_FILENAME
-        # Twitch-Bot läuft mit CWD = Deadlock/ (Geschwister-Verzeichnis)
+        project_path = log_path(_INTERNAL_HOME_AUTOBAN_LOG_FILENAME)
+        legacy_cwd_path = Path("logs") / _INTERNAL_HOME_AUTOBAN_LOG_FILENAME
+        # Historischer Fallback: ältere Worker haben relativ zum Deadlock-Repo geschrieben.
         sibling_path = project_root.parent / "Deadlock" / "logs" / _INTERNAL_HOME_AUTOBAN_LOG_FILENAME
-        candidates = dict.fromkeys([local_path, project_path, sibling_path])
+        candidates = dict.fromkeys([project_path, legacy_cwd_path, sibling_path])
         return tuple(candidates)
 
     @staticmethod
@@ -2004,16 +2011,32 @@ class AnalyticsV2Mixin(
         session = self._get_dashboard_session(request) or {}
         is_authenticated = auth_level != "none"
         can_view_all_streamers = auth_level in ("localhost", "admin")
+        csrf_token = ""
+        csrf_getter = getattr(self, "_csrf_get_token", None)
+        csrf_generator = getattr(self, "_csrf_generate_token", None)
+        if callable(csrf_getter):
+            try:
+                csrf_token = str(csrf_getter(request) or "")
+            except Exception:
+                csrf_token = ""
+        if not csrf_token and callable(csrf_generator):
+            try:
+                csrf_token = str(csrf_generator(request) or "")
+            except Exception:
+                csrf_token = ""
 
         return web.json_response(
             {
                 "authenticated": is_authenticated,
                 "level": auth_level,
+                "authLevel": auth_level,
                 "isAdmin": auth_level in ("localhost", "admin"),
                 "isLocalhost": auth_level == "localhost",
                 "canViewAllStreamers": can_view_all_streamers,
                 "twitchLogin": session.get("twitch_login"),
                 "displayName": session.get("display_name"),
+                "csrfToken": csrf_token or None,
+                "csrf_token": csrf_token or None,
                 "permissions": {
                     "viewAllStreamers": can_view_all_streamers,
                     "viewComparison": is_authenticated,

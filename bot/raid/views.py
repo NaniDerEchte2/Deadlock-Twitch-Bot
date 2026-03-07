@@ -41,7 +41,9 @@ def _split_runtime_enforced_role() -> str:
 
 def _split_internal_api_auth_url(discord_user_id: int) -> tuple[str, dict[str, str]] | None:
     base_url = (os.getenv("TWITCH_INTERNAL_API_BASE_URL") or "").strip()
-    token = (os.getenv("TWITCH_INTERNAL_API_TOKEN") or "").strip()
+    from ..secret_store import load_secret_value
+
+    token = load_secret_value("TWITCH_INTERNAL_API_TOKEN")
     if not base_url or not token:
         return None
 

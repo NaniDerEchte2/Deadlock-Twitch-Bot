@@ -23,6 +23,7 @@ DASHBOARD_V2_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
 DASHBOARD_V2_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard-v2"
 DASHBOARD_VERWALTUNG_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fverwaltung"
 DASHBOARD_VERWALTUNG_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fverwaltung"
+ADMIN_DASHBOARD_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fadmin"
 
 
 class _AnalyticsOverviewMixin:
@@ -102,6 +103,9 @@ class _AnalyticsOverviewMixin:
         router.add_get("/twitch/dashboard-v2", self._serve_dashboard_v2)
         router.add_get("/twitch/dashboard-v2/{path:.*}", self._serve_dashboard_v2_assets)
         router.add_get("/twitch/verwaltung", self._serve_verwaltung)
+        router.add_get("/twitch/admin/", self._serve_admin_dashboard)
+        router.add_get("/twitch/admin/assets/{path:.*}", self._serve_admin_dashboard_assets)
+        router.add_get("/twitch/admin/{path:.*}", self._serve_admin_dashboard_path)
         # Public demo (no auth required)
         self._register_demo_routes(router)
 
@@ -286,6 +290,97 @@ class _AnalyticsOverviewMixin:
         # Keep user-facing dashboard pages strictly off the admin host.
         return web.Response(text="Not found.", status=404)
 
+    def _admin_dashboard_public_origin(self) -> str:
+        origin_getter = getattr(self, "_admin_announcement_public_origin", None)
+        if callable(origin_getter):
+            try:
+                origin = str(origin_getter() or "").strip()
+            except Exception:
+                origin = ""
+            if origin:
+                return origin.rstrip("/")
+        return "https://admin.earlysalty.de"
+
+    def _admin_dashboard_login_url(self, request: web.Request) -> str:
+        login_builder = getattr(self, "_build_discord_admin_login_url", None)
+        if callable(login_builder):
+            try:
+                login_url = str(
+                    login_builder(
+                        request,
+                        next_path=request.rel_url.path_qs if request.rel_url else request.path,
+                    )
+                    or ""
+                ).strip()
+            except Exception:
+                login_url = ""
+            if login_url:
+                return login_url
+        return ADMIN_DASHBOARD_DISCORD_LOGIN_URL
+
+    def _admin_dashboard_spa_gate(self, request: web.Request) -> web.Response | None:
+        local_checker = getattr(self, "_is_local_request", None)
+        is_local_request = False
+        if callable(local_checker):
+            try:
+                is_local_request = bool(local_checker(request))
+            except Exception:
+                is_local_request = False
+
+        host_checker = getattr(self, "_is_admin_dashboard_host_request", None)
+        is_admin_host = True
+        if callable(host_checker):
+            try:
+                is_admin_host = bool(host_checker(request))
+            except Exception:
+                is_admin_host = False
+
+        if not (is_local_request or is_admin_host):
+            if request.method in {"GET", "HEAD"}:
+                path_qs = request.rel_url.path_qs if request.rel_url else request.path
+                return web.HTTPFound(f"{self._admin_dashboard_public_origin()}{path_qs}")
+            return web.HTTPForbidden(
+                text="This admin dashboard is only available on the admin dashboard host."
+            )
+
+        admin_checker = getattr(self, "_check_v2_admin_auth", None)
+        if callable(admin_checker):
+            try:
+                if bool(admin_checker(request)):
+                    return None
+            except Exception:
+                log.debug("Could not evaluate admin auth for admin dashboard SPA", exc_info=True)
+
+        if not bool(getattr(self, "_discord_admin_required", True)):
+            return web.HTTPServiceUnavailable(
+                text=(
+                    "Discord Admin OAuth ist nicht konfiguriert. "
+                    "Admin-Zugriff ist bis zur vollständigen Konfiguration deaktiviert."
+                )
+            )
+
+        login_url = self._admin_dashboard_login_url(request)
+        return self._dashboard_auth_redirect_or_unavailable(
+            request,
+            next_path=request.rel_url.path_qs if request.rel_url else request.path,
+            fallback_login_url=login_url,
+        )
+
+    @staticmethod
+    def _admin_dashboard_path_should_serve_index(raw_path: str) -> bool:
+        normalized_path = str(raw_path or "").strip("/")
+        if not normalized_path:
+            return True
+        if normalized_path == "assets" or normalized_path.startswith("assets/"):
+            return False
+        return "." not in normalized_path.rsplit("/", 1)[-1]
+
+    @staticmethod
+    def _admin_dashboard_dist_root():
+        import pathlib
+
+        return (pathlib.Path(__file__).resolve().parents[1] / "admin_dashboard" / "dist").resolve()
+
     async def _serve_demo_dashboard(self, request: web.Request) -> web.Response:
         """Serve the demo dashboard HTML without authentication."""
         import pathlib
@@ -364,6 +459,31 @@ class _AnalyticsOverviewMixin:
             text="Dashboard not built. Run npm run build in dashboard_v2/", status=404
         )
 
+    async def _serve_admin_dashboard(self, request: web.Request) -> web.Response:
+        """Serve the dedicated admin dashboard SPA."""
+        gate_response = self._admin_dashboard_spa_gate(request)
+        if gate_response is not None:
+            return gate_response
+
+        dist_path = self._admin_dashboard_dist_root() / "index.html"
+        if dist_path.exists():
+            return web.FileResponse(dist_path)
+        return web.Response(
+            text="Admin dashboard not built. Run npm run build in bot/admin_dashboard/",
+            status=404,
+        )
+
+    async def _serve_admin_dashboard_path(self, request: web.Request) -> web.Response:
+        """Serve SPA routes or static files for the admin dashboard."""
+        gate_response = self._admin_dashboard_spa_gate(request)
+        if gate_response is not None:
+            return gate_response
+
+        raw_path = request.match_info.get("path", "")
+        if self._admin_dashboard_path_should_serve_index(raw_path):
+            return await self._serve_admin_dashboard(request)
+        return self._resolve_admin_dashboard_asset_response(raw_path)
+
     async def _serve_dashboard(self, request: web.Request) -> web.Response:
         """Serve the new internal dashboard landing page."""
         gate_response = self._admin_dashboard_host_page_gate(request)
@@ -441,6 +561,13 @@ class _AnalyticsOverviewMixin:
             return response
         return self._resolve_dashboard_v2_asset_response(request.match_info.get("path", ""))
 
+    async def _serve_admin_dashboard_assets(self, request: web.Request) -> web.Response:
+        """Serve static assets for the admin dashboard."""
+        gate_response = self._admin_dashboard_spa_gate(request)
+        if gate_response is not None:
+            return gate_response
+        return self._resolve_admin_dashboard_asset_response(request.match_info.get("path", ""))
+
     async def _serve_demo_dashboard_assets(self, request: web.Request) -> web.Response:
         """Serve static assets for the public demo dashboard without auth."""
         return self._resolve_dashboard_v2_asset_response(request.match_info.get("path", ""))
@@ -457,6 +584,38 @@ class _AnalyticsOverviewMixin:
 
         # Resolve each path segment against actual directory entries to avoid
         # using untrusted input directly in filesystem path expressions.
+        for segment in raw_path.split("/"):
+            if not segment or segment in {".", ".."} or "\\" in segment:
+                return web.Response(text="Not found", status=404)
+            if not candidate.is_dir():
+                return web.Response(text="Not found", status=404)
+
+            next_candidate = None
+            for entry in candidate.iterdir():
+                if entry.name == segment:
+                    next_candidate = entry
+                    break
+            if next_candidate is None:
+                return web.Response(text="Not found", status=404)
+            candidate = next_candidate
+
+        try:
+            candidate.resolve().relative_to(dist_root)
+        except ValueError:
+            return web.Response(text="Not found", status=404)
+
+        if candidate.is_file():
+            return web.FileResponse(candidate)
+        return web.Response(text="Not found", status=404)
+
+    def _resolve_admin_dashboard_asset_response(self, raw_path: str) -> web.StreamResponse:
+        """Resolve admin dashboard dist files with strict path validation."""
+        if not raw_path:
+            return web.Response(text="Not found", status=404)
+
+        dist_root = self._admin_dashboard_dist_root()
+        candidate = dist_root
+
         for segment in raw_path.split("/"):
             if not segment or segment in {".", ".."} or "\\" in segment:
                 return web.Response(text="Not found", status=404)

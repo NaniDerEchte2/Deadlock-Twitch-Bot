@@ -13,6 +13,8 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
+from .logging_setup import ensure_twitch_logger_file_handler
+
 # Last-synced fingerprint per guild — persists for the process lifetime so
 # reloads don't re-sync when commands haven't changed.
 _last_sync_hash: dict[int, str] = {}
@@ -25,7 +27,7 @@ def _command_payload_hash(bot: commands.Bot, guild: discord.Object) -> str:
     payload.sort(key=lambda c: c.get("name", ""))
     return hashlib.md5(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
-log = logging.getLogger("TwitchStreams")
+log = ensure_twitch_logger_file_handler()
 
 
 def _env_bool(name: str, default: bool = False) -> bool:

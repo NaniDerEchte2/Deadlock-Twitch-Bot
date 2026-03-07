@@ -116,9 +116,15 @@ class _DummyRaids(_AnalyticsRaidsMixin):
     def _require_v2_auth(self, request):
         return None
 
+    def _require_extended_plan(self, request):
+        return None
+
 
 class _DummyAudience(_AnalyticsAudienceMixin):
     def _require_v2_auth(self, request):
+        return None
+
+    def _require_extended_plan(self, request):
         return None
 
 
@@ -126,9 +132,15 @@ class _DummyInsights(_AnalyticsInsightsMixin):
     def _require_v2_auth(self, request):
         return None
 
+    def _require_extended_plan(self, request):
+        return None
+
 
 class _DummyOverview(_AnalyticsOverviewMixin):
     def _require_v2_auth(self, request):
+        return None
+
+    def _require_extended_plan(self, request):
         return None
 
 

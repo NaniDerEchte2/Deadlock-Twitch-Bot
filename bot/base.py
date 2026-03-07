@@ -49,6 +49,7 @@ from .core.constants import (
 from .internal_api import InternalApiRunner
 from .raid.manager import RaidBot
 from .reload_manager import LoopSpec, SubsystemDef, TwitchReloadManager
+from .secret_store import load_secret_value
 
 
 def _parse_env_bool(name: str, default: bool) -> bool:
@@ -85,16 +86,16 @@ class TwitchBaseCog(commands.Cog):
 
         # 🔒 Secrets nur aus ENV (nicht hardcoden!)
         # TWITCH_CLIENT_ID/SECRET sind für die Haupt-App (Raids, Dashboard)
-        self.client_id = os.getenv("TWITCH_CLIENT_ID") or ""
-        self.client_secret = os.getenv("TWITCH_CLIENT_SECRET")
+        self.client_id = load_secret_value("TWITCH_CLIENT_ID")
+        self.client_secret = load_secret_value("TWITCH_CLIENT_SECRET")
 
         # TWITCH_BOT_CLIENT_ID ist speziell für den Chat-Bot (Fallback auf Haupt-App)
         self._twitch_bot_client_id: str = (
-            os.getenv("TWITCH_BOT_CLIENT_ID", "").strip() or self.client_id
+            load_secret_value("TWITCH_BOT_CLIENT_ID") or self.client_id
         )
 
         # Bot-Secret laden: 1. Spezieller Key, 2. Fallback auf Haupt-Secret (wenn ID identisch)
-        bot_secret_env = os.getenv("TWITCH_BOT_CLIENT_SECRET", "").strip()
+        bot_secret_env = load_secret_value("TWITCH_BOT_CLIENT_SECRET")
         if bot_secret_env:
             self._twitch_bot_secret = bot_secret_env
         elif self._twitch_bot_client_id == self.client_id:
@@ -121,7 +122,7 @@ class TwitchBaseCog(commands.Cog):
         self._target_game_lower = self._target_game_name.lower()
 
         # Dashboard/Auth (aus Config-Header)
-        self._dashboard_token = (os.getenv("TWITCH_DASHBOARD_TOKEN") or "").strip() or None
+        self._dashboard_token = load_secret_value("TWITCH_DASHBOARD_TOKEN") or None
         self._dashboard_noauth = _parse_env_bool(
             "TWITCH_DASHBOARD_NOAUTH",
             bool(TWITCH_DASHBOARD_NOAUTH),
@@ -143,7 +144,7 @@ class TwitchBaseCog(commands.Cog):
             log.info(
                 "TWITCH_DASHBOARD_EMBEDDED disabled - assuming external reverse proxy serves the dashboard"
             )
-        self._partner_dashboard_token = (os.getenv("TWITCH_PARTNER_TOKEN") or "").strip() or None
+        self._partner_dashboard_token = load_secret_value("TWITCH_PARTNER_TOKEN") or None
         self._dashboard_auth_redirect_uri = (
             os.getenv("TWITCH_DASHBOARD_AUTH_REDIRECT_URI") or ""
         ).strip() or "https://twitch.earlysalty.com/twitch/auth/callback"
@@ -156,7 +157,7 @@ class TwitchBaseCog(commands.Cog):
         self._internal_api_runner: InternalApiRunner | None = None
 
         # Internal API for split dashboard deployments
-        self._internal_api_token = (os.getenv("TWITCH_INTERNAL_API_TOKEN") or "").strip() or None
+        self._internal_api_token = load_secret_value("TWITCH_INTERNAL_API_TOKEN") or None
         env_internal_host = (os.getenv("TWITCH_INTERNAL_API_HOST") or "").strip()
         default_internal_host = TWITCH_INTERNAL_API_HOST or "127.0.0.1"
         self._internal_api_host = env_internal_host or default_internal_host
@@ -190,6 +191,8 @@ class TwitchBaseCog(commands.Cog):
             comparison_cb=getattr(self, "_dashboard_comparison_stats", None),
             session_cb=getattr(self, "_dashboard_session_detail", None),
             raid_auth_url_cb=getattr(self, "_dashboard_raid_auth_url", None),
+            raid_auth_state_cb=getattr(self, "_integration_raid_auth_state", None),
+            raid_block_state_cb=getattr(self, "_integration_raid_block_state", None),
             raid_go_url_cb=getattr(self, "_dashboard_raid_go_url", None),
             raid_requirements_cb=getattr(self, "_dashboard_raid_requirements", None),
             raid_oauth_callback_cb=getattr(self, "_dashboard_raid_oauth_callback", None),
@@ -197,7 +200,7 @@ class TwitchBaseCog(commands.Cog):
 
         # EventSub Webhook Handler – früh initialisieren damit er sowohl im Dashboard
         # als auch in _start_eventsub_listener verfügbar ist.
-        _webhook_secret = (os.getenv("TWITCH_WEBHOOK_SECRET") or "").strip()
+        _webhook_secret = load_secret_value("TWITCH_WEBHOOK_SECRET")
         if _webhook_secret:
             try:
                 from .monitoring.eventsub_webhook import EventSubWebhookHandler

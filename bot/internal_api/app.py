@@ -66,6 +66,8 @@ class InternalApiServer:
         comparison_cb: Callable[[int], Awaitable[dict[str, Any]]] | None = None,
         session_cb: Callable[[int], Awaitable[dict[str, Any]]] | None = None,
         raid_auth_url_cb: Callable[[str], Awaitable[str]] | None = None,
+        raid_auth_state_cb: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
+        raid_block_state_cb: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         raid_go_url_cb: Callable[[str], Awaitable[str | None]] | None = None,
         raid_requirements_cb: Callable[[str], Awaitable[str]] | None = None,
         raid_oauth_callback_cb: Callable[..., Awaitable[dict[str, Any]]] | None = None,
@@ -99,6 +101,16 @@ class InternalApiServer:
         self._session = session_cb if callable(session_cb) else self._empty_session
         self._raid_auth_url = (
             raid_auth_url_cb if callable(raid_auth_url_cb) else self._empty_raid_auth_url
+        )
+        self._raid_auth_state = (
+            raid_auth_state_cb
+            if callable(raid_auth_state_cb)
+            else self._empty_raid_auth_state
+        )
+        self._raid_block_state = (
+            raid_block_state_cb
+            if callable(raid_block_state_cb)
+            else self._empty_raid_block_state
         )
         self._raid_go_url = raid_go_url_cb if callable(raid_go_url_cb) else self._empty_raid_go_url
         self._raid_requirements = (
@@ -169,6 +181,35 @@ class InternalApiServer:
 
     async def _empty_raid_auth_url(self, _: str) -> str:
         return ""
+
+    async def _empty_raid_auth_state(self, discord_user_id: str) -> dict[str, Any]:
+        return {
+            "discord_user_id": discord_user_id,
+            "twitch_login": None,
+            "twitch_user_id": None,
+            "authorized": False,
+            "partner_opt_out": False,
+            "token_blacklisted": False,
+            "raid_blacklisted": False,
+            "blocked": False,
+        }
+
+    async def _empty_raid_block_state(
+        self,
+        *,
+        discord_user_id: str | None = None,
+        twitch_login: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "discord_user_id": discord_user_id,
+            "twitch_login": twitch_login,
+            "twitch_user_id": None,
+            "authorized": False,
+            "partner_opt_out": False,
+            "token_blacklisted": False,
+            "raid_blacklisted": False,
+            "blocked": False,
+        }
 
     async def _empty_raid_go_url(self, _: str) -> str | None:
         return None
@@ -717,6 +758,50 @@ class InternalApiServer:
             return False
         return default
 
+    @staticmethod
+    def _normalize_discord_user_id_param(
+        value: str | None,
+        *,
+        required: bool,
+    ) -> str | None:
+        raw = str(value or "").strip()
+        if not raw:
+            if required:
+                raise ValueError("invalid discord_user_id")
+            return None
+        if not raw.isdigit():
+            raise ValueError("invalid discord_user_id")
+        return raw
+
+    def _normalize_raid_state_payload(
+        self,
+        payload: Any,
+        *,
+        discord_user_id: str | None,
+        twitch_login: str | None,
+    ) -> dict[str, Any]:
+        source = payload if isinstance(payload, dict) else {}
+        normalized_discord_id = self._normalize_discord_user_id_param(
+            source.get("discord_user_id"),
+            required=False,
+        )
+        normalized_login = self._normalize_login(str(source.get("twitch_login") or ""))
+        normalized_twitch_user_id = str(source.get("twitch_user_id") or "").strip() or None
+        partner_opt_out = self._parse_bool(source.get("partner_opt_out"), default=False)
+        token_blacklisted = self._parse_bool(source.get("token_blacklisted"), default=False)
+        raid_blacklisted = self._parse_bool(source.get("raid_blacklisted"), default=False)
+        blocked_default = partner_opt_out or token_blacklisted or raid_blacklisted
+        return {
+            "discord_user_id": normalized_discord_id or discord_user_id,
+            "twitch_login": normalized_login or twitch_login,
+            "twitch_user_id": normalized_twitch_user_id,
+            "authorized": self._parse_bool(source.get("authorized"), default=False),
+            "partner_opt_out": partner_opt_out,
+            "token_blacklisted": token_blacklisted,
+            "raid_blacklisted": raid_blacklisted,
+            "blocked": self._parse_bool(source.get("blocked"), default=blocked_default),
+        }
+
     async def _json_body(self, request: web.Request) -> dict[str, Any]:
         if not request.can_read_body:
             return {}
@@ -1227,6 +1312,69 @@ class InternalApiServer:
             log.exception("internal api raid auth url failed")
             return self._json_error("internal_error", 500, "failed to generate raid auth url")
 
+    async def raid_auth_state(self, request: web.Request) -> web.Response:
+        try:
+            discord_user_id = self._normalize_discord_user_id_param(
+                request.query.get("discord_user_id"),
+                required=True,
+            )
+            payload = await self._raid_auth_state(discord_user_id)
+            return self._json_response(
+                {
+                    "ok": True,
+                    **self._normalize_raid_state_payload(
+                        payload,
+                        discord_user_id=discord_user_id,
+                        twitch_login=None,
+                    ),
+                }
+            )
+        except ValueError as exc:
+            return self._safe_bad_request(
+                context="raid auth state",
+                exc=exc,
+                message="invalid query parameters",
+            )
+        except Exception:
+            log.exception("internal api raid auth state failed")
+            return self._json_error("internal_error", 500, "failed to fetch raid auth state")
+
+    async def raid_block_state(self, request: web.Request) -> web.Response:
+        try:
+            discord_user_id = self._normalize_discord_user_id_param(
+                request.query.get("discord_user_id"),
+                required=False,
+            )
+            raw_login = str(request.query.get("twitch_login") or "").strip()
+            twitch_login = self._normalize_login(raw_login) if raw_login else None
+            if raw_login and not twitch_login:
+                raise ValueError("invalid twitch_login")
+            if discord_user_id is None and not twitch_login:
+                raise ValueError("discord_user_id or twitch_login is required")
+            payload = await self._raid_block_state(
+                discord_user_id=discord_user_id,
+                twitch_login=twitch_login,
+            )
+            return self._json_response(
+                {
+                    "ok": True,
+                    **self._normalize_raid_state_payload(
+                        payload,
+                        discord_user_id=discord_user_id,
+                        twitch_login=twitch_login,
+                    ),
+                }
+            )
+        except ValueError as exc:
+            return self._safe_bad_request(
+                context="raid block state",
+                exc=exc,
+                message="invalid query parameters",
+            )
+        except Exception:
+            log.exception("internal api raid block state failed")
+            return self._json_error("internal_error", 500, "failed to fetch raid block state")
+
     async def raid_go_url(self, request: web.Request) -> web.Response:
         state = str(request.query.get("state") or "").strip()
         if not state:
@@ -1434,6 +1582,8 @@ class InternalApiServer:
                 web.get(f"{base}/analytics/comparison", self.analytics_comparison),
                 web.get(f"{base}/sessions/{{session_id}}", self.session_detail),
                 web.get(f"{base}/raid/auth-url", self.raid_auth_url),
+                web.get(f"{base}/raid/auth-state", self.raid_auth_state),
+                web.get(f"{base}/raid/block-state", self.raid_block_state),
                 web.get(f"{base}/raid/go-url", self.raid_go_url),
                 web.post(f"{base}/raid/requirements", self.raid_requirements),
                 web.post(f"{base}/raid/oauth-callback", self.raid_oauth_callback),
@@ -1457,6 +1607,8 @@ def build_internal_api_app(
     comparison_cb: Callable[[int], Awaitable[dict[str, Any]]] | None = None,
     session_cb: Callable[[int], Awaitable[dict[str, Any]]] | None = None,
     raid_auth_url_cb: Callable[[str], Awaitable[str]] | None = None,
+    raid_auth_state_cb: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
+    raid_block_state_cb: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     raid_go_url_cb: Callable[[str], Awaitable[str | None]] | None = None,
     raid_requirements_cb: Callable[[str], Awaitable[str]] | None = None,
     raid_oauth_callback_cb: Callable[..., Awaitable[dict[str, Any]]] | None = None,
@@ -1476,6 +1628,8 @@ def build_internal_api_app(
         comparison_cb=comparison_cb,
         session_cb=session_cb,
         raid_auth_url_cb=raid_auth_url_cb,
+        raid_auth_state_cb=raid_auth_state_cb,
+        raid_block_state_cb=raid_block_state_cb,
         raid_go_url_cb=raid_go_url_cb,
         raid_requirements_cb=raid_requirements_cb,
         raid_oauth_callback_cb=raid_oauth_callback_cb,

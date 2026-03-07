@@ -17,10 +17,12 @@ from ..core.constants import (
     log,
 )
 from ..dashboard.server_v2 import build_v2_app
+from ..runtime_lock import runtime_pid_lock
 from ..runtime_mode import (
     INTERNAL_API_PORT as RUNTIME_INTERNAL_API_PORT,
     enforce_dashboard_service_runtime,
 )
+from ..secret_store import load_secret_value
 from .client import BotApiClient, BotApiClientError
 
 
@@ -106,7 +108,7 @@ def build_dashboard_service_app(
     resolved_internal_token = (
         internal_api_token
         if internal_api_token is not None
-        else (os.getenv("TWITCH_INTERNAL_API_TOKEN") or "").strip()
+        else load_secret_value("TWITCH_INTERNAL_API_TOKEN") or None
     )
     timeout_seconds = (
         float(internal_api_timeout_seconds)
@@ -121,20 +123,20 @@ def build_dashboard_service_app(
     resolved_dashboard_token = (
         dashboard_token
         if dashboard_token is not None
-        else (os.getenv("TWITCH_DASHBOARD_TOKEN") or "").strip() or None
+        else load_secret_value("TWITCH_DASHBOARD_TOKEN") or None
     )
     resolved_partner_token = (
         partner_token
         if partner_token is not None
-        else (os.getenv("TWITCH_PARTNER_TOKEN") or "").strip() or None
+        else load_secret_value("TWITCH_PARTNER_TOKEN") or None
     )
     resolved_oauth_client_id = (
-        oauth_client_id if oauth_client_id is not None else (os.getenv("TWITCH_CLIENT_ID") or "").strip() or None
+        oauth_client_id if oauth_client_id is not None else load_secret_value("TWITCH_CLIENT_ID") or None
     )
     resolved_oauth_client_secret = (
         oauth_client_secret
         if oauth_client_secret is not None
-        else (os.getenv("TWITCH_CLIENT_SECRET") or "").strip() or None
+        else load_secret_value("TWITCH_CLIENT_SECRET") or None
     )
     resolved_oauth_redirect_uri = (
         oauth_redirect_uri
@@ -382,23 +384,24 @@ async def run_dashboard_service(
         else _parse_env_int("TWITCH_DASHBOARD_PORT", int(TWITCH_DASHBOARD_PORT or 8765))
     )
     enforce_dashboard_service_runtime(port=resolved_port)
-    dashboard_app = app or build_dashboard_service_app()
-    runner = web.AppRunner(dashboard_app)
-    await runner.setup()
-    site = web.TCPSite(runner, host=resolved_host, port=resolved_port)
-    await site.start()
+    with runtime_pid_lock("dashboard_service", port=resolved_port):
+        dashboard_app = app or build_dashboard_service_app()
+        runner = web.AppRunner(dashboard_app)
+        await runner.setup()
+        site = web.TCPSite(runner, host=resolved_host, port=resolved_port)
+        await site.start()
 
-    log.info(
-        "Standalone dashboard service running on http://%s:%s/twitch",
-        resolved_host,
-        resolved_port,
-    )
-    try:
-        await asyncio.Event().wait()
-    except asyncio.CancelledError:
-        log.info("Standalone dashboard service shutdown requested")
-    finally:
-        await runner.cleanup()
+        log.info(
+            "Standalone dashboard service running on http://%s:%s/twitch",
+            resolved_host,
+            resolved_port,
+        )
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            log.info("Standalone dashboard service shutdown requested")
+        finally:
+            await runner.cleanup()
 
 
 __all__ = ["build_dashboard_service_app", "run_dashboard_service"]

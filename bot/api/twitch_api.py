@@ -9,6 +9,12 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - split runtime fallback
     from ..compat.http_client import build_resilient_connector
 
+from .twitch_auth import (
+    TwitchClientConfigError,
+    is_invalid_client_response,
+    normalize_twitch_credential,
+)
+
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"  # noqa: S105
 TWITCH_API_BASE = "https://api.twitch.tv/helix"
 
@@ -28,8 +34,8 @@ class TwitchAPI:
         client_secret: str,
         session: aiohttp.ClientSession | None = None,
     ):
-        self.client_id = client_id
-        self.client_secret = client_secret
+        self.client_id = normalize_twitch_credential(client_id)
+        self.client_secret = normalize_twitch_credential(client_secret)
         self._session = session
         self._own_session = False
         self._token: str | None = None
@@ -37,6 +43,8 @@ class TwitchAPI:
         self._lock = asyncio.Lock()
         self._category_cache: dict[str, str] = {}  # name_lower -> id
         self._log = logging.getLogger("TwitchStreams")
+        self._auth_blocked_until: float = 0.0
+        self._auth_block_reason: str | None = None
 
     # ---- Session lifecycle -------------------------------------------------
     def _ensure_session(self) -> None:
@@ -78,11 +86,40 @@ class TwitchAPI:
     async def __aexit__(self, exc_type, exc, tb):
         await self.aclose()
 
+    def is_auth_blocked(self) -> bool:
+        return time.time() < self._auth_blocked_until
+
+    def _block_auth(self, reason: str, *, cooldown_seconds: float = 900.0) -> TwitchClientConfigError:
+        self._auth_blocked_until = time.time() + float(cooldown_seconds)
+        self._auth_block_reason = reason
+        return TwitchClientConfigError(reason)
+
+    def _raise_if_auth_blocked(self) -> None:
+        if self.is_auth_blocked():
+            raise TwitchClientConfigError(
+                self._auth_block_reason
+                or "Twitch OAuth requests are temporarily blocked due to invalid client configuration."
+            )
+
+    def _ensure_client_credentials(self) -> None:
+        if self.client_id and self.client_secret:
+            return
+
+        reason = (
+            "Twitch client credentials are missing or blank after trimming whitespace. "
+            "Verify TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET, then restart the bot."
+        )
+        if not self.is_auth_blocked() or self._auth_block_reason != reason:
+            self._log.error(reason)
+        raise self._block_auth(reason)
+
     # ---- OAuth -------------------------------------------------------------
     async def _ensure_token(self):
         async with self._lock:
             if self._token and time.time() < self._token_expiry - 60:
                 return
+            self._raise_if_auth_blocked()
+            self._ensure_client_credentials()
             data = {
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
@@ -95,6 +132,16 @@ class TwitchAPI:
                     async with self._session.post(TWITCH_TOKEN_URL, data=data) as r:
                         if r.status != 200:
                             txt = await r.text()
+                            if is_invalid_client_response(r.status, txt):
+                                reason = (
+                                    "Twitch client credentials were rejected by Twitch OAuth "
+                                    "(invalid client). Verify TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET, "
+                                    "rotate the secret if needed, then restart the bot. "
+                                    "Suppressing additional token requests for 15 minutes."
+                                )
+                                if not self.is_auth_blocked() or self._auth_block_reason != reason:
+                                    self._log.error(reason)
+                                raise self._block_auth(reason)
                             self._log.error(
                                 "twitch token exchange failed: HTTP %s: %s",
                                 r.status,
@@ -105,6 +152,8 @@ class TwitchAPI:
                         self._token = js.get("access_token")
                         expires = js.get("expires_in", 3600)
                         self._token_expiry = time.time() + float(expires)
+                        self._auth_blocked_until = 0.0
+                        self._auth_block_reason = None
                         return
                 except RuntimeError as exc:
                     if not self._is_closed_session_error(exc):

@@ -12,6 +12,7 @@ import discord
 from discord.ext import tasks
 
 from .. import storage
+from ..api.twitch_auth import TwitchClientConfigError
 from ..core.constants import (
     INVITES_REFRESH_INTERVAL_HOURS,
     POLL_INTERVAL_SECONDS,
@@ -208,6 +209,8 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
             self._category_id = await self.api.get_category_id(TWITCH_TARGET_GAME_NAME)
             if self._category_id:
                 log.debug("Deadlock category_id = %s", self._category_id)
+        except TwitchClientConfigError:
+            return
         except Exception:
             log.exception("Konnte Twitch-Kategorie-ID nicht ermitteln")
 
@@ -215,9 +218,13 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
         """Ein Tick: tracked Streamer + Kategorie-Streams prüfen, Postings/DB aktualisieren, Stats loggen."""
         if self.api is None:
             return
+        if self.api.is_auth_blocked():
+            return
 
         if not self._category_id:
             await self._ensure_category_id()
+            if self.api.is_auth_blocked():
+                return
 
         partner_logins: set[str] = set()
         try:
@@ -275,6 +282,8 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
             for language in language_filters:
                 try:
                     streams = await self.api.get_streams_by_logins(logins, language=language)
+                except TwitchClientConfigError:
+                    return
                 except Exception:
                     label = language or "any"
                     log.exception(
@@ -304,6 +313,8 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                         language=language,
                         limit=max(1, remaining),
                     )
+                except TwitchClientConfigError:
+                    return
                 except Exception:
                     label = language or "any"
                     log.exception("Konnte Kategorie-Streams nicht abrufen (language=%s)", label)

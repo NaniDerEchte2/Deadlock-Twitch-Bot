@@ -13,18 +13,17 @@ Streamer können den Twitch-Bot direkt über Twitch-Chat-Commands steuern:
 import asyncio
 import copy
 import logging
-import logging.handlers
 import os
 import random
 import time
 from collections import deque
 from datetime import UTC, datetime
-from pathlib import Path
 
 import discord
 
 from ..api.token_manager import TwitchBotTokenManager
 from ..core.constants import TWITCH_NOTIFY_CHANNEL_ID, TWITCH_TARGET_GAME_NAME
+from ..logging_setup import ensure_twitch_logger_file_handler, log_path
 from ..storage import get_conn
 from .commands import RaidCommandsMixin
 from .connection import ConnectionMixin
@@ -52,33 +51,8 @@ from .tokens import (
 
 # Dedizierter Twitch-Logger Setup
 def _setup_twitch_logging():
-    twitch_log = logging.getLogger("TwitchStreams")
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
-
-    file_path = log_dir / "twitch_bot.log"
-    # Prüfe ob Handler bereits existiert (um Duplikate bei Reloads zu vermeiden)
-    exists = False
-    for h in twitch_log.handlers:
-        if isinstance(h, logging.handlers.RotatingFileHandler) and str(h.baseFilename).endswith(
-            "twitch_bot.log"
-        ):
-            h.setLevel(logging.INFO)
-            exists = True
-            break
-
-    if not exists:
-        handler = logging.handlers.RotatingFileHandler(
-            file_path,
-            maxBytes=5 * 1024 * 1024,  # 5MB
-            backupCount=5,
-            encoding="utf-8",
-        )
-        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-        handler.setFormatter(formatter)
-        handler.setLevel(logging.INFO)
-        twitch_log.addHandler(handler)
-        twitch_log.propagate = True  # Auch weiterhin im Master-Log behalten
+    twitch_log = ensure_twitch_logger_file_handler()
+    twitch_log.propagate = True  # Auch weiterhin im Master-Log behalten
 
 
 _setup_twitch_logging()
@@ -154,8 +128,8 @@ if TWITCHIO_AVAILABLE:
             # gebannten Channel sekundlich wiederholt wird.
             # Key = channel_login (lowercase), Value = nächster erlaubter Zeitpunkt.
             self._mod_retry_cooldown: dict[str, datetime] = {}
-            self._autoban_log = Path("logs") / "twitch_autobans.log"
-            self._suspicious_log = Path("logs") / "twitch_suspicious.log"
+            self._autoban_log = log_path("twitch_autobans.log")
+            self._suspicious_log = log_path("twitch_suspicious.log")
             self._init_service_pitch_warning()
             self._target_game_lower = (TWITCH_TARGET_GAME_NAME or "").strip().lower()
             # Cache for category checks in chat tracking (login -> (monotonic_ts, is_target_game))

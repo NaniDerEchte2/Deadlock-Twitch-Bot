@@ -20,7 +20,7 @@ from urllib.parse import urlencode
 import aiohttp
 import discord
 
-from ..api.token_error_handler import TokenErrorHandler
+from ..discord_role_sync import normalize_discord_user_id, sync_streamer_role
 from ..storage import backfill_tracked_stats_from_category, get_conn
 
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"  # noqa: S105
@@ -64,22 +64,6 @@ try:
     RECRUIT_DIRECT_INVITE_MAX_FOLLOWERS = max(0, int(_recruit_direct_invite_threshold_raw))
 except ValueError:
     RECRUIT_DIRECT_INVITE_MAX_FOLLOWERS = 120
-
-
-def _parse_env_int(name: str, default: int = 0) -> int:
-    raw = (os.getenv(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-STREAMER_ROLE_ID = _parse_env_int("STREAMER_ROLE_ID", 1313624729466441769)
-STREAMER_GUILD_ID = _parse_env_int("STREAMER_GUILD_ID", 0)
-FALLBACK_MAIN_GUILD_ID = _parse_env_int("MAIN_GUILD_ID", 0)
-
 log = logging.getLogger("TwitchStreams.RaidManager")
 
 
@@ -325,29 +309,7 @@ class RaidBot:
 
     @staticmethod
     def _normalize_discord_user_id(raw: str | None) -> str | None:
-        candidate = str(raw or "").strip()
-        if candidate and candidate.isdigit():
-            return candidate
-        return None
-
-    def _iter_role_guild_candidates(
-        self, discord_bot: discord.Client | None
-    ) -> list[discord.Guild]:
-        if discord_bot is None:
-            return []
-
-        candidates: list[discord.Guild] = []
-        seen: set[int] = set()
-        for guild_id in (STREAMER_GUILD_ID, FALLBACK_MAIN_GUILD_ID):
-            if guild_id and guild_id not in seen:
-                seen.add(guild_id)
-                guild = discord_bot.get_guild(guild_id)
-                if guild is not None:
-                    candidates.append(guild)
-
-        if not candidates:
-            candidates.extend(getattr(discord_bot, "guilds", []))
-        return candidates
+        return normalize_discord_user_id(raw)
 
     async def _resolve_discord_display_name(self, discord_user_id: str | None) -> str | None:
         normalized_id = self._normalize_discord_user_id(discord_user_id)
@@ -385,56 +347,14 @@ class RaidBot:
         should_have_role: bool,
         reason: str,
     ) -> None:
-        if STREAMER_ROLE_ID <= 0:
-            return
-
-        normalized_id = self._normalize_discord_user_id(discord_user_id)
-        if not normalized_id:
-            return
-
         discord_bot = getattr(self.auth_manager, "_discord_bot", None)
-        if discord_bot is None:
-            return
-
-        user_id_int = int(normalized_id)
-        for guild in self._iter_role_guild_candidates(discord_bot):
-            role = guild.get_role(STREAMER_ROLE_ID)
-            if role is None:
-                continue
-
-            member = guild.get_member(user_id_int)
-            if member is None:
-                try:
-                    member = await guild.fetch_member(user_id_int)
-                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                    member = None
-
-            if member is None:
-                continue
-
-            try:
-                has_role = role in member.roles
-                if should_have_role and not has_role:
-                    await member.add_roles(role, reason=reason)
-                    log.info(
-                        "Streamer role granted to %s in guild %s",
-                        normalized_id,
-                        guild.id,
-                    )
-                elif (not should_have_role) and has_role:
-                    await member.remove_roles(role, reason=reason)
-                    log.info(
-                        "Streamer role removed from %s in guild %s",
-                        normalized_id,
-                        guild.id,
-                    )
-            except discord.Forbidden:
-                log.warning("Missing permission to sync streamer role in guild %s", guild.id)
-            except discord.HTTPException:
-                log.warning(
-                    "Discord API error while syncing streamer role in guild %s",
-                    guild.id,
-                )
+        await sync_streamer_role(
+            discord_bot,
+            discord_user_id,
+            should_have_role=should_have_role,
+            reason=reason,
+            logger=log,
+        )
 
     async def _sync_partner_state_after_auth(
         self,

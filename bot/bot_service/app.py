@@ -6,6 +6,7 @@ import asyncio
 from typing import Any
 
 from ..core.constants import log
+from ..runtime_lock import runtime_pid_lock
 from ..runtime_mode import INTERNAL_API_PORT, enforce_internal_api_runtime
 
 
@@ -64,19 +65,20 @@ async def run_bot_service(*, port: int | None = None) -> None:
     resolved_port = port if port is not None else INTERNAL_API_PORT
     enforce_internal_api_runtime(port=resolved_port)
 
-    log.info("twitch_worker: initialising TwitchStreamCog in standalone mode")
+    with runtime_pid_lock("twitch_worker", port=resolved_port):
+        log.info("twitch_worker: initialising TwitchStreamCog in standalone mode")
 
-    from ..cog import TwitchStreamCog
+        from ..cog import TwitchStreamCog
 
-    bot = HeadlessBot()
-    cog = TwitchStreamCog(bot)
+        bot = HeadlessBot()
+        cog = TwitchStreamCog(bot)
 
-    try:
-        await asyncio.Event().wait()
-    except asyncio.CancelledError:
-        log.info("twitch_worker: shutdown requested")
-    finally:
-        await cog.cog_unload()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            log.info("twitch_worker: shutdown requested")
+        finally:
+            await cog.cog_unload()
 
 
 __all__ = ["HeadlessBot", "run_bot_service"]

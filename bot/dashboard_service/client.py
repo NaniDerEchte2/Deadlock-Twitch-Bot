@@ -276,6 +276,27 @@ class BotApiClient:
             )
         return normalized
 
+    @staticmethod
+    def _normalize_discord_user_id_value(discord_user_id: str | int) -> str:
+        normalized = str(discord_user_id or "").strip()
+        if not normalized.isdigit():
+            raise BotApiClientError(
+                status=400,
+                code="bad_request",
+                message="Discord user ID is invalid.",
+            )
+        return normalized
+
+    @staticmethod
+    def _validate_raid_state_payload(payload: Any, *, context: str) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise BotApiClientError(
+                status=502,
+                code="upstream_invalid_shape",
+                message=f"Bot internal API returned an invalid {context} payload.",
+            )
+        return payload
+
     async def healthz(self) -> dict[str, Any]:
         payload = await self._request_json("GET", f"{INTERNAL_API_BASE_PATH}/healthz")
         if not isinstance(payload, dict):
@@ -447,6 +468,43 @@ class BotApiClient:
                 message="Bot internal API returned an empty raid auth URL.",
             )
         return auth_url
+
+    async def get_raid_auth_state(self, *, discord_user_id: str | int) -> dict[str, Any]:
+        normalized_discord_id = self._normalize_discord_user_id_value(discord_user_id)
+        payload = await self._request_json(
+            "GET",
+            f"{INTERNAL_API_BASE_PATH}/raid/auth-state",
+            query={"discord_user_id": normalized_discord_id},
+        )
+        return self._validate_raid_state_payload(payload, context="raid auth state")
+
+    async def get_raid_block_state(
+        self,
+        *,
+        discord_user_id: str | int | None = None,
+        twitch_login: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_discord_id = None
+        if discord_user_id is not None:
+            normalized_discord_id = self._normalize_discord_user_id_value(discord_user_id)
+        normalized_login = None
+        if twitch_login is not None:
+            normalized_login = self._normalize_login_path_segment(twitch_login)
+        if normalized_discord_id is None and normalized_login is None:
+            raise BotApiClientError(
+                status=400,
+                code="bad_request",
+                message="discord_user_id or twitch_login is required.",
+            )
+        payload = await self._request_json(
+            "GET",
+            f"{INTERNAL_API_BASE_PATH}/raid/block-state",
+            query={
+                "discord_user_id": normalized_discord_id,
+                "twitch_login": normalized_login,
+            },
+        )
+        return self._validate_raid_state_payload(payload, context="raid block state")
 
     async def get_raid_go_url(self, state: str) -> str | None:
         try:

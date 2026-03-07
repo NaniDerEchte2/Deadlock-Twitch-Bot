@@ -91,6 +91,14 @@ powershell -NoProfile -ExecutionPolicy $ExecutionPolicy -File C:/nssm/restart-bo
 - Internal API lives at `http://127.0.0.1:8776/internal/twitch/v1/*`.
 - It requires `X-Internal-Token` and is intended for local service-to-service traffic only.
 - Caddy does not proxy `/internal/twitch/v1/*` publicly.
+- Official raid-integration read surface:
+  - `GET /internal/twitch/v1/raid/auth-url?login=discord:<discord_id>`
+  - `GET /internal/twitch/v1/raid/auth-state?discord_user_id=<discord_id>`
+  - `GET /internal/twitch/v1/raid/block-state?discord_user_id=<discord_id>&twitch_login=<optional>`
+- Raid state responses stay small and stable: `ok`, `discord_user_id`, `twitch_login`, `twitch_user_id`, `authorized`, `partner_opt_out`, `token_blacklisted`, `raid_blacklisted`, `blocked`.
+- Discord role sync mode is controlled via `TWITCH_DISCORD_ROLE_SYNC_MODE`:
+  - `local` keeps the historic Twitch-Bot role behavior (default).
+  - `external` disables local streamer-role mutations so an external owner can handle role + notify.
 - Keep `127.0.0.1:8766` free for the master admin dashboard service.
 
 ## Verification

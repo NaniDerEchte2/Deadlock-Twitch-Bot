@@ -160,6 +160,110 @@ class InternalApiAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload.get("error"), "bad_request")
         self.assertEqual(payload.get("message"), "invalid or missing login")
 
+    async def test_raid_auth_state_returns_stable_payload(self) -> None:
+        seen_ids: list[str] = []
+
+        async def _raid_auth_state_cb(discord_user_id: str) -> dict[str, object]:
+            seen_ids.append(discord_user_id)
+            return {
+                "discord_user_id": discord_user_id,
+                "twitch_login": "partner_one",
+                "twitch_user_id": "1001",
+                "authorized": True,
+                "partner_opt_out": False,
+            }
+
+        app = build_internal_api_app(token="secret-token", raid_auth_state_cb=_raid_auth_state_cb)
+        async with TestServer(app) as server:
+            async with TestClient(server) as client:
+                response = await client.get(
+                    f"{INTERNAL_API_BASE_PATH}/raid/auth-state?discord_user_id=123456789",
+                    headers={INTERNAL_TOKEN_HEADER: "secret-token"},
+                )
+                payload = await response.json()
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            payload,
+            {
+                "ok": True,
+                "discord_user_id": "123456789",
+                "twitch_login": "partner_one",
+                "twitch_user_id": "1001",
+                "authorized": True,
+                "partner_opt_out": False,
+                "token_blacklisted": False,
+                "raid_blacklisted": False,
+                "blocked": False,
+            },
+        )
+        self.assertEqual(seen_ids, ["123456789"])
+
+    async def test_raid_auth_state_rejects_invalid_discord_user_id(self) -> None:
+        app = build_internal_api_app(token="secret-token")
+        async with TestServer(app) as server:
+            async with TestClient(server) as client:
+                response = await client.get(
+                    f"{INTERNAL_API_BASE_PATH}/raid/auth-state?discord_user_id=abc",
+                    headers={INTERNAL_TOKEN_HEADER: "secret-token"},
+                )
+                payload = await response.json()
+
+        self.assertEqual(response.status, 400)
+        self.assertEqual(payload.get("error"), "bad_request")
+        self.assertEqual(payload.get("message"), "invalid query parameters")
+
+    async def test_raid_block_state_supports_login_only_and_computes_blocked(self) -> None:
+        seen_queries: list[tuple[str | None, str | None]] = []
+
+        async def _raid_block_state_cb(
+            *,
+            discord_user_id: str | None = None,
+            twitch_login: str | None = None,
+        ) -> dict[str, object]:
+            seen_queries.append((discord_user_id, twitch_login))
+            return {
+                "discord_user_id": None,
+                "twitch_login": twitch_login,
+                "twitch_user_id": "2002",
+                "authorized": True,
+                "partner_opt_out": False,
+                "token_blacklisted": True,
+                "raid_blacklisted": False,
+            }
+
+        app = build_internal_api_app(token="secret-token", raid_block_state_cb=_raid_block_state_cb)
+        async with TestServer(app) as server:
+            async with TestClient(server) as client:
+                response = await client.get(
+                    f"{INTERNAL_API_BASE_PATH}/raid/block-state?twitch_login=Partner_One",
+                    headers={INTERNAL_TOKEN_HEADER: "secret-token"},
+                )
+                payload = await response.json()
+
+        self.assertEqual(response.status, 200)
+        self.assertTrue(payload.get("ok"))
+        self.assertEqual(payload.get("twitch_login"), "partner_one")
+        self.assertEqual(payload.get("twitch_user_id"), "2002")
+        self.assertTrue(payload.get("authorized"))
+        self.assertTrue(payload.get("token_blacklisted"))
+        self.assertTrue(payload.get("blocked"))
+        self.assertEqual(seen_queries, [(None, "partner_one")])
+
+    async def test_raid_block_state_requires_identifier(self) -> None:
+        app = build_internal_api_app(token="secret-token")
+        async with TestServer(app) as server:
+            async with TestClient(server) as client:
+                response = await client.get(
+                    f"{INTERNAL_API_BASE_PATH}/raid/block-state",
+                    headers={INTERNAL_TOKEN_HEADER: "secret-token"},
+                )
+                payload = await response.json()
+
+        self.assertEqual(response.status, 400)
+        self.assertEqual(payload.get("error"), "bad_request")
+        self.assertEqual(payload.get("message"), "invalid query parameters")
+
     async def test_streamer_add_replays_idempotent_request(self) -> None:
         seen: list[tuple[str, bool]] = []
 

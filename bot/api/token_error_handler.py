@@ -6,13 +6,15 @@ Verwaltet:
 - Verhindert endlose Refresh-Versuche
 """
 
-import asyncio
 import logging
-import os
 from datetime import UTC, datetime, timedelta
 
 import discord
 
+from ..discord_role_sync import (
+    normalize_discord_user_id,
+    schedule_streamer_role_sync as schedule_discord_role_sync,
+)
 from ..storage import get_conn
 
 log = logging.getLogger("TwitchStreams.TokenErrorHandler")
@@ -22,23 +24,6 @@ TOKEN_ERROR_CHANNEL_ID = 1374364800817303632
 
 # Grace-Period: Wie viele Tage der User Zeit hat bevor die Rolle entfernt wird
 GRACE_PERIOD_DAYS = 7
-
-
-def _parse_env_int(name: str, default: int = 0) -> int:
-    raw = (os.getenv(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-STREAMER_ROLE_ID = _parse_env_int("STREAMER_ROLE_ID", 1313624729466441769)
-STREAMER_GUILD_ID = _parse_env_int("STREAMER_GUILD_ID", 0)
-FALLBACK_MAIN_GUILD_ID = _parse_env_int("MAIN_GUILD_ID", 0)
-
-
 def _mask_log_identifier(value: object, *, visible_prefix: int = 3, visible_suffix: int = 2) -> str:
     text = str(value or "").strip()
     if not text:
@@ -92,81 +77,7 @@ class TokenErrorHandler:
 
     @staticmethod
     def _normalize_discord_user_id(raw: str | None) -> str | None:
-        value = str(raw or "").strip()
-        if value and value.isdigit():
-            return value
-        return None
-
-    def _iter_role_guild_candidates(self) -> list[discord.Guild]:
-        if not self.discord_bot:
-            return []
-
-        candidates: list[discord.Guild] = []
-        seen: set[int] = set()
-        for guild_id in (STREAMER_GUILD_ID, FALLBACK_MAIN_GUILD_ID):
-            if guild_id and guild_id not in seen:
-                seen.add(guild_id)
-                guild = self.discord_bot.get_guild(guild_id)
-                if guild is not None:
-                    candidates.append(guild)
-
-        if not candidates:
-            candidates.extend(getattr(self.discord_bot, "guilds", []))
-        return candidates
-
-    async def _sync_streamer_role(
-        self,
-        discord_user_id: str,
-        *,
-        should_have_role: bool,
-        reason: str,
-    ) -> None:
-        if not self.discord_bot or STREAMER_ROLE_ID <= 0:
-            return
-
-        normalized_id = self._normalize_discord_user_id(discord_user_id)
-        if not normalized_id:
-            return
-
-        user_id_int = int(normalized_id)
-        for guild in self._iter_role_guild_candidates():
-            role = guild.get_role(STREAMER_ROLE_ID)
-            if role is None:
-                continue
-
-            member = guild.get_member(user_id_int)
-            if member is None:
-                try:
-                    member = await guild.fetch_member(user_id_int)
-                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                    member = None
-
-            if member is None:
-                continue
-
-            try:
-                has_role = role in member.roles
-                if should_have_role and not has_role:
-                    await member.add_roles(role, reason=reason)
-                    log.info(
-                        "Granted streamer role to Discord user %s in guild %s",
-                        normalized_id,
-                        guild.id,
-                    )
-                elif (not should_have_role) and has_role:
-                    await member.remove_roles(role, reason=reason)
-                    log.info(
-                        "Removed streamer role from Discord user %s in guild %s",
-                        normalized_id,
-                        guild.id,
-                    )
-            except discord.Forbidden:
-                log.warning("Missing permission to sync streamer role in guild %s", guild.id)
-            except discord.HTTPException:
-                log.warning(
-                    "Discord API error while syncing streamer role in guild %s",
-                    guild.id,
-                )
+        return normalize_discord_user_id(raw)
 
     def schedule_streamer_role_sync(
         self,
@@ -179,18 +90,13 @@ class TokenErrorHandler:
         if not normalized_id:
             return
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-
-        loop.create_task(
-            self._sync_streamer_role(
-                normalized_id,
-                should_have_role=should_have_role,
-                reason=reason,
-            ),
-            name="twitch.token_error.role_sync",
+        schedule_discord_role_sync(
+            self.discord_bot,
+            normalized_id,
+            should_have_role=should_have_role,
+            reason=reason,
+            task_name="twitch.token_error.role_sync",
+            logger=log,
         )
 
     # Anzahl aufeinanderfolgender Fehler, bevor der Raid-Bot wirklich deaktiviert wird

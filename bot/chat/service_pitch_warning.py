@@ -4,9 +4,9 @@ import re
 import time
 from collections import deque
 from datetime import UTC, datetime
-from pathlib import Path
 
 from ..storage import get_conn
+from ..logging_setup import log_path
 
 log = logging.getLogger("TwitchStreams.ChatBot")
 
@@ -294,7 +294,7 @@ _DISCORD_TEAMUP_RE = re.compile(
 
 class ServicePitchWarningMixin:
     def _init_service_pitch_warning(self) -> None:
-        self._service_warning_log = Path("logs") / "twitch_service_warnings.log"
+        self._service_warning_log = log_path("twitch_service_warnings.log")
         self._service_warning_activity: dict[tuple[str, str], deque[tuple[float, int]]] = {}
         self._service_warning_message_history: dict[
             tuple[str, str], deque[tuple[float, str, set[str]]]

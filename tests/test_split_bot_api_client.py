@@ -159,6 +159,61 @@ class BotApiClientErrorMappingTests(unittest.IsolatedAsyncioTestCase):
             "http://127.0.0.1:8766/internal/twitch/v1/streamers/early_salty/verify",
         )
 
+    async def test_get_raid_auth_state_calls_internal_endpoint(self) -> None:
+        session = _FakeSession(
+            response=_FakeResponse(
+                status=200,
+                text='{"ok":true,"discord_user_id":"123","authorized":true}',
+            )
+        )
+        client = BotApiClient(
+            base_url="http://127.0.0.1:8766",
+            token="secret",
+            session=session,
+        )
+
+        payload = await client.get_raid_auth_state(discord_user_id="123")
+
+        self.assertTrue(payload["authorized"])
+        self.assertEqual(
+            session.calls[0]["url"],
+            "http://127.0.0.1:8766/internal/twitch/v1/raid/auth-state?discord_user_id=123",
+        )
+
+    async def test_get_raid_block_state_supports_login_only(self) -> None:
+        session = _FakeSession(
+            response=_FakeResponse(
+                status=200,
+                text='{"ok":true,"twitch_login":"partner_one","blocked":true}',
+            )
+        )
+        client = BotApiClient(
+            base_url="http://127.0.0.1:8766",
+            token="secret",
+            session=session,
+        )
+
+        payload = await client.get_raid_block_state(twitch_login="Partner_One")
+
+        self.assertTrue(payload["blocked"])
+        self.assertEqual(
+            session.calls[0]["url"],
+            "http://127.0.0.1:8766/internal/twitch/v1/raid/block-state?twitch_login=partner_one",
+        )
+
+    async def test_get_raid_block_state_requires_identifier(self) -> None:
+        client = BotApiClient(
+            base_url="http://127.0.0.1:8766",
+            token="secret",
+            session=_FakeSession(response=_FakeResponse(status=200, text="{}")),
+        )
+
+        with self.assertRaises(BotApiClientError) as ctx:
+            await client.get_raid_block_state()
+
+        self.assertEqual(ctx.exception.status, 400)
+        self.assertEqual(ctx.exception.code, "bad_request")
+
     async def test_disables_redirect_following_to_protect_internal_token(self) -> None:
         session = _FakeSession(
             response=_FakeResponse(status=200, text='{"ok":true}')
@@ -261,7 +316,10 @@ class BotApiClientErrorMappingTests(unittest.IsolatedAsyncioTestCase):
             },
             clear=False,
         ):
-            with self.assertLogs("TwitchStreams", level="WARNING") as captured:
+            with (
+                patch("bot.dashboard_service.app.load_secret_value", return_value=""),
+                self.assertLogs("TwitchStreams", level="WARNING") as captured,
+            ):
                 app = build_dashboard_service_app(noauth=False)
 
         self.assertIsNotNone(app)

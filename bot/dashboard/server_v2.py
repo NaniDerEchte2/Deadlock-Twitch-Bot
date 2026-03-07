@@ -196,7 +196,7 @@ class DashboardV2Server(
         self._redirect_uri = str(
             getattr(getattr(raid_bot, "auth_manager", None), "redirect_uri", "") or ""
         ).strip()
-        self._master_dashboard_href = "/admin"
+        self._master_dashboard_href = "/twitch/admin"
         keyring_client_id = self._load_secret_value("DISCORD_OAUTH_CLIENT_ID")
         discord_bot = None
         auth_manager = getattr(raid_bot, "auth_manager", None) if raid_bot else None
@@ -264,6 +264,14 @@ class DashboardV2Server(
 
     async def _empty_raid_history(self, **_: Any) -> list[dict]:
         return []
+
+    async def admin(self, request: web.Request) -> web.StreamResponse:
+        """Serve the new admin SPA at /twitch/admin while preserving /twitch/live."""
+        if request.path.rstrip("/") == "/twitch/admin":
+            serve_admin_dashboard = getattr(self, "_serve_admin_dashboard", None)
+            if callable(serve_admin_dashboard):
+                return await serve_admin_dashboard(request)
+        return await DashboardLiveMixin.index(self, request)
 
     @classmethod
     def _load_secret_value(cls, *keys: str) -> str:

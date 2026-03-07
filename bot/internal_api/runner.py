@@ -36,6 +36,8 @@ class InternalApiRunner:
         comparison_cb: Callable[[int], Awaitable[dict[str, Any]]] | None = None,
         session_cb: Callable[[int], Awaitable[dict[str, Any]]] | None = None,
         raid_auth_url_cb: Callable[[str], Awaitable[str]] | None = None,
+        raid_auth_state_cb: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
+        raid_block_state_cb: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         raid_go_url_cb: Callable[[str], Awaitable[str | None]] | None = None,
         raid_requirements_cb: Callable[[str], Awaitable[str]] | None = None,
         raid_oauth_callback_cb: Callable[..., Awaitable[dict[str, Any]]] | None = None,
@@ -57,6 +59,8 @@ class InternalApiRunner:
         self._comparison_cb = comparison_cb
         self._session_cb = session_cb
         self._raid_auth_url_cb = raid_auth_url_cb
+        self._raid_auth_state_cb = raid_auth_state_cb
+        self._raid_block_state_cb = raid_block_state_cb
         self._raid_go_url_cb = raid_go_url_cb
         self._raid_requirements_cb = raid_requirements_cb
         self._raid_oauth_callback_cb = raid_oauth_callback_cb
@@ -107,6 +111,8 @@ class InternalApiRunner:
                     comparison_cb=self._comparison_cb,
                     session_cb=self._session_cb,
                     raid_auth_url_cb=self._raid_auth_url_cb,
+                    raid_auth_state_cb=self._raid_auth_state_cb,
+                    raid_block_state_cb=self._raid_block_state_cb,
                     raid_go_url_cb=self._raid_go_url_cb,
                     raid_requirements_cb=self._raid_requirements_cb,
                     raid_oauth_callback_cb=self._raid_oauth_callback_cb,
