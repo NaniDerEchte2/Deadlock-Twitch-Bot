@@ -7,13 +7,14 @@ import html
 
 class DashboardTemplateMixin:
     def _tabs(self, active: str) -> str:
-        def anchor(href: str, label: str, key: str) -> str:
-            cls = "tab active" if key == active else "tab"
+        def anchor(href: str, label: str, key: str, extra_cls: str = "") -> str:
+            cls = f"tab{' active' if key == active else ''}{' ' + extra_cls if extra_cls else ''}"
             return f'<a class="{cls}" href="{href}">{label}</a>'
 
         return (
             '<nav class="tabs">'
             f"{anchor('/twitch/admin', 'Admin', 'live')}"
+            f"{anchor('/twitch/admin/roadmap', 'Roadmap', 'roadmap')}"
             f"{anchor('/twitch/stats', 'Stats', 'stats')}"
             f"{anchor('/twitch/dashboard-v2', 'Analytics v2', 'v2')}"
             f"{anchor('/social-media', 'Social Media', 'social')}"
@@ -40,82 +41,91 @@ class DashboardTemplateMixin:
 <title>Deadlock Twitch Posting – Admin</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600;700&family=Space+Grotesk:wght@400;500;600&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Manrope:wght@400;500;600&display=swap');
   :root {{
     color-scheme: dark;
-    --bg:#0b0a14; --bg-alt:#141226; --card:#1b1630; --bd:#2c2349; --text:#f2edff; --muted:#a394c7;
-    --accent:#7c3aed; --accent-2:#f472b6; --accent-3:#d6ccff;
-    --ok-bg:#0f2f24; --ok-bd:#1f9d7a; --ok-fg:#baf7dd;
-    --err-bg:#3b0f1c; --err-bd:#b91c1c; --err-fg:#fecaca;
-    --warn-bg:#2f210b; --warn-bd:#d97706; --warn-fg:#fde68a;
-    --shadow:rgba(0,0,0,.45); --shadow-strong:rgba(0,0,0,.6);
-    --chip-bg:rgba(124,58,237,.18);
+    --bg:#07151d; --bg-alt:#0b1d28; --card:#102635; --card-hover:#173448;
+    --bd:rgba(194,221,240,0.14); --bd-hover:rgba(194,221,240,0.3);
+    --text:#e9f1f7; --muted:#9bb3c5;
+    --accent:#ff7a18; --accent-hover:#ff8d39;
+    --teal:#10b7ad; --teal-hover:#1dd4ca;
+    --ok-bg:rgba(46,204,113,0.12); --ok-bd:rgba(46,204,113,0.35); --ok-fg:#2ecc71;
+    --err-bg:rgba(255,107,94,0.12); --err-bd:rgba(255,107,94,0.35); --err-fg:#ff6b5e;
+    --warn-bg:rgba(245,182,66,0.12); --warn-bd:rgba(245,182,66,0.35); --warn-fg:#f5b642;
+    --shadow:rgba(0,0,0,.35); --shadow-strong:rgba(0,0,0,.5);
+    --chip-bg:rgba(255,122,24,.15);
   }}
   * {{ box-sizing: border-box; }}
   body {{
-    font-family: "Space Grotesk", "Segoe UI", sans-serif;
-    width: 100%;
-    max-width: none;
-    margin: 0 auto;
+    font-family: "Manrope", "Segoe UI", sans-serif;
+    width: 100%; max-width: none; margin: 0 auto;
     padding: 2.6rem 1.8rem 3.4rem;
-    color:var(--text);
+    color: var(--text);
     background:
-      radial-gradient(900px 540px at 5% -10%, rgba(124,58,237,0.35), transparent 60%),
-      radial-gradient(900px 540px at 95% 0%, rgba(244,114,182,0.22), transparent 55%),
-      linear-gradient(180deg, #0b0a14 0%, #100c1f 55%, #0b0a14 100%);
+      radial-gradient(1200px 540px at 92% -10%, rgba(255,122,24,0.22), transparent 65%),
+      radial-gradient(940px 500px at 9% -18%, rgba(16,183,173,0.25), transparent 60%),
+      linear-gradient(160deg, #07151d 0%, #081a24 55%, #0a202c 100%);
     position: relative;
   }}
   body::before {{
-    content:"";
-    position:fixed;
-    inset:0;
-    background: repeating-linear-gradient(135deg, rgba(255,255,255,0.04) 0 1px, transparent 1px 14px);
-    opacity:0.2;
-    pointer-events:none;
-    z-index:0;
+    content:""; position:fixed; inset:0; pointer-events:none;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+    background-size: 36px 36px;
+    mask-image: radial-gradient(ellipse at top, black 40%, transparent 75%);
+    opacity: 0.3; z-index: 0;
   }}
   body > * {{ position: relative; z-index: 1; }}
-  h1, h2, h3 {{ font-family: "Fraunces", "Georgia", serif; letter-spacing: .01em; }}
+  h1, h2, h3 {{ font-family: "Sora", "Segoe UI", sans-serif; letter-spacing: -0.02em; }}
   h1 {{ font-size: 2.2rem; margin: 0; }}
   h2 {{ font-size: 1.2rem; }}
   a {{ color: inherit; }}
-  .tabs {{ display:flex; gap:.8rem; margin:0 0 1.6rem 0; flex-wrap:wrap; }}
-  .tab {{ padding:.55rem .9rem; border-radius:999px; text-decoration:none; color:var(--text); background:var(--card); border:1px solid var(--bd); box-shadow:0 6px 12px var(--shadow); font-weight:600; transition:transform .15s ease, box-shadow .15s ease, background .15s ease; }}
-  .tab:hover {{ transform: translateY(-1px); box-shadow:0 10px 18px var(--shadow-strong); }}
-  .tab.active {{ background:linear-gradient(135deg, rgba(124,58,237,.35), rgba(124,58,237,.08)); border-color:rgba(124,58,237,.6); color:var(--text); }}
-  .tab.tab-admin {{ margin-left:auto; background:linear-gradient(135deg, rgba(244,114,182,.28), rgba(244,114,182,.08)); border-color:rgba(244,114,182,.55); font-weight:700; }}
-  .tab.tab-admin:hover {{ background:linear-gradient(135deg, rgba(244,114,182,.4), rgba(244,114,182,.12)); }}
-  .card {{ background:var(--card); border:1px solid var(--bd); border-radius:1rem; padding:1.1rem; box-shadow:0 12px 30px var(--shadow); }}
+  .tabs {{ display:flex; gap:.6rem; margin:0 0 1.8rem 0; flex-wrap:wrap; align-items:center; }}
+  .tab {{ padding:.5rem .9rem; border-radius:999px; text-decoration:none; color:var(--muted); background:rgba(16,38,53,0.7); border:1px solid var(--bd); font-weight:600; font-size:.875rem; transition:all .15s ease; }}
+  .tab:hover {{ color:var(--text); border-color:var(--bd-hover); background:var(--card-hover); }}
+  .tab.active {{ background:linear-gradient(135deg, rgba(255,122,24,.25), rgba(255,122,24,.06)); border-color:rgba(255,122,24,.5); color:var(--accent); }}
+  .card {{ background:linear-gradient(160deg, rgba(16,38,53,.92), rgba(10,30,42,.92)); border:1px solid var(--bd); border-radius:1rem; padding:1.2rem; box-shadow:0 10px 30px var(--shadow); }}
   .row {{ display:flex; gap:1.2rem; align-items:center; flex-wrap:wrap; }}
-  .btn {{ background:var(--accent); color:white; border:none; padding:.55rem .9rem; border-radius:.65rem; cursor:pointer; font-weight:600; letter-spacing:.01em; box-shadow:0 10px 18px rgba(124,58,237,.35); transition:transform .15s ease, box-shadow .15s ease; }}
-  .btn:hover {{ transform: translateY(-1px); box-shadow:0 14px 24px rgba(124,58,237,.45); }}
-  .btn:disabled {{ opacity:.6; cursor:not-allowed; box-shadow:none; }}
+  .btn {{ background:var(--accent); color:white; border:none; padding:.55rem .9rem; border-radius:.65rem; cursor:pointer; font-weight:600; letter-spacing:.01em; box-shadow:0 8px 20px rgba(255,122,24,.3); transition:all .15s ease; font-family:inherit; }}
+  .btn:hover {{ background:var(--accent-hover); transform: translateY(-1px); box-shadow:0 12px 24px rgba(255,122,24,.4); }}
+  .btn:disabled {{ opacity:.6; cursor:not-allowed; box-shadow:none; transform:none; }}
   .btn-small {{ padding:.35rem .6rem; font-size:.85rem; }}
-  .btn-secondary {{ background:var(--bg-alt); color:var(--accent-3); border:1px solid var(--bd); box-shadow:none; }}
-  .btn-danger {{ background:#b42318; }}
-  .btn-warn {{ background:#d97706; color:#fff; }}
+  .btn-secondary {{ background:var(--bg-alt); color:var(--teal); border:1px solid var(--bd); box-shadow:none; }}
+  .btn-secondary:hover {{ background:var(--card); border-color:var(--bd-hover); box-shadow:none; transform:none; }}
+  .btn-danger {{ background:#c0392b; box-shadow:none; }}
+  .btn-danger:hover {{ background:#e74c3c; box-shadow:none; }}
+  .btn-warn {{ background:var(--warn-fg); color:#000; box-shadow:none; }}
   .btn-ghost {{ background:transparent; color:var(--accent); border:1px dashed var(--bd); box-shadow:none; }}
-  .btn-ghost:hover {{ background:rgba(124,58,237,0.12); box-shadow:none; }}
+  .btn-ghost:hover {{ background:rgba(255,122,24,0.08); box-shadow:none; transform:none; }}
+  .btn-teal {{ background:var(--teal); color:#fff; box-shadow:0 8px 20px rgba(16,183,173,.25); }}
+  .btn-teal:hover {{ background:var(--teal-hover); box-shadow:0 12px 24px rgba(16,183,173,.35); }}
   table {{ width:100%; border-collapse: collapse; }}
   th, td {{ border-bottom:1px solid var(--bd); padding:.75rem .6rem; text-align:left; vertical-align: top; }}
-  th {{ color:var(--accent-3); text-transform:uppercase; letter-spacing:.08em; font-size:.75rem; }}
-  tr:hover td {{ background:rgba(124,58,237,0.08); }}
-  input[type="text"] {{ background:var(--bg-alt); border:1px solid var(--bd); color:var(--text); padding:.5rem .65rem; border-radius:.6rem; width:100%; min-width:0; max-width:100%; }}
-  input[type="number"], select {{ background:var(--bg-alt); border:1px solid var(--bd); color:var(--text); padding:.5rem .65rem; border-radius:.6rem; }}
-  input:disabled, select:disabled {{ opacity:.65; cursor:not-allowed; }}
+  th {{ color:var(--teal); text-transform:uppercase; letter-spacing:.08em; font-size:.72rem; font-weight:700; }}
+  tr:hover td {{ background:rgba(255,122,24,0.05); }}
+  input[type="text"], input[type="number"], textarea, select {{
+    background:var(--bg-alt); border:1px solid var(--bd); color:var(--text);
+    padding:.5rem .65rem; border-radius:.6rem; font-family:inherit; font-size:.9rem;
+    transition:border-color .15s ease;
+  }}
+  input[type="text"] {{ width:100%; min-width:0; max-width:100%; }}
+  input:focus, textarea:focus, select:focus {{ outline:none; border-color:rgba(255,122,24,.5); }}
+  input:disabled, select:disabled, textarea:disabled {{ opacity:.65; cursor:not-allowed; }}
+  textarea {{ width:100%; min-width:0; max-width:100%; resize:vertical; }}
   small {{ color:var(--muted); }}
-  .flash {{ margin:.7rem 0; padding:.6rem .8rem; border-radius:.6rem; }}
+  .flash {{ margin:.7rem 0; padding:.65rem .9rem; border-radius:.7rem; font-size:.9rem; }}
   .flash.ok {{ background:var(--ok-bg); border:1px solid var(--ok-bd); color:var(--ok-fg); }}
   .flash.err {{ background:var(--err-bg); border:1px solid var(--err-bd); color:var(--err-fg); }}
   form.inline {{ display:inline; }}
   .card-header {{ display:flex; justify-content:space-between; align-items:center; gap:1.2rem; flex-wrap:wrap; }}
-  .badge {{ display:inline-flex; align-items:center; gap:.35rem; padding:.2rem .6rem; border-radius:999px; font-size:.78rem; font-weight:700; border:1px solid var(--bd); background:var(--bg-alt); }}
+  .badge {{ display:inline-flex; align-items:center; gap:.35rem; padding:.2rem .6rem; border-radius:999px; font-size:.75rem; font-weight:700; border:1px solid var(--bd); background:var(--bg-alt); }}
   .badge-ok {{ background:var(--ok-bg); color:var(--ok-fg); border-color:var(--ok-bd); }}
   .badge-warn {{ background:var(--warn-bg); color:var(--warn-fg); border-color:var(--warn-bd); }}
-  .badge-neutral {{ background:rgba(124,58,237,0.15); color:var(--text); border-color:rgba(124,58,237,0.35); }}
+  .badge-neutral {{ background:rgba(16,183,173,.15); color:var(--teal); border-color:rgba(16,183,173,.35); }}
   .status-meta {{ font-size:.8rem; color:var(--muted); margin-top:.2rem; }}
   .action-stack {{ display:flex; flex-wrap:wrap; gap:.6rem; align-items:center; }}
-  .countdown-ok {{ color:var(--accent); font-weight:700; }}
+  .countdown-ok {{ color:var(--ok-fg); font-weight:700; }}
   .countdown-warn {{ color:var(--err-fg); font-weight:700; }}
   table.sortable-table th[data-sort-type] {{ cursor:pointer; user-select:none; position:relative; padding-right:1.4rem; }}
   table.sortable-table th[data-sort-type]::after {{ content:"⇅"; position:absolute; right:.4rem; color:var(--muted); font-size:.75rem; top:50%; transform:translateY(-50%); }}
@@ -127,37 +137,36 @@ class DashboardTemplateMixin:
   .filter-card {{ margin-top:1.4rem; }}
   .filter-row {{ align-items:flex-end; gap:1.2rem; flex-wrap:wrap; }}
   .filter-row .filter-label {{ display:flex; flex-direction:column; gap:.3rem; font-size:.85rem; color:var(--muted); }}
-  .filter-row select {{ background:var(--bg-alt); border:1px solid var(--bd); color:var(--text); padding:.45rem .6rem; border-radius:.6rem; min-width:12rem; }}
+  .filter-row select {{ min-width:12rem; }}
   .add-streamer-card {{ margin-top:1.4rem; }}
-  .add-streamer-card h2 {{ margin:0 0 .6rem 0; font-size:1.1rem; color:var(--accent-3); }}
+  .add-streamer-card h2 {{ margin:0 0 .6rem 0; font-size:1.1rem; color:var(--teal); }}
   .add-streamer-card form {{ display:flex; flex-direction:column; gap:.8rem; }}
   .add-streamer-card .form-grid {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(190px, 1fr)); gap:1rem; align-items:end; }}
   .add-streamer-card label {{ display:flex; flex-direction:column; gap:.3rem; font-size:.85rem; color:var(--muted); min-width:0; }}
   .add-streamer-card input[type="text"] {{ width:100%; min-width:0; }}
   .add-streamer-card .form-actions {{ display:flex; gap:.8rem; align-items:center; flex-wrap:wrap; }}
   .add-streamer-card .hint {{ margin-top:.2rem; font-size:.8rem; color:var(--muted); max-width:38rem; }}
-  .non-partner-card {{ margin-top:2.2rem; padding:1.2rem; background:linear-gradient(160deg, rgba(124,58,237,.2), rgba(244,114,182,.1)); border-radius:1rem; border:1px solid rgba(124,58,237,.35); box-shadow:0 12px 24px var(--shadow); }}
-  .non-partner-card h2 {{ margin:0 0 .4rem 0; font-size:1.1rem; color:var(--accent-3); letter-spacing:.01em; }}
+  .non-partner-card {{ margin-top:2.2rem; padding:1.2rem; background:linear-gradient(160deg, rgba(255,122,24,.15), rgba(16,183,173,.08)); border-radius:1rem; border:1px solid rgba(255,122,24,.25); box-shadow:0 12px 24px var(--shadow); }}
+  .non-partner-card h2 {{ margin:0 0 .4rem 0; font-size:1.1rem; color:var(--accent); letter-spacing:.01em; }}
   .non-partner-card p {{ margin:0 0 1rem 0; font-size:.85rem; color:var(--muted); }}
   .non-partner-list {{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:1.2rem; }}
-  .non-partner-item {{ display:flex; flex-direction:column; gap:.8rem; padding:.9rem 1rem; background:rgba(18,14,30,.9); border:1px solid rgba(124,58,237,.2); border-radius:.8rem; position:relative; overflow:hidden; }}
-  .non-partner-item::before {{ content:""; position:absolute; inset:0; border-radius:inherit; pointer-events:none; border:1px solid rgba(124,58,237,.45); opacity:0; transition:opacity .2s ease; }}
-  .non-partner-item:hover::before {{ opacity:1; }}
+  .non-partner-item {{ display:flex; flex-direction:column; gap:.8rem; padding:.9rem 1rem; background:rgba(7,21,29,.9); border:1px solid var(--bd); border-radius:.8rem; position:relative; overflow:hidden; transition:border-color .2s ease; }}
+  .non-partner-item:hover {{ border-color:rgba(255,122,24,.4); }}
   .non-partner-header {{ display:flex; justify-content:space-between; align-items:center; gap:.8rem; flex-wrap:wrap; }}
-  .non-partner-header strong {{ font-size:1rem; color:var(--accent-3); letter-spacing:.01em; }}
+  .non-partner-header strong {{ font-size:1rem; color:var(--accent); letter-spacing:.01em; }}
   .non-partner-badges {{ display:flex; gap:.6rem; flex-wrap:wrap; }}
   .non-partner-meta {{ display:flex; flex-direction:column; gap:.25rem; font-size:.8rem; color:var(--muted); padding-left:.2rem; }}
   .non-partner-meta span {{ display:flex; align-items:center; gap:.45rem; flex-wrap:wrap; }}
-  .non-partner-meta .meta-label {{ color:var(--accent); font-weight:700; min-width:5.4rem; text-transform:uppercase; letter-spacing:.06em; font-size:.7rem; }}
+  .non-partner-meta .meta-label {{ color:var(--teal); font-weight:700; min-width:5.4rem; text-transform:uppercase; letter-spacing:.06em; font-size:.7rem; }}
   .non-partner-warning {{ color:var(--err-fg); font-weight:600; font-size:.75rem; }}
   .non-partner-manage {{ background:var(--bg-alt); border:1px solid var(--bd); border-radius:.7rem; padding:.6rem; }}
   .non-partner-manage > summary {{ cursor:pointer; font-size:.8rem; color:var(--accent); font-weight:600; list-style:none; }}
-  .non-partner-manage[open] > summary {{ color:var(--accent-3); }}
+  .non-partner-manage[open] > summary {{ color:var(--teal); }}
   .non-partner-manage .manage-body {{ margin-top:.5rem; display:flex; flex-direction:column; gap:.8rem; }}
   .non-partner-actions {{ display:flex; flex-wrap:wrap; gap:.6rem; }}
   .non-partner-note {{ font-size:.75rem; color:var(--muted); }}
   .chart-panel {{ background:var(--bg-alt); border:1px solid var(--bd); border-radius:.9rem; padding:1.2rem; margin-top:1.4rem; }}
-  .chart-panel h3 {{ margin:0 0 .6rem 0; font-size:1.1rem; color:var(--accent-3); }}
+  .chart-panel h3 {{ margin:0 0 .6rem 0; font-size:1.1rem; color:var(--teal); }}
   .chart-panel canvas {{ width:100%; height:320px; max-height:360px; }}
   .chart-note {{ margin-top:.6rem; font-size:.85rem; color:var(--muted); }}
   .chart-empty {{ margin-top:1rem; font-size:.9rem; color:var(--muted); font-style:italic; }}
@@ -168,9 +177,9 @@ class DashboardTemplateMixin:
   .user-summary {{ display:flex; flex-wrap:wrap; gap:1.2rem; margin-top:1.2rem; }}
   .user-summary-item {{ background:var(--bg-alt); border:1px solid var(--bd); border-radius:.7rem; padding:.6rem .9rem; min-width:140px; }}
   .user-summary-item .label {{ display:block; color:var(--muted); font-size:.8rem; }}
-  .user-summary-item .value {{ display:block; color:var(--accent-3); font-size:1.05rem; font-weight:700; }}
+  .user-summary-item .value {{ display:block; color:var(--accent); font-size:1.05rem; font-weight:700; }}
   .user-meta {{ margin-top:.8rem; font-size:.85rem; color:var(--muted); }}
-  .user-meta strong {{ color:var(--accent-3); font-weight:700; }}
+  .user-meta strong {{ color:var(--teal); font-weight:700; }}
   .user-chart-grid {{ display:flex; flex-wrap:wrap; gap:1.4rem; margin-top:1.4rem; }}
   .user-chart-panel {{ flex:1 1 300px; }}
   .user-section-empty {{ margin-top:1rem; font-size:.9rem; color:var(--muted); font-style:italic; }}
@@ -184,57 +193,25 @@ class DashboardTemplateMixin:
   .discord-cell .discord-flag {{ font-weight:700; }}
   details.discord-inline {{ display:inline-block; }}
   details.discord-inline > summary {{
-    cursor:pointer;
-    display:inline-flex;
-    align-items:center;
-    justify-content:center;
-    width:1.6rem;
-    height:1.6rem;
-    border-radius:999px;
-    border:1px solid var(--bd);
-    background:var(--bg-alt);
-    color:var(--accent);
-    font-weight:700;
-    margin:0;
+    cursor:pointer; display:inline-flex; align-items:center; justify-content:center;
+    width:1.6rem; height:1.6rem; border-radius:999px; border:1px solid var(--bd);
+    background:var(--bg-alt); color:var(--accent); font-weight:700; margin:0;
   }}
-  details.discord-inline[open] > summary {{
-    background:var(--accent);
-    color:#fff;
-    border-color:var(--accent);
-  }}
+  details.discord-inline[open] > summary {{ background:var(--accent); color:#fff; border-color:var(--accent); }}
   .discord-inline-body {{
-    margin-top:.4rem;
-    background:var(--bg-alt);
-    border:1px solid var(--bd);
-    border-radius:.6rem;
-    padding:.6rem;
-    display:flex;
-    flex-direction:column;
-    gap:.6rem;
+    margin-top:.4rem; background:var(--bg-alt); border:1px solid var(--bd);
+    border-radius:.6rem; padding:.6rem; display:flex; flex-direction:column; gap:.6rem;
   }}
-  .discord-inline-body label {{
-    display:flex;
-    flex-direction:column;
-    gap:.3rem;
-    font-size:.8rem;
-    color:var(--muted);
-  }}
-  .discord-inline-body input[type="text"] {{
-    width:100%;
-    min-width:0;
-    max-width:100%;
-  }}
-  .discord-inline-body .form-actions {{
-    display:flex;
-    gap:.6rem;
-  }}
+  .discord-inline-body label {{ display:flex; flex-direction:column; gap:.3rem; font-size:.8rem; color:var(--muted); }}
+  .discord-inline-body input[type="text"] {{ width:100%; min-width:0; max-width:100%; }}
+  .discord-inline-body .form-actions {{ display:flex; gap:.6rem; }}
   details.advanced-details {{ margin-top:.6rem; width:100%; }}
   details.advanced-details > summary {{ cursor:pointer; font-size:.85rem; color:var(--accent); }}
-  details.advanced-details[open] > summary {{ color:var(--accent-3); }}
+  details.advanced-details[open] > summary {{ color:var(--teal); }}
   .advanced-content {{ margin-top:.8rem; display:flex; flex-direction:column; gap:.8rem; background:var(--bg-alt); padding:.8rem; border:1px solid var(--bd); border-radius:.6rem; }}
   .advanced-content .form-row {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:1rem; align-items:end; }}
   .advanced-content label {{ display:flex; flex-direction:column; gap:.3rem; font-size:.85rem; color:var(--muted); min-width:0; }}
-  .advanced-content input[type="text"] {{ background:var(--bg-alt); border:1px solid var(--bd); color:var(--text); padding:.4rem .6rem; border-radius:.5rem; width:100%; min-width:0; max-width:100%; }}
+  .advanced-content input[type="text"] {{ padding:.4rem .6rem; border-radius:.5rem; width:100%; min-width:0; max-width:100%; }}
   .discord-preview {{ display:flex; flex-direction:column; gap:.4rem; padding:.6rem; background:var(--bg-alt); border:1px solid var(--bd); border-radius:.5rem; font-size:.8rem; color:var(--muted); }}
   .discord-preview-row {{ display:flex; gap:.8rem; align-items:center; flex-wrap:wrap; }}
   .discord-preview-row .preview-label {{ color:var(--accent); font-weight:700; min-width:4.5rem; }}
@@ -250,35 +227,58 @@ class DashboardTemplateMixin:
   .panel-grid .card {{ margin-top:0; animation: rise .6s ease both; min-width:0; }}
   .panel-grid .card:nth-child(2) {{ animation-delay:.08s; }}
   .panel-grid .card:nth-child(3) {{ animation-delay:.16s; }}
-  .table-wrap {{ overflow-x:auto; border-radius:1rem; border:1px solid var(--bd); background:var(--card); box-shadow:0 12px 30px var(--shadow); animation: rise .6s ease both; animation-delay:.15s; }}
+  .table-wrap {{ overflow-x:auto; border-radius:1rem; border:1px solid var(--bd); background:var(--card); box-shadow:0 10px 30px var(--shadow); animation: rise .6s ease both; animation-delay:.15s; }}
   .table-card {{ padding:1.1rem; }}
   .table-card table {{ margin-top:0; }}
-  .pill {{ display:inline-flex; align-items:center; gap:.4rem; padding:.35rem .6rem; border-radius:999px; background:var(--bg-alt); border:1px solid var(--bd); font-size:.75rem; color:var(--muted); font-weight:700; }}
+  .pill {{ display:inline-flex; align-items:center; gap:.4rem; padding:.3rem .6rem; border-radius:999px; background:var(--bg-alt); border:1px solid var(--bd); font-size:.75rem; color:var(--muted); font-weight:700; }}
   .pill.ok {{ background:var(--ok-bg); border-color:var(--ok-bd); color:var(--ok-fg); }}
   .pill.warn {{ background:var(--warn-bg); border-color:var(--warn-bd); color:var(--warn-fg); }}
-  .chip {{ display:inline-flex; align-items:center; gap:.4rem; padding:.25rem .55rem; border-radius:999px; background:var(--chip-bg); color:var(--text); border:1px solid rgba(124,58,237,.35); font-size:.75rem; font-weight:600; }}
+  .pill.err {{ background:var(--err-bg); border-color:var(--err-bd); color:var(--err-fg); }}
+  .pill.neutral {{ background:rgba(16,183,173,.15); color:var(--teal); border-color:rgba(16,183,173,.35); }}
+  .chip {{ display:inline-flex; align-items:center; gap:.4rem; padding:.25rem .55rem; border-radius:999px; background:var(--chip-bg); color:var(--accent); border:1px solid rgba(255,122,24,.3); font-size:.75rem; font-weight:600; }}
+  .chip-crit {{ background:rgba(255,107,94,.18); border-color:rgba(255,107,94,.55); color:var(--err-fg); }}
   .raid-form {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:1rem; align-items:end; margin-top:1rem; }}
   .raid-form label {{ display:flex; flex-direction:column; gap:.35rem; font-size:.85rem; color:var(--muted); min-width:0; }}
   .raid-form input[type="text"] {{ width:100%; min-width:0; max-width:100%; }}
   .raid-meta {{ display:flex; flex-wrap:wrap; gap:.6rem; margin-top:1rem; }}
   .raid-metrics {{ display:flex; flex-wrap:wrap; gap:1rem; margin-top:.8rem; }}
   .mini-stat {{ background:var(--bg-alt); border:1px solid var(--bd); border-radius:.7rem; padding:.6rem .8rem; display:flex; flex-direction:column; min-width:120px; }}
-  .mini-stat strong {{ font-size:1.1rem; color:var(--accent-3); }}
+  .mini-stat strong {{ font-size:1.1rem; color:var(--accent); }}
   .mini-stat span {{ font-size:.75rem; color:var(--muted); }}
   .raid-cell {{ display:flex; flex-direction:column; gap:.4rem; align-items:flex-start; }}
-  .pill.err {{ background:var(--err-bg); border-color:var(--err-bd); color:var(--err-fg); }}
-  .pill.neutral {{ background:rgba(124,58,237,0.15); color:var(--text); border-color:rgba(124,58,237,0.35); }}
   .scope-card {{ margin-top:1.4rem; }}
   .scope-header {{ white-space:nowrap; text-align:center; min-width:5.4rem; }}
   .scope-check {{ text-align:center; font-size:1rem; font-weight:700; white-space:nowrap; }}
   .scope-check.yes {{ color:var(--ok-fg); }}
   .scope-check.no {{ color:var(--err-fg); }}
   .scope-missing {{ display:flex; flex-wrap:wrap; gap:.35rem; margin-top:.3rem; }}
-  .chip-crit {{ background:rgba(239,68,68,.18); border-color:rgba(239,68,68,.55); color:#fca5a5; }}
-  .scope-row.scope-reauth td {{ background:rgba(239,68,68,.08); }}
-  .scope-row.scope-critical td {{ background:rgba(245,158,11,.06); }}
-  .scope-row.scope-partial td {{ background:rgba(124,58,237,.04); }}
-  .scope-row.scope-full td {{ background:rgba(16,185,129,.04); }}
+  .scope-row.scope-reauth td {{ background:rgba(255,107,94,.06); }}
+  .scope-row.scope-critical td {{ background:rgba(245,182,66,.05); }}
+  .scope-row.scope-partial td {{ background:rgba(16,183,173,.04); }}
+  .scope-row.scope-full td {{ background:rgba(46,204,113,.04); }}
+  /* Roadmap Kanban */
+  .kanban-board {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:1.2rem; margin-top:1.2rem; }}
+  .kanban-col {{ background:var(--bg-alt); border:1px solid var(--bd); border-radius:.9rem; padding:1rem; min-height:200px; display:flex; flex-direction:column; gap:.8rem; transition:border-color .2s ease; }}
+  .kanban-col.drag-over {{ border-color:rgba(255,122,24,.5); background:rgba(255,122,24,.04); }}
+  .kanban-col-header {{ display:flex; align-items:center; justify-content:space-between; gap:.5rem; margin-bottom:.2rem; }}
+  .kanban-col-title {{ font-weight:700; font-size:.85rem; text-transform:uppercase; letter-spacing:.08em; }}
+  .col-planned .kanban-col-title {{ color:var(--muted); }}
+  .col-in_progress .kanban-col-title {{ color:var(--accent); }}
+  .col-done .kanban-col-title {{ color:var(--ok-fg); }}
+  .kanban-count {{ font-size:.75rem; color:var(--muted); background:var(--card); border:1px solid var(--bd); border-radius:999px; padding:.1rem .5rem; }}
+  .kanban-card {{ background:var(--card); border:1px solid var(--bd); border-radius:.7rem; padding:.75rem .9rem; cursor:grab; transition:all .15s ease; position:relative; }}
+  .kanban-card:hover {{ border-color:var(--bd-hover); background:var(--card-hover); }}
+  .kanban-card.dragging {{ opacity:.5; cursor:grabbing; }}
+  .kanban-card-title {{ font-weight:600; font-size:.9rem; color:var(--text); margin:0 0 .3rem 0; padding-right:1.4rem; }}
+  .kanban-card-desc {{ font-size:.78rem; color:var(--muted); line-height:1.5; margin:0; }}
+  .kanban-card-delete {{ position:absolute; top:.5rem; right:.5rem; background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:1rem; line-height:1; padding:.1rem .3rem; border-radius:.3rem; transition:color .15s ease; }}
+  .kanban-card-delete:hover {{ color:var(--err-fg); }}
+  .kanban-empty {{ text-align:center; color:var(--muted); font-size:.82rem; padding:1.5rem .5rem; font-style:italic; }}
+  .add-item-form {{ margin-top:1.4rem; background:var(--bg-alt); border:1px solid var(--bd); border-radius:.9rem; padding:1.1rem; display:flex; flex-direction:column; gap:.8rem; }}
+  .add-item-form h3 {{ margin:0 0 .2rem 0; font-size:1rem; color:var(--accent); }}
+  .add-item-form .form-row {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:.8rem; align-items:end; }}
+  .add-item-form label {{ display:flex; flex-direction:column; gap:.3rem; font-size:.82rem; color:var(--muted); }}
+  .add-item-form .form-actions {{ display:flex; gap:.6rem; flex-wrap:wrap; }}
   @keyframes rise {{
     from {{ opacity:0; transform: translateY(12px); }}
     to {{ opacity:1; transform: translateY(0); }}
@@ -286,7 +286,6 @@ class DashboardTemplateMixin:
   @media (max-width: 720px) {{
     body {{ padding:1.6rem 1.1rem 2.2rem; }}
     h1 {{ font-size:1.8rem; }}
-    .tab.tab-admin {{ margin-left:0; }}
     input[type="text"] {{ width:100%; }}
     .add-streamer-card input[type="text"] {{ min-width:0; width:100%; }}
   }}

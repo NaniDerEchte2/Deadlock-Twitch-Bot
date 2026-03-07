@@ -92,6 +92,11 @@ class _AnalyticsOverviewMixin:
         # KI Analyse – Claude Opus deep analysis (admin only)
         router.add_get("/twitch/api/v2/ai/analysis", self._api_v2_ai_analysis)
         router.add_get("/twitch/api/v2/ai/history", self._api_v2_ai_history)
+        # Roadmap (public GET, admin POST/PATCH/DELETE)
+        router.add_get("/twitch/api/v2/roadmap", self._api_v2_roadmap_get)
+        router.add_post("/twitch/api/v2/roadmap", self._api_v2_roadmap_create)
+        router.add_patch("/twitch/api/v2/roadmap/{id}", self._api_v2_roadmap_update)
+        router.add_delete("/twitch/api/v2/roadmap/{id}", self._api_v2_roadmap_delete)
         # Serve the dashboard
         router.add_get("/twitch/dashboard", self._serve_dashboard)
         router.add_get("/twitch/dashboard-v2", self._serve_dashboard_v2)

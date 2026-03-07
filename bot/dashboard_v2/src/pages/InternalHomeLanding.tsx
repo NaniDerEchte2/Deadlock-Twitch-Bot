@@ -7,6 +7,7 @@ import {
   type InternalHomeChangelogEntry,
 } from '@/api/client';
 import { useStreamerList, useAuthStatus } from '@/hooks/useAnalytics';
+import { RoadmapPanel } from '@/components/roadmap/RoadmapPanel';
 import {
   ArrowRight,
   BarChart3,
@@ -25,6 +26,8 @@ import {
   Twitch,
   type LucideIcon,
 } from 'lucide-react';
+
+const INTERNAL_HOME_BOT_MODERATOR_LOGIN = 'deutschedeadlockcommunity';
 
 function initialInternalHomeStreamer(): string | null {
   const params = new URLSearchParams(window.location.search);
@@ -140,12 +143,13 @@ function normalizeActionEventType(entry: InternalHomeActionEntry): string {
   return String(entry.eventType || '').trim().toLowerCase();
 }
 
-function formatActionSourceLabel(source: string | null | undefined): string {
-  const normalized = String(source || '').trim().toLowerCase();
-  if (!normalized) return '';
-  if (normalized === 'autoban_log') return 'Auto-Ban Log';
-  if (normalized === 'service_warning_log') return 'Service-Warning Log';
-  return normalized.replace(/[_-]+/g, ' ');
+function stripActionModeratorSegment(value: string): string {
+  return value
+    .replace(/\|\s*mod(?:erator)?\s*:\s*@?[a-z0-9_]+/gi, '')
+    .replace(/\bmod(?:erator)?\s*:\s*@?[a-z0-9_]+/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([,.;:!?])/g, '$1')
+    .trim();
 }
 
 function isVisibleChannelAction(
@@ -175,23 +179,21 @@ function buildPriorityActionDetails(
   isServicePitchWarning: boolean
 ): string[] {
   const detailLines: string[] = [];
-  const summary = stripActionNoise(entry.summary?.trim() || '');
+  const summary = stripActionNoise(stripActionModeratorSegment(entry.summary?.trim() || ''));
   const targetLogin = entry.targetLogin?.trim() || '';
-  const targetId = entry.targetId?.trim() || '';
   const actorLogin = entry.actorLogin?.trim() || '';
   const metric = stripActionNoise(entry.metric?.trim() || '');
   const reason = stripActionNoise(entry.reason?.trim() || '');
-  const statusLabel = entry.statusLabel?.trim() || '';
-  const sourceLabel = formatActionSourceLabel(entry.source);
 
   if (summary) detailLines.push(summary);
-  if (statusLabel) detailLines.push(`Status: ${statusLabel}`);
   if (targetLogin) detailLines.push(`Nutzer: @${targetLogin}`);
-  if (targetId) detailLines.push(`Nutzer-ID: ${targetId}`);
-  if (actorLogin) detailLines.push(`${isServicePitchWarning ? 'Kanal' : 'Moderator'}: @${actorLogin}`);
+  if (isServicePitchWarning) {
+    if (actorLogin) detailLines.push(`Kanal: @${actorLogin}`);
+  } else {
+    detailLines.push(`Moderator: @${INTERNAL_HOME_BOT_MODERATOR_LOGIN}`);
+  }
   if (metric) detailLines.push(`Metrik: ${metric}`);
   if (reason) detailLines.push(`Grund: ${reason}`);
-  if (sourceLabel) detailLines.push(`Quelle: ${sourceLabel}`);
   detailLines.push(...splitActionDetailSegments(entry.description));
 
   const seen = new Set<string>();
@@ -203,16 +205,23 @@ function buildPriorityActionDetails(
   });
 }
 
-function prioritizeActionLog(entries: InternalHomeActionEntry[], limit: number): InternalHomeActionEntry[] {
+function sortActionLogByTimeline(entries: InternalHomeActionEntry[], limit: number): InternalHomeActionEntry[] {
   if (limit <= 0 || entries.length === 0) return [];
-  const banEvents = entries.filter((entry) => isBanAction(entry));
-  const serviceWarningEvents = entries.filter(
-    (entry) => !isBanAction(entry) && isServicePitchWarningAction(entry)
-  );
-  const regularEvents = entries.filter(
-    (entry) => !isBanAction(entry) && !isServicePitchWarningAction(entry)
-  );
-  return [...banEvents, ...serviceWarningEvents, ...regularEvents].slice(0, limit);
+  const withMeta = entries.map((entry, index) => {
+    const parsedTimestamp = Date.parse(entry.timestamp || '');
+    return {
+      entry,
+      index,
+      timestampMs: Number.isFinite(parsedTimestamp) ? parsedTimestamp : Number.NEGATIVE_INFINITY,
+    };
+  });
+
+  withMeta.sort((left, right) => {
+    if (left.timestampMs === right.timestampMs) return left.index - right.index;
+    return right.timestampMs - left.timestampMs;
+  });
+
+  return withMeta.slice(0, limit).map(({ entry }) => entry);
 }
 
 export function InternalHomeLanding() {
@@ -322,7 +331,7 @@ export function InternalHomeLanding() {
   const baseActionLog = rawActionLog
     .filter((entry) => String(entry.id || '').trim() !== 'impact-note')
     .filter((entry) => isVisibleChannelAction(entry, channelScopeLogin));
-  const actionLog = prioritizeActionLog(baseActionLog, 8);
+  const actionLog = sortActionLogByTimeline(baseActionLog, 8);
   const changelogEntries = (home.changelog?.entries ?? []).slice(0, 3);
   const quickActions: Array<{ id: string; title: string; description: string; href: string; icon: LucideIcon }> = [
     {
@@ -562,9 +571,9 @@ export function InternalHomeLanding() {
           </div>
         </motion.section>
 
-        {/* Changelog + Action Log */}
+        {/* Changelog + Action Log + Roadmap */}
         <motion.section
-          className="internal-home-split-1-4 grid gap-4"
+          className="internal-home-bottom-grid grid gap-4"
           initial={{ opacity: 0, y: 16 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
@@ -649,11 +658,10 @@ export function InternalHomeLanding() {
                       </div>
                       {isPriorityWarning ? (
                         <>
-                          <p className="mt-2 text-sm font-semibold text-white">{title || (isBan ? 'Ban erkannt' : 'Service-Pitch Warnung')}</p>
                           {detailLines.length === 0 ? (
-                            <p className="mt-1 text-xs leading-5 text-text-primary">Keine Details gespeichert.</p>
+                            <p className="mt-2 text-xs leading-5 text-text-primary">Keine Details gespeichert.</p>
                           ) : (
-                            <div className="mt-1.5 space-y-1 text-xs leading-5 text-text-primary">
+                            <div className="mt-2 space-y-1 text-xs leading-5 text-text-primary">
                               {detailLines.map((line, detailIndex) => (
                                 <p key={`detail-${detailIndex}`}>{line}</p>
                               ))}
@@ -672,6 +680,8 @@ export function InternalHomeLanding() {
               </ul>
             )}
           </article>
+
+          <RoadmapPanel />
         </motion.section>
 
       </div>

@@ -26,6 +26,7 @@ from .api_performance import _AnalyticsPerformanceMixin
 from .api_chat_deep import _AnalyticsChatDeepMixin
 from .api_raids import _AnalyticsRaidsMixin
 from .api_viewers import _AnalyticsViewersMixin
+from .api_roadmap import _AnalyticsRoadmapMixin
 
 from ..storage import pg as storage
 
@@ -35,11 +36,76 @@ log = logging.getLogger("TwitchStreams.AnalyticsV2")
 # Plan-gating for extended analytics endpoints
 # ---------------------------------------------------------------------------
 EXTENDED_PLANS = {"analysis_dashboard", "bundle_analysis_raid_boost"}
+_KNOWN_BILLING_PLAN_IDS = {
+    "raid_free",
+    "raid_boost",
+    "analysis_dashboard",
+    "bundle_analysis_raid_boost",
+}
+
+
+def _row_get_value(row: Any, key: str, index: int, default: Any = None) -> Any:
+    if row is None:
+        return default
+    if hasattr(row, "get"):
+        return row.get(key, default)
+    values = tuple(row)
+    return values[index] if index < len(values) else default
+
+
+def _parse_plan_override_datetime(raw_value: Any) -> datetime | None:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, datetime):
+        parsed = raw_value
+    else:
+        text = str(raw_value).strip()
+        if not text:
+            return None
+        if len(text) == 10 and text[4] == "-" and text[7] == "-":
+            text = f"{text}T23:59:59+00:00"
+        normalized = text.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _manual_override_plan_for_login(conn: Any, login: str) -> str:
+    row = conn.execute(
+        """
+        SELECT manual_plan_id, manual_plan_expires_at
+        FROM streamer_plans
+        WHERE LOWER(twitch_login) = LOWER(?)
+        LIMIT 1
+        """,
+        (login,),
+    ).fetchone()
+    if not row:
+        return ""
+    manual_plan_id = str(_row_get_value(row, "manual_plan_id", 0, "") or "").strip()
+    if manual_plan_id not in _KNOWN_BILLING_PLAN_IDS:
+        return ""
+    expires_at = _parse_plan_override_datetime(
+        _row_get_value(row, "manual_plan_expires_at", 1, None)
+    )
+    if expires_at and expires_at < datetime.now(UTC):
+        return ""
+    return manual_plan_id
 
 
 def _get_plan_for_login(login: str) -> str:
     """Return the plan_id for *login*, falling back to ``'raid_free'``."""
     with storage.get_conn() as conn:
+        try:
+            manual_plan_id = _manual_override_plan_for_login(conn, login)
+        except Exception:
+            manual_plan_id = ""
+        if manual_plan_id:
+            return manual_plan_id
         row = conn.execute(
             """
             SELECT plan_id FROM twitch_billing_subscriptions
@@ -49,7 +115,7 @@ def _get_plan_for_login(login: str) -> str:
             """,
             (login,),
         ).fetchone()
-    return str((row or {}).get("plan_id") or "raid_free")
+    return str(_row_get_value(row, "plan_id", 0, "raid_free") or "raid_free")
 
 
 INTERNAL_HOME_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard"
@@ -149,6 +215,7 @@ class AnalyticsV2Mixin(
     _AnalyticsChatDeepMixin,
     _AnalyticsExperimentalMixin,
     _AnalyticsAIMixin,
+    _AnalyticsRoadmapMixin,
 ):
     """Mixin providing v2 analytics API endpoints for the dashboard."""
 

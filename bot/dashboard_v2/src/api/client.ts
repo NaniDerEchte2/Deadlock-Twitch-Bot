@@ -1176,3 +1176,25 @@ export async function fetchAIHistory(
 ): Promise<AIHistoryEntry[]> {
   return fetchApi<AIHistoryEntry[]>('/ai/history', { streamer, limit });
 }
+
+// ========= Roadmap =========
+
+export interface RoadmapItem {
+  id: number;
+  title: string;
+  description: string | null;
+  status: 'planned' | 'in_progress' | 'done';
+  priority: number;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface RoadmapData {
+  planned: RoadmapItem[];
+  in_progress: RoadmapItem[];
+  done: RoadmapItem[];
+}
+
+export async function fetchRoadmap(): Promise<RoadmapData> {
+  return fetchApi<RoadmapData>('/roadmap');
+}

@@ -41,6 +41,7 @@ import {
   fetchExpGameBreakdown,
   fetchExpGameTransitions,
   fetchExpGrowthCurves,
+  fetchRoadmap,
 } from '@/api/client';
 import type { TimeRange, ViewerSortField, ViewerFilterType } from '@/types/analytics';
 
@@ -429,5 +430,13 @@ export function useExpGrowthCurves(streamer: string | null, days: number) {
     queryFn: () => fetchExpGrowthCurves(streamer!, days),
     staleTime: STALE_TIME,
     enabled: !!streamer,
+  });
+}
+
+export function useRoadmap() {
+  return useQuery({
+    queryKey: ['roadmap'],
+    queryFn: fetchRoadmap,
+    staleTime: 2 * 60 * 1000, // 2 minutes
   });
 }

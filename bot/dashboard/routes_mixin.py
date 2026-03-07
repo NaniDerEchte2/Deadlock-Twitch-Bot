@@ -19,6 +19,7 @@ from aiohttp import web
 
 from .. import storage
 from ..core.constants import log
+from ..promo_mode import validate_streamer_promo_message
 from .abbo_html import render_abbo_page
 from .billing_plans import (
     BILLING_CYCLE_DISCOUNTS as _BILLING_CYCLE_DISCOUNTS,
@@ -3034,8 +3035,11 @@ class _DashboardRoutesMixin:
         data = await request.post()
         promo_message = str(data.get("promo_message") or "").strip()
 
-        if promo_message and "{invite}" not in promo_message:
-            raise web.HTTPFound("/twitch/abbo?promo_error=missing_invite")
+        promo_issues = validate_streamer_promo_message(promo_message)
+        if promo_issues:
+            issue_code = str(promo_issues[0].get("code") or "").strip().lower()
+            promo_error = issue_code if issue_code else "invalid_placeholder"
+            raise web.HTTPFound(f"/twitch/abbo?promo_error={promo_error}")
 
         try:
             with storage.get_conn() as conn:
@@ -3051,6 +3055,185 @@ class _DashboardRoutesMixin:
 
         raise web.HTTPFound("/twitch/abbo?promo_saved=1")
 
+    async def admin_roadmap_page(self, request: web.Request) -> web.StreamResponse:
+        """Kanban board for managing roadmap items (admin only)."""
+        if not (self._is_local_request(request) or self._is_discord_admin_request(request)):
+            raise web.HTTPFound("/twitch/admin")
+
+        body = """
+<div class="hero">
+  <div>
+    <p class="eyebrow">Admin</p>
+    <h1>Roadmap</h1>
+    <p class="lead">Feature-Planung verwalten – Drag &amp; Drop zwischen den Spalten um den Status zu ändern.</p>
+  </div>
+</div>
+
+<div id="kanban-root">
+  <div class="kanban-board">
+    <div class="kanban-col col-planned" id="col-planned" data-status="planned"
+         ondragover="event.preventDefault();this.classList.add('drag-over')"
+         ondragleave="this.classList.remove('drag-over')"
+         ondrop="handleDrop(event,'planned')">
+      <div class="kanban-col-header">
+        <span class="kanban-col-title">Geplant</span>
+        <span class="kanban-count" id="cnt-planned">0</span>
+      </div>
+      <div id="cards-planned"></div>
+    </div>
+    <div class="kanban-col col-in_progress" id="col-in_progress" data-status="in_progress"
+         ondragover="event.preventDefault();this.classList.add('drag-over')"
+         ondragleave="this.classList.remove('drag-over')"
+         ondrop="handleDrop(event,'in_progress')">
+      <div class="kanban-col-header">
+        <span class="kanban-col-title">In Arbeit</span>
+        <span class="kanban-count" id="cnt-in_progress">0</span>
+      </div>
+      <div id="cards-in_progress"></div>
+    </div>
+    <div class="kanban-col col-done" id="col-done" data-status="done"
+         ondragover="event.preventDefault();this.classList.add('drag-over')"
+         ondragleave="this.classList.remove('drag-over')"
+         ondrop="handleDrop(event,'done')">
+      <div class="kanban-col-header">
+        <span class="kanban-col-title">Fertig</span>
+        <span class="kanban-count" id="cnt-done">0</span>
+      </div>
+      <div id="cards-done"></div>
+    </div>
+  </div>
+</div>
+
+<div class="add-item-form" id="add-form">
+  <h3>Neues Feature hinzufügen</h3>
+  <div class="form-row">
+    <label>Titel<input type="text" id="new-title" placeholder="Feature-Titel" /></label>
+    <label>Status
+      <select id="new-status">
+        <option value="planned">Geplant</option>
+        <option value="in_progress">In Arbeit</option>
+        <option value="done">Fertig</option>
+      </select>
+    </label>
+    <label>Priorität (höher = oben)<input type="number" id="new-priority" value="0" style="width:100%" /></label>
+  </div>
+  <label>Beschreibung (optional)<textarea id="new-desc" rows="2" placeholder="Kurze Beschreibung..."></textarea></label>
+  <div class="form-actions">
+    <button class="btn" onclick="addItem()">Hinzufügen</button>
+    <span id="add-status" style="font-size:.85rem;color:var(--muted)"></span>
+  </div>
+</div>
+
+<script>
+let dragId = null;
+const STATUSES = ['planned','in_progress','done'];
+
+async function loadRoadmap() {
+  try {
+    const res = await fetch('/twitch/api/v2/roadmap');
+    const data = await res.json();
+    STATUSES.forEach(s => {
+      const container = document.getElementById('cards-' + s);
+      const count = document.getElementById('cnt-' + s);
+      const items = data[s] || [];
+      count.textContent = items.length;
+      container.innerHTML = '';
+      if (items.length === 0) {
+        container.innerHTML = '<div class="kanban-empty">Keine Einträge</div>';
+        return;
+      }
+      items.forEach(item => container.appendChild(makeCard(item)));
+    });
+  } catch(e) {
+    console.error('Roadmap laden fehlgeschlagen', e);
+  }
+}
+
+function makeCard(item) {
+  const card = document.createElement('div');
+  card.className = 'kanban-card';
+  card.draggable = true;
+  card.dataset.id = item.id;
+  card.innerHTML = `
+    <button class="kanban-card-delete" title="Löschen" onclick="deleteItem(${item.id})">✕</button>
+    <p class="kanban-card-title">${escHtml(item.title)}</p>
+    ${item.description ? `<p class="kanban-card-desc">${escHtml(item.description)}</p>` : ''}
+  `;
+  card.addEventListener('dragstart', () => {
+    dragId = item.id;
+    card.classList.add('dragging');
+  });
+  card.addEventListener('dragend', () => card.classList.remove('dragging'));
+  return card;
+}
+
+function escHtml(str) {
+  return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function handleDrop(event, newStatus) {
+  event.preventDefault();
+  event.currentTarget.classList.remove('drag-over');
+  if (!dragId) return;
+  const id = dragId;
+  dragId = null;
+  try {
+    const res = await fetch('/twitch/api/v2/roadmap/' + id, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({status: newStatus})
+    });
+    if (!res.ok) throw new Error(await res.text());
+    loadRoadmap();
+  } catch(e) {
+    console.error('Drag-Drop Fehler', e);
+    loadRoadmap();
+  }
+}
+
+async function deleteItem(id) {
+  if (!confirm('Eintrag wirklich löschen?')) return;
+  try {
+    await fetch('/twitch/api/v2/roadmap/' + id, { method: 'DELETE' });
+    loadRoadmap();
+  } catch(e) { console.error(e); }
+}
+
+async function addItem() {
+  const title = document.getElementById('new-title').value.trim();
+  if (!title) { alert('Titel fehlt'); return; }
+  const status = document.getElementById('new-status').value;
+  const priority = parseInt(document.getElementById('new-priority').value) || 0;
+  const desc = document.getElementById('new-desc').value.trim();
+  const statusEl = document.getElementById('add-status');
+  try {
+    statusEl.textContent = 'Speichern...';
+    const res = await fetch('/twitch/api/v2/roadmap', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({title, status, priority, description: desc || null})
+    });
+    if (!res.ok) throw new Error(await res.text());
+    document.getElementById('new-title').value = '';
+    document.getElementById('new-desc').value = '';
+    document.getElementById('new-priority').value = '0';
+    statusEl.textContent = 'Gespeichert!';
+    setTimeout(() => statusEl.textContent = '', 2000);
+    loadRoadmap();
+  } catch(e) {
+    statusEl.textContent = 'Fehler: ' + e.message;
+    console.error(e);
+  }
+}
+
+loadRoadmap();
+</script>
+"""
+        return web.Response(
+            content_type="text/html",
+            text=self._html(body, "roadmap"),
+        )
+
     def attach(self, app: web.Application) -> None:
         app.add_routes(
             [
@@ -3060,6 +3243,9 @@ class _DashboardRoutesMixin:
                 web.get("/twitch", self.index),
                 web.get("/twitch/", self.index),
                 web.get("/twitch/admin", self.admin),
+                web.get("/twitch/admin/announcements", self.admin_announcements_page),
+                web.post("/twitch/admin/announcements", self.admin_announcements_save),
+                web.get("/twitch/admin/roadmap", self.admin_roadmap_page),
                 web.get("/twitch/live", self.admin),
                 web.get("/twitch/live-announcement", self.live_announcement_page),
                 web.post("/twitch/add_any", self.add_any),
