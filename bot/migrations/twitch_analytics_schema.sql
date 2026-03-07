@@ -641,6 +641,20 @@ CREATE TABLE IF NOT EXISTS twitch_live_announcement_configs (
 CREATE INDEX IF NOT EXISTS idx_live_announce_configs_updated_at
     ON twitch_live_announcement_configs(updated_at);
 
+-- ========= Global Chat Promo Announcement Mode =========
+CREATE TABLE IF NOT EXISTS twitch_global_promo_modes (
+    config_key     TEXT PRIMARY KEY,
+    mode           TEXT NOT NULL DEFAULT 'standard',
+    custom_message TEXT,
+    starts_at      TEXT,
+    ends_at        TEXT,
+    is_enabled     INTEGER NOT NULL DEFAULT 0,
+    updated_at     TIMESTAMPTZ DEFAULT NOW(),
+    updated_by     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_twitch_global_promo_modes_updated_at
+    ON twitch_global_promo_modes(updated_at);
+
 -- ========= Raid Retention Rollup (computed, not a hypertable) =========
 CREATE TABLE IF NOT EXISTS twitch_raid_retention (
     raid_id                BIGINT PRIMARY KEY REFERENCES twitch_raid_history(id) ON DELETE CASCADE,

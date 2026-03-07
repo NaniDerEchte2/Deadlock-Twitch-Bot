@@ -154,6 +154,127 @@ def _load_dsn() -> str:
     raise RuntimeError(f"{ENV_DSN} not set (env or Windows Credential Manager '{KEYRING_SERVICE}')")
 
 
+def _split_sql_script(script: str) -> list[str]:
+    """Split a SQL script into executable statements without breaking quoted sections."""
+
+    statements: list[str] = []
+    current: list[str] = []
+    in_single = False
+    in_double = False
+    in_line_comment = False
+    in_block_comment = False
+    dollar_tag: str | None = None
+    i = 0
+    length = len(script)
+
+    while i < length:
+        ch = script[i]
+        nxt = script[i + 1] if i + 1 < length else ""
+
+        if in_line_comment:
+            current.append(ch)
+            if ch == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+
+        if in_block_comment:
+            current.append(ch)
+            if ch == "*" and nxt == "/":
+                current.append(nxt)
+                i += 2
+                in_block_comment = False
+                continue
+            i += 1
+            continue
+
+        if dollar_tag is not None:
+            if script.startswith(dollar_tag, i):
+                current.append(dollar_tag)
+                i += len(dollar_tag)
+                dollar_tag = None
+                continue
+            current.append(ch)
+            i += 1
+            continue
+
+        if in_single:
+            current.append(ch)
+            if ch == "'" and nxt == "'":
+                current.append(nxt)
+                i += 2
+                continue
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+
+        if in_double:
+            current.append(ch)
+            if ch == '"' and nxt == '"':
+                current.append(nxt)
+                i += 2
+                continue
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+
+        if ch == "-" and nxt == "-":
+            current.append(ch)
+            current.append(nxt)
+            i += 2
+            in_line_comment = True
+            continue
+
+        if ch == "/" and nxt == "*":
+            current.append(ch)
+            current.append(nxt)
+            i += 2
+            in_block_comment = True
+            continue
+
+        if ch == "'":
+            current.append(ch)
+            in_single = True
+            i += 1
+            continue
+
+        if ch == '"':
+            current.append(ch)
+            in_double = True
+            i += 1
+            continue
+
+        if ch == "$":
+            j = i + 1
+            while j < length and (script[j].isalnum() or script[j] == "_"):
+                j += 1
+            if j < length and script[j] == "$":
+                tag = script[i : j + 1]
+                current.append(tag)
+                i = j + 1
+                dollar_tag = tag
+                continue
+
+        if ch == ";":
+            statement = "".join(current).strip()
+            if statement:
+                statements.append(statement)
+            current = []
+            i += 1
+            continue
+
+        current.append(ch)
+        i += 1
+
+    trailing = "".join(current).strip()
+    if trailing:
+        statements.append(trailing)
+
+    return statements
+
+
 class _CompatCursor:
     """Lightweight wrapper to apply placeholder translation on execute calls."""
 
@@ -248,6 +369,12 @@ class _CompatConnection:
                 self._last_insert_rowid = None
 
         return cur
+
+    def executescript(self, script: str):
+        last_cursor = None
+        for statement in _split_sql_script(script or ""):
+            last_cursor = self.execute(statement)
+        return last_cursor if last_cursor is not None else _ScalarCursor(0)
 
     def cursor(self, *args, **kwargs):
         return _CompatCursor(self._conn.cursor(*args, **kwargs))
@@ -870,6 +997,25 @@ def ensure_schema(conn) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_live_announce_configs_updated_at ON twitch_live_announcement_configs(updated_at)"
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS twitch_global_promo_modes (
+            config_key     TEXT PRIMARY KEY,
+            mode           TEXT NOT NULL DEFAULT 'standard',
+            custom_message TEXT,
+            starts_at      TEXT,
+            ends_at        TEXT,
+            is_enabled     INTEGER NOT NULL DEFAULT 0,
+            updated_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_by     TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_twitch_global_promo_modes_updated_at "
+        "ON twitch_global_promo_modes(updated_at)"
     )
 
     # 5) Stream sessions & engagement
@@ -1741,3 +1887,9 @@ def ensure_schema(conn) -> None:
     )
     conn.execute("ALTER TABLE streamer_plans ADD COLUMN IF NOT EXISTS raid_boost_enabled INTEGER NOT NULL DEFAULT 0")
     conn.execute("ALTER TABLE streamer_plans ADD COLUMN IF NOT EXISTS promo_message TEXT")
+    conn.execute("ALTER TABLE streamer_plans ADD COLUMN IF NOT EXISTS manual_plan_id TEXT")
+    conn.execute("ALTER TABLE streamer_plans ADD COLUMN IF NOT EXISTS manual_plan_expires_at TEXT")
+    conn.execute(
+        "ALTER TABLE streamer_plans ADD COLUMN IF NOT EXISTS manual_plan_notes TEXT NOT NULL DEFAULT ''"
+    )
+    conn.execute("ALTER TABLE streamer_plans ADD COLUMN IF NOT EXISTS manual_plan_updated_at TEXT")

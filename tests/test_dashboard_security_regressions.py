@@ -155,6 +155,8 @@ class _DummyInternalHomeApi(AnalyticsV2Mixin):
 class _DummyLiveActions(DashboardLiveMixin):
     def __init__(self) -> None:
         self.add_calls: list[str] = []
+        self.manual_plan_set_calls: list[dict[str, str | None]] = []
+        self.manual_plan_clear_calls: list[str] = []
 
     def _require_token(self, request):
         return None
@@ -172,6 +174,34 @@ class _DummyLiveActions(DashboardLiveMixin):
     async def _do_add(self, raw: str) -> str:
         self.add_calls.append(raw)
         return raw or "added"
+
+    def _billing_admin_set_manual_plan(
+        self,
+        *,
+        twitch_login: str,
+        plan_id: str,
+        expires_at: str | None = None,
+        notes: str | None = None,
+    ):
+        self.manual_plan_set_calls.append(
+            {
+                "twitch_login": twitch_login,
+                "plan_id": plan_id,
+                "expires_at": expires_at,
+                "notes": notes,
+            }
+        )
+        return {
+            "effective_plan_id": plan_id,
+            "effective_plan_source": "manual_override",
+        }
+
+    def _billing_admin_clear_manual_plan(self, *, twitch_login: str):
+        self.manual_plan_clear_calls.append(twitch_login)
+        return {
+            "effective_plan_id": "raid_free",
+            "effective_plan_source": "default_basic",
+        }
 
 
 class _DummyRaidAuthRoute(_DashboardRaidMixin):
@@ -918,6 +948,80 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
             await handler.admin_partner_chat_action(_Request())
         self.assertEqual(ctx.exception.location, "/twitch/admin?err=1")
         self.assertEqual(handler.chat_bot.chat_calls, [])
+
+    async def test_admin_manual_plan_save_requires_valid_csrf_and_calls_helper(self) -> None:
+        handler = _DummyLiveActions()
+
+        class _BadRequest:
+            path = "/twitch/admin/manual-plan"
+            method = "POST"
+            headers = {}
+            rel_url = SimpleNamespace(path_qs="/twitch/admin/manual-plan")
+            query = {}
+
+            async def post(self):
+                return {
+                    "login": "partner_one",
+                    "plan_id": "analysis_dashboard",
+                    "csrf_token": "invalid",
+                }
+
+        with self.assertRaises(web.HTTPFound) as bad_ctx:
+            await handler.admin_manual_plan_save(_BadRequest())
+        self.assertEqual(bad_ctx.exception.location, "/twitch/admin?err=csrf")
+        self.assertEqual(handler.manual_plan_set_calls, [])
+
+        class _GoodRequest:
+            path = "/twitch/admin/manual-plan"
+            method = "POST"
+            headers = {}
+            rel_url = SimpleNamespace(path_qs="/twitch/admin/manual-plan")
+            query = {}
+
+            async def post(self):
+                return {
+                    "login": "partner_one",
+                    "plan_id": "analysis_dashboard",
+                    "expires_at": "2026-04-01",
+                    "notes": "VIP grant",
+                    "csrf_token": "valid-csrf",
+                }
+
+        with self.assertRaises(web.HTTPFound) as good_ctx:
+            await handler.admin_manual_plan_save(_GoodRequest())
+        self.assertEqual(good_ctx.exception.location, "/twitch/admin?ok=1")
+        self.assertEqual(
+            handler.manual_plan_set_calls,
+            [
+                {
+                    "twitch_login": "partner_one",
+                    "plan_id": "analysis_dashboard",
+                    "expires_at": "2026-04-01",
+                    "notes": "VIP grant",
+                }
+            ],
+        )
+
+    async def test_admin_manual_plan_clear_calls_helper(self) -> None:
+        handler = _DummyLiveActions()
+
+        class _Request:
+            path = "/twitch/admin/manual-plan/clear"
+            method = "POST"
+            headers = {}
+            rel_url = SimpleNamespace(path_qs="/twitch/admin/manual-plan/clear")
+            query = {}
+
+            async def post(self):
+                return {
+                    "login": "partner_one",
+                    "csrf_token": "valid-csrf",
+                }
+
+        with self.assertRaises(web.HTTPFound) as ctx:
+            await handler.admin_manual_plan_clear(_Request())
+        self.assertEqual(ctx.exception.location, "/twitch/admin?ok=1")
+        self.assertEqual(handler.manual_plan_clear_calls, ["partner_one"])
 
     async def test_discord_link_rejects_invalid_csrf(self) -> None:
         class _DiscordLinkHandler(_DummyRoutes):

@@ -11,6 +11,7 @@ from aiohttp import web
 
 from .. import storage as _storage
 from ..core.constants import log
+from .billing_plans import BILLING_PLANS as _BILLING_PLANS
 
 # Alle Scopes die ein vollständig autorisierter Streamer haben sollte
 _REQUIRED_SCOPES: list[str] = [
@@ -212,6 +213,225 @@ class DashboardLiveMixin:
         except Exception:
             log.debug("Could not persist twitch_user_id for %s", login, exc_info=True)
 
+    @staticmethod
+    def _billing_admin_source_badge(source: str) -> str:
+        normalized = str(source or "").strip().lower()
+        if normalized == "manual_override":
+            return "<span class='pill ok'>Manuell</span>"
+        if normalized == "billing_subscription":
+            return "<span class='pill neutral'>Stripe</span>"
+        return "<span class='pill warn'>Basic Fallback</span>"
+
+    def _render_billing_admin_plan_card(self, *, csrf_input_html: str) -> str:
+        rows_getter = getattr(self, "_billing_admin_plan_rows_for_all_streamers", None)
+        if not callable(rows_getter):
+            return ""
+
+        try:
+            plan_rows = list(rows_getter() or [])
+        except Exception:
+            log.exception("billing admin plan rows render failed")
+            return (
+                "<div class='card scope-card'>"
+                "  <div class='card-header'>"
+                "    <div>"
+                "      <p class='eyebrow'>Billing & Plaene</p>"
+                "      <h2>Manuelle Planvergabe</h2>"
+                "      <p class='lead'>Die Planverwaltung konnte nicht geladen werden.</p>"
+                "    </div>"
+                "  </div>"
+                "</div>"
+            )
+
+        plan_labels = {
+            str(plan.get("id") or "").strip(): str(plan.get("name") or "").strip()
+            for plan in _BILLING_PLANS
+            if str(plan.get("id") or "").strip()
+        }
+        plan_options = "".join(
+            (
+                f"<option value='{html.escape(plan_id, quote=True)}'>"
+                f"{html.escape(plan_name)}"
+                "</option>"
+            )
+            for plan_id, plan_name in plan_labels.items()
+        )
+
+        table_rows: list[str] = []
+        for row in plan_rows:
+            login = str(row.get("twitch_login") or "").strip()
+            if not login:
+                continue
+            escaped_login = html.escape(login, quote=True)
+            effective_plan_id = str(row.get("effective_plan_id") or "raid_free").strip() or "raid_free"
+            effective_plan_label = plan_labels.get(effective_plan_id, effective_plan_id)
+            effective_source = str(row.get("effective_plan_source") or "default_basic").strip()
+            manual_override = row.get("manual_override") if isinstance(row.get("manual_override"), dict) else None
+            billing_subscription = (
+                row.get("billing_subscription")
+                if isinstance(row.get("billing_subscription"), dict)
+                else None
+            )
+            billing_status = str((billing_subscription or {}).get("status") or "").strip() or "—"
+            billing_plan_id = str((billing_subscription or {}).get("plan_id") or "").strip()
+            billing_plan_label = plan_labels.get(billing_plan_id, billing_plan_id or "—")
+            manual_plan_id = str((manual_override or {}).get("plan_id") or "").strip()
+            manual_plan_label = plan_labels.get(manual_plan_id, manual_plan_id or "—")
+            manual_notes = str((manual_override or {}).get("notes") or "").strip()
+            manual_expires = str((manual_override or {}).get("expires_at") or "").strip()
+            manual_is_active = bool((manual_override or {}).get("is_active"))
+            manual_is_expired = bool((manual_override or {}).get("is_expired"))
+            manual_source_badge = (
+                "<span class='pill ok'>Aktiv</span>"
+                if manual_is_active
+                else (
+                    "<span class='pill warn'>Abgelaufen</span>"
+                    if manual_is_expired
+                    else "<span class='pill neutral'>Kein Override</span>"
+                )
+            )
+            flag_chips = []
+            if bool(row.get("manual_partner_opt_out")):
+                flag_chips.append("<span class='chip'>Kein Partner</span>")
+            if row.get("archived_at"):
+                flag_chips.append("<span class='chip'>Archiviert</span>")
+            if bool(row.get("is_on_discord")):
+                flag_chips.append("<span class='chip'>Discord</span>")
+            flags_html = "".join(flag_chips) or "<span class='status-meta'>Keine Zusatzflags</span>"
+            selected_manual_id = manual_plan_id if manual_plan_id in plan_labels else effective_plan_id
+            option_html = "".join(
+                (
+                    f"<option value='{html.escape(plan_id, quote=True)}'"
+                    f"{' selected' if plan_id == selected_manual_id else ''}>"
+                    f"{html.escape(plan_name)}"
+                    "</option>"
+                )
+                for plan_id, plan_name in plan_labels.items()
+            )
+            expires_value = ""
+            if manual_expires:
+                expires_value = manual_expires[:10]
+            preview_rows = [
+                (
+                    "<div class='discord-preview-row'>"
+                    "<span class='preview-label'>Effektiv</span>"
+                    f"<span>{html.escape(effective_plan_label)}</span>"
+                    "</div>"
+                ),
+                (
+                    "<div class='discord-preview-row'>"
+                    "<span class='preview-label'>Quelle</span>"
+                    f"<span>{self._billing_admin_source_badge(effective_source)}</span>"
+                    "</div>"
+                ),
+                (
+                    "<div class='discord-preview-row'>"
+                    "<span class='preview-label'>Stripe</span>"
+                    f"<span>{html.escape(billing_plan_label)} · {html.escape(billing_status)}</span>"
+                    "</div>"
+                ),
+                (
+                    "<div class='discord-preview-row'>"
+                    "<span class='preview-label'>Override</span>"
+                    f"<span>{manual_source_badge}</span>"
+                    "</div>"
+                ),
+            ]
+            if manual_notes:
+                preview_rows.append(
+                    "<div class='discord-preview-row'>"
+                    "<span class='preview-label'>Notiz</span>"
+                    f"<span>{html.escape(manual_notes)}</span>"
+                    "</div>"
+                )
+            if expires_value:
+                preview_rows.append(
+                    "<div class='discord-preview-row'>"
+                    "<span class='preview-label'>Ablauf</span>"
+                    f"<span>{html.escape(expires_value)}</span>"
+                    "</div>"
+                )
+            action_summary = "Override anpassen" if manual_override else "Plan manuell vergeben"
+            clear_button_html = ""
+            if manual_override:
+                clear_button_html = (
+                    "<button class='btn btn-small btn-secondary' type='submit' "
+                    "formaction='/twitch/admin/manual-plan/clear' formmethod='post'>"
+                    "Override entfernen"
+                    "</button>"
+                )
+
+            table_rows.append(
+                "<tr>"
+                f"  <td><strong>{html.escape(login)}</strong><div class='status-meta'>{flags_html}</div></td>"
+                "  <td>"
+                f"    <div class='raid-cell'><span class='pill ok'>{html.escape(effective_plan_label)}</span>"
+                f"    <div class='status-meta'>{self._billing_admin_source_badge(effective_source)}</div></div>"
+                "  </td>"
+                "  <td>"
+                f"    <div class='raid-cell'>{manual_source_badge}"
+                f"    <div class='status-meta'>{html.escape(manual_plan_label)}</div></div>"
+                "  </td>"
+                "  <td>"
+                f"    <div class='raid-cell'><span class='pill neutral'>{html.escape(billing_plan_label)}</span>"
+                f"    <div class='status-meta'>Status: {html.escape(billing_status)}</div></div>"
+                "  </td>"
+                "  <td>"
+                "    <details class='advanced-details'>"
+                f"      <summary>{html.escape(action_summary)}</summary>"
+                "      <div class='advanced-content'>"
+                f"        <div class='discord-preview'>{''.join(preview_rows)}</div>"
+                "        <form method='post' action='/twitch/admin/manual-plan'>"
+                f"          {csrf_input_html}"
+                f"          <input type='hidden' name='login' value='{escaped_login}' />"
+                "          <div class='form-row'>"
+                f"            <label>Plan<select name='plan_id'>{option_html}</select></label>"
+                f"            <label>Ablauf (optional)<input type='text' name='expires_at' value='{html.escape(expires_value, quote=True)}' placeholder='YYYY-MM-DD'></label>"
+                "          </div>"
+                f"          <label>Notiz<input type='text' name='notes' value='{html.escape(manual_notes, quote=True)}' placeholder='z.B. Testphase / Kulanz'></label>"
+                "          <div class='action-stack'>"
+                "            <button class='btn btn-small'>Speichern</button>"
+                f"            {clear_button_html}"
+                "          </div>"
+                "        </form>"
+                "      </div>"
+                "    </details>"
+                "  </td>"
+                "</tr>"
+            )
+
+        if not table_rows:
+            table_rows.append(
+                "<tr><td colspan='5'>Keine Streamer für die Planverwaltung gefunden.</td></tr>"
+            )
+
+        return (
+            "<div class='card scope-card'>"
+            "  <div class='card-header'>"
+            "    <div>"
+            "      <p class='eyebrow'>Billing & Plaene</p>"
+            "      <h2>Manuelle Planvergabe</h2>"
+            "      <p class='lead'>Override fuer Partner setzen oder entfernen. Bei Entfernen greift wieder Stripe oder der Basic-Fallback.</p>"
+            "    </div>"
+            "    <div class='raid-metrics'>"
+            f"      <div class='mini-stat'><strong>{len(plan_rows)}</strong><span>Streamer</span></div>"
+            "    </div>"
+            "  </div>"
+            "  <div class='table-wrap'>"
+            "    <table>"
+            "      <thead><tr>"
+            "        <th>Streamer</th>"
+            "        <th>Effektiv</th>"
+            "        <th>Manuell</th>"
+            "        <th>Stripe</th>"
+            "        <th>Aktionen</th>"
+            "      </tr></thead>"
+            f"      <tbody>{''.join(table_rows)}</tbody>"
+            "    </table>"
+            "  </div>"
+            "</div>"
+        )
+
     async def index(self, request: web.Request):
         self._require_token(request)
         items = await self._list()
@@ -223,6 +443,18 @@ class DashboardLiveMixin:
         csrf_token = self._csrf_generate_token(request)
         csrf_input_html = (
             f"<input type='hidden' name='csrf_token' value='{html.escape(csrf_token, quote=True)}'>"
+        )
+        admin_nav_renderer = getattr(self, "_render_admin_section_nav", None)
+        admin_section_nav_html = (
+            admin_nav_renderer("overview") if callable(admin_nav_renderer) else ""
+        )
+        announcement_card_renderer = getattr(
+            self,
+            "_render_admin_announcement_overview_card",
+            None,
+        )
+        admin_announcement_card_html = (
+            announcement_card_renderer() if callable(announcement_card_renderer) else ""
         )
 
         discord_filter = (request.query.get("discord") or "any").lower()
@@ -1103,20 +1335,26 @@ class DashboardLiveMixin:
   </div>
 </div>
 """
+        plan_management_card_html = self._render_billing_admin_plan_card(
+            csrf_input_html=csrf_input_html
+        )
 
         body = f"""
+{admin_section_nav_html}
 {hero_html}
 
 <div class="panel-grid">
   {add_streamer_card_html}
   {raid_auth_card_html}
   {chat_action_card_html}
+  {admin_announcement_card_html}
   {filter_card_html}
 </div>
 
 {table_html}
 
 {scope_card_html}
+{plan_management_card_html}
 
 {archived_card_html}
 {non_partner_card_html}
@@ -1126,6 +1364,104 @@ class DashboardLiveMixin:
             text=self._html(body, active="live", msg=msg, err=err),
             content_type="text/html",
         )
+
+    async def admin_manual_plan_save(self, request: web.Request):
+        self._require_token(request)
+        data = await self._read_post_with_csrf(request, fallback_path="/twitch/admin")
+        billing_setter = getattr(self, "_billing_admin_set_manual_plan", None)
+        if not callable(billing_setter):
+            location = self._redirect_location(
+                request,
+                err="Manuelle Planvergabe ist aktuell nicht verfügbar",
+                default_path="/twitch/admin",
+            )
+            raise web.HTTPFound(location=location)
+
+        login = str(data.get("login") or "").strip()
+        plan_id = str(data.get("plan_id") or "").strip()
+        expires_at = str(data.get("expires_at") or "").strip()
+        notes = str(data.get("notes") or "").strip()
+
+        try:
+            result = billing_setter(
+                twitch_login=login,
+                plan_id=plan_id,
+                expires_at=expires_at or None,
+                notes=notes,
+            )
+            effective_plan_id = str(result.get("effective_plan_id") or plan_id or "raid_free").strip()
+            location = self._redirect_location(
+                request,
+                ok=f"Manueller Plan für {login} gesetzt ({effective_plan_id})",
+                default_path="/twitch/admin",
+            )
+        except ValueError as exc:
+            error_map = {
+                "twitch_login_required": "Bitte einen Twitch-Login angeben",
+                "unknown_plan_id": "Unbekannte Plan-ID",
+                "unknown_streamer": f"Streamer {login or '—'} nicht gefunden",
+                "streamer_user_id_missing": (
+                    f"Für {login or 'den Streamer'} fehlt die Twitch User-ID"
+                ),
+                "manual_plan_save_failed": "Manueller Plan konnte nicht gespeichert werden",
+            }
+            location = self._redirect_location(
+                request,
+                err=error_map.get(str(exc), str(exc)),
+                default_path="/twitch/admin",
+            )
+        except Exception as exc:
+            log.exception("dashboard manual plan save failed for %s: %s", login, exc)
+            location = self._redirect_location(
+                request,
+                err="Manueller Plan konnte nicht gespeichert werden",
+                default_path="/twitch/admin",
+            )
+        raise web.HTTPFound(location=location)
+
+    async def admin_manual_plan_clear(self, request: web.Request):
+        self._require_token(request)
+        data = await self._read_post_with_csrf(request, fallback_path="/twitch/admin")
+        billing_clearer = getattr(self, "_billing_admin_clear_manual_plan", None)
+        if not callable(billing_clearer):
+            location = self._redirect_location(
+                request,
+                err="Plan-Override kann aktuell nicht entfernt werden",
+                default_path="/twitch/admin",
+            )
+            raise web.HTTPFound(location=location)
+
+        login = str(data.get("login") or "").strip()
+        try:
+            result = billing_clearer(twitch_login=login)
+            effective_plan_id = str(result.get("effective_plan_id") or "raid_free").strip() or "raid_free"
+            location = self._redirect_location(
+                request,
+                ok=f"Manueller Override für {login} entfernt ({effective_plan_id})",
+                default_path="/twitch/admin",
+            )
+        except ValueError as exc:
+            error_map = {
+                "twitch_login_required": "Bitte einen Twitch-Login angeben",
+                "unknown_streamer": f"Streamer {login or '—'} nicht gefunden",
+                "streamer_user_id_missing": (
+                    f"Für {login or 'den Streamer'} fehlt die Twitch User-ID"
+                ),
+                "manual_plan_clear_failed": "Manueller Override konnte nicht entfernt werden",
+            }
+            location = self._redirect_location(
+                request,
+                err=error_map.get(str(exc), str(exc)),
+                default_path="/twitch/admin",
+            )
+        except Exception as exc:
+            log.exception("dashboard manual plan clear failed for %s: %s", login, exc)
+            location = self._redirect_location(
+                request,
+                err="Manueller Override konnte nicht entfernt werden",
+                default_path="/twitch/admin",
+            )
+        raise web.HTTPFound(location=location)
 
     async def add_any(self, request: web.Request):
         """Flexible Variante: nimmt POST-Felder `q`, `login` oder `url`."""

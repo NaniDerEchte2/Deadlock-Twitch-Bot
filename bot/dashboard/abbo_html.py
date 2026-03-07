@@ -52,6 +52,16 @@ def render_abbo_page(
                 "<div class='notice notice-error' style='margin-bottom:8px;'>"
                 "Die Nachricht muss <code>{invite}</code> enthalten.</div>"
             )
+        elif promo_error == "too_long":
+            promo_error_html = (
+                "<div class='notice notice-error' style='margin-bottom:8px;'>"
+                "Die Nachricht darf maximal 500 Zeichen lang sein.</div>"
+            )
+        elif promo_error == "invalid_placeholder":
+            promo_error_html = (
+                "<div class='notice notice-error' style='margin-bottom:8px;'>"
+                "Erlaubt ist in deiner Nachricht nur der Platzhalter <code>{invite}</code>.</div>"
+            )
         promo_success_html = ""
         if promo_saved:
             promo_success_html = (
@@ -63,13 +73,14 @@ def render_abbo_page(
             "<section class='card'>"
             "<strong style='font-size:14px;color:#e2e8f0;'>Discord-Promo anpassen</strong>"
             "<p class='muted'>Der Bot postet gelegentlich eine Nachricht in deinem Twitch-Chat. "
-            "Du kannst den Text anpassen &mdash; <code>{invite}</code> muss immer enthalten bleiben.</p>"
+            "Du kannst den Text frei anpassen, auch mit mehreren Zeilen &mdash; "
+            "<code>{invite}</code> muss immer enthalten bleiben und es sind maximal 500 Zeichen erlaubt.</p>"
             f"<form method='post' action='/twitch/abbo/promo-message'>"
             f"<input type='hidden' name='csrf_token' value='{_html.escape(csrf_token, quote=True)}'>"
             f"{promo_success_html}"
             f"{promo_error_html}"
             f"<textarea name='promo_message' placeholder='z.B. Hey! Komm auf unseren Discord: {{invite}}'"
-            f" maxlength='400'>{escaped_msg}</textarea>"
+            f" maxlength='500'>{escaped_msg}</textarea>"
             "<button type='submit' class='profile-save-btn'>Speichern</button>"
             "</form>"
             "<small class='muted'>Leer lassen = Standard-Nachrichten des Bots werden verwendet.</small>"

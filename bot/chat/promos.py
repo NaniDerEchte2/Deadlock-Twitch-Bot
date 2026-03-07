@@ -4,6 +4,11 @@ import secrets
 import time
 from collections import deque
 
+from ..promo_mode import (
+    evaluate_global_promo_mode,
+    load_global_promo_mode,
+    validate_streamer_promo_message,
+)
 from ..storage import get_conn, query_one as _pg_query_one, query_all as _pg_query_all
 from .constants import (
     _PROMO_ACTIVITY_ENABLED,
@@ -195,6 +200,61 @@ class PromoMixin:
 
         return _Channel(login, channel_id)
 
+    def _load_streamer_promo_message(self, login: str) -> str | None:
+        try:
+            with get_conn() as conn:
+                row = conn.execute(
+                    "SELECT promo_message FROM streamer_plans WHERE LOWER(twitch_login) = LOWER(?)",
+                    (login,),
+                ).fetchone()
+                if row and row["promo_message"]:
+                    message = str(row["promo_message"]).strip()
+                    issues = validate_streamer_promo_message(message)
+                    if issues:
+                        log.debug(
+                            "Ignoring invalid promo_message for %s: %s",
+                            login,
+                            issues[0]["message"],
+                        )
+                        return None
+                    return message
+        except Exception:
+            log.debug("Custom promo_message lookup failed for %s", login, exc_info=True)
+        return None
+
+    def _load_global_promo_message(self) -> str | None:
+        try:
+            with get_conn() as conn:
+                config = load_global_promo_mode(conn)
+        except Exception:
+            log.debug("Global promo mode lookup failed", exc_info=True)
+            return None
+
+        evaluation = evaluate_global_promo_mode(config)
+        message = str(evaluation.get("active_message") or "").strip()
+        return message or None
+
+    @staticmethod
+    def _format_promo_template(template: str, invite: str) -> str | None:
+        try:
+            return str(template).format(invite=invite)
+        except Exception:
+            log.warning("Promo template could not be rendered", exc_info=True)
+            return None
+
+    def _build_promo_text(self, login: str, invite: str) -> str | None:
+        global_message = self._load_global_promo_message()
+        if global_message:
+            return self._format_promo_template(global_message, invite)
+
+        custom_message = self._load_streamer_promo_message(login)
+        if custom_message:
+            return self._format_promo_template(custom_message, invite)
+
+        if not PROMO_MESSAGES:
+            return None
+        return self._format_promo_template(secrets.choice(PROMO_MESSAGES), invite)
+
     async def _send_promo_message(
         self, login: str, channel_id: str, now: float, *, reason: str
     ) -> bool:
@@ -202,23 +262,9 @@ class PromoMixin:
         if not invite:
             return False
 
-        # Custom-Message aus streamer_plans prüfen
-        custom_msg = None
-        try:
-            with get_conn() as conn:
-                row = conn.execute(
-                    "SELECT promo_message FROM streamer_plans WHERE LOWER(twitch_login) = LOWER(?)",
-                    (login,)
-                ).fetchone()
-                if row and row["promo_message"]:
-                    custom_msg = row["promo_message"]
-        except Exception:
-            log.debug("Custom promo_message lookup failed for %s", login, exc_info=True)
-
-        if custom_msg:
-            msg = custom_msg.format(invite=invite)
-        else:
-            msg = secrets.choice(PROMO_MESSAGES).format(invite=invite)
+        msg = self._build_promo_text(login, invite)
+        if not msg:
+            return False
         ok = await self._send_announcement(
             self._make_promo_channel(login, channel_id),
             msg,
@@ -535,23 +581,9 @@ class PromoMixin:
             if not invite:
                 continue
 
-            # Custom-Message aus streamer_plans prüfen
-            custom_msg = None
-            try:
-                with get_conn() as conn:
-                    row = conn.execute(
-                        "SELECT promo_message FROM streamer_plans WHERE LOWER(twitch_login) = LOWER(?)",
-                        (login,)
-                    ).fetchone()
-                    if row and row["promo_message"]:
-                        custom_msg = row["promo_message"]
-            except Exception:
-                log.debug("Custom promo_message lookup failed for %s", login, exc_info=True)
-
-            if custom_msg:
-                msg = custom_msg.format(invite=invite)
-            else:
-                msg = secrets.choice(PROMO_MESSAGES).format(invite=invite)
+            msg = self._build_promo_text(login, invite)
+            if not msg:
+                continue
 
             class _Channel:
                 __slots__ = ("name", "id")

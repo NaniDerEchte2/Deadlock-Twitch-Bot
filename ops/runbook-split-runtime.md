@@ -25,6 +25,17 @@ Set Twitch OAuth credentials for the standalone dashboard service:
 $env:TWITCH_CLIENT_ID = 'replace-with-twitch-client-id'
 $env:TWITCH_CLIENT_SECRET = 'replace-with-twitch-client-secret'
 ```
+Set Discord Admin OAuth credentials for `/twitch/admin`:
+```powershell
+$env:DISCORD_OAUTH_CLIENT_ID = 'replace-with-discord-application-id'
+$env:DISCORD_OAUTH_CLIENT_SECRET = 'replace-with-discord-client-secret'
+$env:TWITCH_ADMIN_PUBLIC_URL = 'https://admin.earlysalty.de'
+$env:TWITCH_ADMIN_DISCORD_REDIRECT_URI = 'https://admin.earlysalty.de/twitch/auth/discord/callback'
+```
+Optional recovery override for the owner account:
+```powershell
+$env:TWITCH_ADMIN_OWNER_USER_ID = 'replace-with-discord-user-id'
+```
 Optional (defaults to `https://twitch.earlysalty.com/twitch/auth/callback`):
 ```powershell
 $env:TWITCH_DASHBOARD_AUTH_REDIRECT_URI = 'https://twitch.earlysalty.com/twitch/auth/callback'

@@ -15,6 +15,7 @@ from aiohttp import web
 
 from ..analytics.api_v2 import AnalyticsV2Mixin
 from ..core.constants import log
+from .announcement_mode_mixin import DashboardAdminAnnouncementMixin
 from .affiliate_mixin import _DashboardAffiliateMixin
 from .auth_mixin import _DashboardAuthMixin
 from .billing_mixin import _DashboardBillingMixin
@@ -36,6 +37,8 @@ TWITCH_DASHBOARDS_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch
 LOGIN_RE = re.compile(r"^[A-Za-z0-9_]{3,25}$")
 DEFAULT_DASHBOARD_MODERATOR_ROLE_ID = 1337518124647579661
 KEYRING_SERVICE_NAME = "DeadlockBot"
+# Public Stripe Connect OAuth client ID (`ca_...`). Safe to commit directly.
+STATIC_STRIPE_CONNECT_CLIENT_ID = ""
 TWITCH_ADMIN_PUBLIC_URL = (
     os.getenv("TWITCH_ADMIN_PUBLIC_URL")
     or os.getenv("MASTER_DASHBOARD_PUBLIC_URL")
@@ -81,6 +84,7 @@ class DashboardV2Server(
     _DashboardLegalMixin,
     _DashboardBillingMixin,
     _DashboardRoutesMixin,
+    DashboardAdminAnnouncementMixin,
     DashboardLiveAnnouncementMixin,
     DashboardLiveMixin,
     DashboardStatsMixin,
@@ -151,7 +155,10 @@ class DashboardV2Server(
             "STRIPE_PRODUCT_ID_MAP",
             "TWITCH_BILLING_STRIPE_PRODUCT_ID_MAP",
         )
-        self._stripe_connect_client_id = self._load_secret_value("STRIPE_CONNECT_CLIENT_ID")
+        self._stripe_connect_client_id = str(
+            STATIC_STRIPE_CONNECT_CLIENT_ID
+            or self._load_secret_value("STRIPE_CONNECT_CLIENT_ID")
+        ).strip()
         self._affiliate_oauth_states: dict = {}
         self._affiliate_connect_states: dict = {}
         self._affiliate_sessions: dict = {}
@@ -468,7 +475,9 @@ class DashboardV2Server(
     @staticmethod
     def _canonical_discord_admin_post_login_path(raw: str | None) -> str:
         normalized = DashboardV2Server._normalize_discord_admin_next_path(raw)
-        normalized_path = (urlsplit(normalized).path or "").rstrip("/") or "/"
+        parts = urlsplit(normalized)
+        normalized_path = (parts.path or "").rstrip("/") or "/"
+        query_suffix = f"?{parts.query}" if parts.query else ""
         if normalized_path == "/twitch/abo":
             return "/twitch/abbo"
         if normalized_path == "/twitch/abbo":
@@ -489,6 +498,8 @@ class DashboardV2Server(
             return "/twitch/dashboard"
         if normalized_path == "/twitch/dashboard":
             return "/twitch/dashboard"
+        if normalized_path == "/twitch/admin/announcements":
+            return f"/twitch/admin/announcements{query_suffix}"
         return "/twitch/admin"
 
     @staticmethod
