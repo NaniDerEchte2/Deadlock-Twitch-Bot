@@ -5,7 +5,6 @@ from __future__ import annotations
 import html
 import re
 import secrets
-import sqlite3
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -128,6 +127,18 @@ class _DashboardAffiliateMixin:
         if not public_url:
             public_url = "https://twitch.earlysalty.com"
         return f"{public_url.rstrip('/')}/twitch/auth/affiliate/callback"
+
+    def _affiliate_build_stripe_connect_redirect_uri(self) -> str:
+        public_url = getattr(self, "_public_url", "") or ""
+        if not public_url:
+            public_url = "https://twitch.earlysalty.com"
+        return f"{public_url.rstrip('/')}/twitch/affiliate/connect/stripe/callback"
+
+    def _affiliate_stripe_connect_client_id(self) -> str:
+        configured = str(getattr(self, "_stripe_connect_client_id", "") or "").strip()
+        if configured:
+            return configured
+        return str(self._load_secret_value("STRIPE_CONNECT_CLIENT_ID") or "").strip()
 
     async def _affiliate_auth_login(self, request: web.Request) -> web.StreamResponse:
         if not self._is_oauth_configured():
@@ -342,8 +353,11 @@ class _DashboardAffiliateMixin:
                      address_line1, address_city, address_zip, now, now),
                 )
                 conn.commit()
-            except sqlite3.IntegrityError:
-                pass  # already exists
+            except Exception as _dup_exc:
+                if "unique" in str(_dup_exc).lower() or "duplicate" in str(_dup_exc).lower():
+                    pass  # already exists
+                else:
+                    raise
 
         raise web.HTTPFound("/twitch/affiliate/dashboard")
 
@@ -356,7 +370,7 @@ class _DashboardAffiliateMixin:
         if not session:
             raise web.HTTPFound("/twitch/auth/affiliate/login")
 
-        stripe_connect_client_id = self._load_secret_value("STRIPE_CONNECT_CLIENT_ID")
+        stripe_connect_client_id = self._affiliate_stripe_connect_client_id()
         if not stripe_connect_client_id:
             return web.Response(text="Stripe Connect ist nicht konfiguriert.", status=503)
 
@@ -364,14 +378,17 @@ class _DashboardAffiliateMixin:
             self._affiliate_connect_states = {}
 
         state = secrets.token_urlsafe(24)
+        redirect_uri = self._affiliate_build_stripe_connect_redirect_uri()
         self._affiliate_connect_states[state] = {
             "created_at": time.time(),
+            "redirect_uri": redirect_uri,
             "twitch_login": session.get("twitch_login", ""),
         }
 
         params = urlencode({
             "response_type": "code",
             "client_id": stripe_connect_client_id,
+            "redirect_uri": redirect_uri,
             "scope": "read_write",
             "state": state,
         })
@@ -393,6 +410,7 @@ class _DashboardAffiliateMixin:
             return web.Response(text="State ungueltig oder abgelaufen.", status=400)
         if time.time() - float(state_data.get("created_at", 0)) > 600:
             return web.Response(text="State abgelaufen.", status=400)
+        redirect_uri = str(state_data.get("redirect_uri") or "").strip()
 
         stripe_secret_key = self._load_secret_value(
             "STRIPE_SECRET_KEY", "TWITCH_BILLING_STRIPE_SECRET_KEY"
@@ -408,6 +426,7 @@ class _DashboardAffiliateMixin:
                     "client_secret": stripe_secret_key,
                     "code": code,
                     "grant_type": "authorization_code",
+                    "redirect_uri": redirect_uri,
                 },
             ) as resp:
                 if resp.status != 200:
@@ -475,8 +494,10 @@ class _DashboardAffiliateMixin:
                     (twitch_login, streamer_login, now),
                 )
                 conn.commit()
-            except sqlite3.IntegrityError:
-                return web.json_response({"error": "already_claimed"}, status=409)
+            except Exception as _dup_exc:
+                if "unique" in str(_dup_exc).lower() or "duplicate" in str(_dup_exc).lower():
+                    return web.json_response({"error": "already_claimed"}, status=409)
+                raise
 
         return web.json_response({"ok": True, "claimed": streamer_login})
 
@@ -527,6 +548,7 @@ class _DashboardAffiliateMixin:
             self._affiliate_ensure_tables(conn)
             rows = conn.execute(
                 """SELECT c.claimed_streamer_login, c.claimed_at,
+                          COUNT(co.id) AS commission_count,
                           COALESCE(SUM(co.commission_cents), 0) AS total_commission_cents
                    FROM affiliate_streamer_claims c
                    LEFT JOIN affiliate_commissions co
@@ -541,6 +563,7 @@ class _DashboardAffiliateMixin:
             {
                 "streamer_login": r["claimed_streamer_login"],
                 "claimed_at": r["claimed_at"],
+                "commission_count": r["commission_count"],
                 "total_commission_cents": r["total_commission_cents"],
             }
             for r in rows
@@ -656,8 +679,10 @@ class _DashboardAffiliateMixin:
                  period_start, period_end, now),
             )
             conn.commit()
-        except sqlite3.IntegrityError:
-            return "duplicate"
+        except Exception as _dup_exc:
+            if "unique" in str(_dup_exc).lower() or "duplicate" in str(_dup_exc).lower():
+                return "duplicate"
+            raise
 
         # Check if affiliate has Stripe account for transfer
         acct = conn.execute(

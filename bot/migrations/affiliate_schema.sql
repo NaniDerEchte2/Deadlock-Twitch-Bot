@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS affiliate_accounts (
 );
 
 CREATE TABLE IF NOT EXISTS affiliate_streamer_claims (
-    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    id                      INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     affiliate_twitch_login  TEXT NOT NULL REFERENCES affiliate_accounts(twitch_login),
     claimed_streamer_login  TEXT NOT NULL,
     claimed_at              TEXT NOT NULL,
@@ -28,7 +28,7 @@ CREATE INDEX IF NOT EXISTS idx_aff_claims_affiliate
     ON affiliate_streamer_claims(affiliate_twitch_login);
 
 CREATE TABLE IF NOT EXISTS affiliate_commissions (
-    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    id                      INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     affiliate_twitch_login  TEXT NOT NULL REFERENCES affiliate_accounts(twitch_login),
     streamer_login          TEXT NOT NULL,
     stripe_event_id         TEXT UNIQUE NOT NULL,
