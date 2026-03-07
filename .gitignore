@@ -39,3 +39,4 @@ logs/
 *.log
 .ruff_cache/
 *.ps1
+/data/runtime/locks
