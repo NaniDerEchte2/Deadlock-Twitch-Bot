@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import type { AdminConfigScope } from '@/api/types';
 import {
   addStreamer,
   archiveStreamer,
@@ -13,8 +14,10 @@ import {
   fetchSubscriptions,
   fetchSystemHealth,
   removeStreamer,
+  updateChatConfig,
   updatePollingConfig,
   updatePromoConfig,
+  updateRaidConfig,
   verifyStreamer,
 } from '@/api/client';
 
@@ -77,10 +80,10 @@ export function useErrorLogs(page: number, pageSize: number) {
   });
 }
 
-export function useConfigOverview() {
+export function useConfigOverview(scope?: AdminConfigScope) {
   return useQuery({
-    queryKey: ['admin-config-overview'],
-    queryFn: fetchConfigOverview,
+    queryKey: ['admin-config-overview', scope ?? 'default'],
+    queryFn: () => fetchConfigOverview(scope),
     staleTime: 30_000,
   });
 }
@@ -167,6 +170,28 @@ export function usePollingConfigMutation() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['admin-config-overview'] });
       void queryClient.invalidateQueries({ queryKey: ['admin-system-health'] });
+    },
+  });
+}
+
+export function useRaidConfigMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: updateRaidConfig,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-config-overview'] });
+      void queryClient.invalidateQueries({ queryKey: ['admin-streamer-detail'] });
+    },
+  });
+}
+
+export function useChatConfigMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: updateChatConfig,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-config-overview'] });
+      void queryClient.invalidateQueries({ queryKey: ['admin-streamer-detail'] });
     },
   });
 }

@@ -1027,6 +1027,22 @@ def ensure_schema(conn) -> None:
         "ON twitch_global_promo_modes(updated_at)"
     )
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS twitch_global_settings (
+            setting_key   TEXT PRIMARY KEY,
+            setting_value TEXT NOT NULL,
+            updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_by    TEXT
+        )
+        """
+    )
+    conn.execute("ALTER TABLE twitch_global_settings ADD COLUMN IF NOT EXISTS updated_by TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_twitch_global_settings_updated_at "
+        "ON twitch_global_settings(updated_at)"
+    )
+
     # 5) Stream sessions & engagement
     conn.execute(
         """

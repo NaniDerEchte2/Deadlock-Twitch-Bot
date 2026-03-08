@@ -1,12 +1,17 @@
 import type {
   AdminActionResult,
   AdminAuthStatus,
+  AdminConfigScope,
   AffiliateRecord,
+  ChatConfigSnapshot,
+  ChatConfigUpdatePayload,
   ConfigOverview,
   DatabaseStatsResponse,
   ErrorLogsResponse,
   EventSubStatusResponse,
   InternalHomeOverview,
+  RaidConfigSnapshot,
+  RaidConfigUpdatePayload,
   StreamerDetail,
   StreamerRow,
   SubscriptionRecord,
@@ -121,11 +126,53 @@ function readNumber(record: Record<string, unknown>, ...keys: string[]): number 
 
 function readBoolean(record: Record<string, unknown>, ...keys: string[]): boolean | undefined {
   for (const key of keys) {
-    if (typeof record[key] === 'boolean') {
-      return Boolean(record[key]);
+    const value = record[key];
+    if (typeof value === 'boolean') {
+      return value;
+    }
+    if (typeof value === 'number') {
+      return value !== 0;
+    }
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (normalized) {
+        return !['0', 'false', 'off', 'no'].includes(normalized);
+      }
     }
   }
   return undefined;
+}
+
+function readScope(record: Record<string, unknown>, ...keys: string[]): AdminConfigScope | undefined {
+  const candidate = readString(record, ...keys).trim().toLowerCase();
+  if (candidate === 'active' || candidate === 'all') {
+    return candidate;
+  }
+  return undefined;
+}
+
+function parseRaidSnapshot(record: Record<string, unknown>): RaidConfigSnapshot {
+  return {
+    totalManagedStreamers: readNumber(record, 'totalManagedStreamers', 'total_managed_streamers'),
+    raidBotEnabledCount: readNumber(record, 'raidBotEnabledCount', 'raid_bot_enabled_count'),
+    livePingEnabledCount: readNumber(record, 'livePingEnabledCount', 'live_ping_enabled_count'),
+    allRaidBotEnabled: readBoolean(record, 'allRaidBotEnabled', 'all_raid_bot_enabled'),
+    allLivePingEnabled: readBoolean(record, 'allLivePingEnabled', 'all_live_ping_enabled'),
+    scope: readScope(record, 'scope', 'defaultScope', 'default_scope'),
+    raw: record,
+  };
+}
+
+function parseChatSnapshot(record: Record<string, unknown>): ChatConfigSnapshot {
+  return {
+    totalManagedStreamers: readNumber(record, 'totalManagedStreamers', 'total_managed_streamers'),
+    silentBanCount: readNumber(record, 'silentBanCount', 'silent_ban_count'),
+    silentRaidCount: readNumber(record, 'silentRaidCount', 'silent_raid_count'),
+    allSilentBan: readBoolean(record, 'allSilentBan', 'all_silent_ban'),
+    allSilentRaid: readBoolean(record, 'allSilentRaid', 'all_silent_raid'),
+    scope: readScope(record, 'scope', 'defaultScope', 'default_scope'),
+    raw: record,
+  };
 }
 
 export async function fetchAuthStatus(): Promise<AdminAuthStatus> {
@@ -257,10 +304,19 @@ export async function fetchErrorLogs(page = 1, pageSize = 25): Promise<ErrorLogs
   return admin<ErrorLogsResponse>(`/system/errors?page=${page}&page_size=${pageSize}`);
 }
 
-export async function fetchConfigOverview(): Promise<ConfigOverview> {
-  const payload = await admin<ConfigOverview>('/config/overview');
-  cacheCsrfToken(payload.csrfToken);
-  return payload;
+export async function fetchConfigOverview(scope?: AdminConfigScope): Promise<ConfigOverview> {
+  const query = scope ? `?scope=${encodeURIComponent(scope)}` : '';
+  const payload = await admin<Record<string, unknown>>(`/config/overview${query}`);
+  const csrfToken = cacheCsrfToken(readString(payload, 'csrfToken', 'csrf_token')) || undefined;
+  return {
+    promo: coerceRecord(payload.promo),
+    polling: coerceRecord(payload.polling),
+    raids: parseRaidSnapshot(coerceRecord(payload.raids)),
+    chat: parseChatSnapshot(coerceRecord(payload.chat)),
+    announcements: coerceRecord(payload.announcements),
+    csrfToken,
+    raw: payload,
+  };
 }
 
 function readBodyCsrfToken(body: Record<string, unknown>): string {
@@ -290,10 +346,11 @@ async function resolveJsonCsrfToken(body: Record<string, unknown>): Promise<stri
   return cacheCsrfToken(await fetchLegacyCsrfToken());
 }
 
-export async function updatePromoConfig(body: Record<string, unknown>) {
-  const csrfToken = await resolveJsonCsrfToken(body);
-  const payload = { ...body, csrf_token: csrfToken };
-  return admin<Record<string, unknown>>('/config/promo', {
+async function postAdminJson<T, TBody extends object = Record<string, unknown>>(path: string, body: TBody) {
+  const normalizedBody = coerceRecord(body);
+  const csrfToken = await resolveJsonCsrfToken(normalizedBody);
+  const payload = { ...normalizedBody, csrf_token: csrfToken };
+  return admin<T>(path, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -303,17 +360,20 @@ export async function updatePromoConfig(body: Record<string, unknown>) {
   });
 }
 
+export async function updatePromoConfig(body: Record<string, unknown>) {
+  return postAdminJson<Record<string, unknown>>('/config/promo', body);
+}
+
 export async function updatePollingConfig(body: Record<string, unknown>) {
-  const csrfToken = await resolveJsonCsrfToken(body);
-  const payload = { ...body, csrf_token: csrfToken };
-  return admin<Record<string, unknown>>('/config/polling', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-CSRF-Token': csrfToken,
-    },
-    body: JSON.stringify(payload),
-  });
+  return postAdminJson<Record<string, unknown>>('/config/polling', body);
+}
+
+export async function updateRaidConfig(body: RaidConfigUpdatePayload) {
+  return postAdminJson<Record<string, unknown>, RaidConfigUpdatePayload>('/config/raids', body);
+}
+
+export async function updateChatConfig(body: ChatConfigUpdatePayload) {
+  return postAdminJson<Record<string, unknown>, ChatConfigUpdatePayload>('/config/chat', body);
 }
 
 export async function fetchSubscriptions(): Promise<SubscriptionRecord[]> {

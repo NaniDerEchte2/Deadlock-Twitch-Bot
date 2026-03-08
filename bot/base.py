@@ -30,6 +30,7 @@ from .api.twitch_api import TwitchAPI
 from .chat.bot import TWITCHIO_AVAILABLE, create_twitch_chat_bot, load_bot_tokens
 from .chat.constants import CHAT_JOIN_OFFLINE
 from .core.constants import (
+    POLL_INTERVAL_SECONDS,
     TWITCH_ALERT_CHANNEL_ID,
     TWITCH_ALERT_MENTION,
     TWITCH_CATEGORY_SAMPLE_LIMIT,
@@ -112,6 +113,14 @@ class TwitchBaseCog(commands.Cog):
         self._tick_count = 0
         self._log_every_n = max(1, int(TWITCH_LOG_EVERY_N_TICKS or 5))
         self._category_sample_limit = max(50, int(TWITCH_CATEGORY_SAMPLE_LIMIT or 400))
+        self._poll_interval_seconds = max(5, min(3600, int(POLL_INTERVAL_SECONDS or 15)))
+        self._poll_interval_resync_interval_seconds = 60.0
+        self._poll_interval_last_sync_monotonic = 0.0
+        self._poll_interval_last_error_log_at = 0.0
+        self._poll_interval_last_invalid_value: str | None = None
+        self._poll_interval_settings_table = "twitch_global_settings"
+        self._poll_interval_settings_key = "poll_interval_seconds"
+        self._admin_polling_interval_seconds = self._poll_interval_seconds
         self._active_sessions: dict[str, int] = {}
         self._notify_channel_id = int(TWITCH_NOTIFY_CHANNEL_ID or 0)
         self._alert_channel_id = int(TWITCH_ALERT_CHANNEL_ID or 0)
@@ -311,6 +320,12 @@ class TwitchBaseCog(commands.Cog):
             log.warning("Raid-Bot und Chat-Bot deaktiviert, da TWITCH_CLIENT_ID/SECRET fehlen.")
 
         # Background tasks
+        sync_poll_interval = getattr(self, "_sync_poll_interval_from_storage", None)
+        if callable(sync_poll_interval):
+            try:
+                sync_poll_interval(force=True, startup=True)
+            except Exception:
+                log.debug("Persistiertes Polling-Intervall konnte vor Loop-Start nicht geladen werden", exc_info=True)
         self.poll_streams.start()
         # invites_refresh.start() → DEAKTIVIERT: On-Demand statt periodisch
         self._spawn_bg_task(self._ensure_category_id(), "twitch.ensure_category_id")

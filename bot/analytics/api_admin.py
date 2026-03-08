@@ -25,6 +25,14 @@ from ..storage import pg as storage
 LOGIN_RE = re.compile(r"^[A-Za-z0-9_]{3,25}$")
 _ERROR_LOG_MAX_SCAN_LINES = 4000
 _ERROR_LOG_MAX_RETURNED = 200
+_POLLING_INTERVAL_SETTINGS_TABLE = "twitch_global_settings"
+_POLLING_INTERVAL_SETTING_KEY = "poll_interval_seconds"
+_DEFAULT_ADMIN_POLLING_INTERVAL_SECONDS = 60
+_MIN_ADMIN_POLLING_INTERVAL_SECONDS = 5
+_MAX_ADMIN_POLLING_INTERVAL_SECONDS = 3600
+_ADMIN_MANAGED_SCOPE_ACTIVE = "active"
+_ADMIN_MANAGED_SCOPE_ALL = "all"
+_ADMIN_MANAGED_SCOPES = frozenset({_ADMIN_MANAGED_SCOPE_ACTIVE, _ADMIN_MANAGED_SCOPE_ALL})
 _DATABASE_STATS_TABLES: tuple[str, ...] = (
     "twitch_streamers",
     "twitch_live_state",
@@ -37,6 +45,30 @@ _DATABASE_STATS_TABLES: tuple[str, ...] = (
     "twitch_eventsub_capacity_snapshot",
     "dashboard_sessions",
 )
+_LOG_HEADER_SECRET_RE = re.compile(
+    r"(?i)\b(authorization\s*[:=]\s*(?:bearer|basic)\s+)([^\s,;]+)"
+)
+_LOG_COOKIE_RE = re.compile(r"(?i)\b((?:set-cookie|cookie)\s*[:=]\s*)([^\r\n]+)")
+_LOG_KEY_VALUE_SECRET_RE = re.compile(
+    r"(?i)\b("
+    r"access[_-]?token|refresh[_-]?token|id[_-]?token|csrf[_-]?token|"
+    r"client[_-]?secret|api[_-]?key|apikey|session(?:id)?|password|secret"
+    r")(\s*[:=]\s*)(\"[^\"]+\"|'[^']+'|[^\s,;]+)"
+)
+_LOG_QUOTED_KEY_VALUE_SECRET_RE = re.compile(
+    r"(?i)((?:\"|')("
+    r"access[_-]?token|refresh[_-]?token|id[_-]?token|csrf[_-]?token|"
+    r"client[_-]?secret|api[_-]?key|apikey|session(?:id)?|password|secret"
+    r")(?:\"|')\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+)
+_LOG_QUERY_SECRET_RE = re.compile(
+    r"(?i)\b("
+    r"access[_-]?token|refresh[_-]?token|id[_-]?token|csrf[_-]?token|"
+    r"client[_-]?secret|api[_-]?key|apikey|session(?:id)?|password|secret"
+    r")=([^&\s]+)"
+)
+_LOG_JWT_RE = re.compile(r"\beyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9._-]{8,}\.[a-zA-Z0-9._-]{8,}\b")
+_LOG_OAUTH_TOKEN_RE = re.compile(r"\boauth:[a-zA-Z0-9]{12,}\b")
 
 
 def _row_get_value(row: Any, key: str, index: int, default: Any = None) -> Any:
@@ -75,6 +107,8 @@ class _AnalyticsAdminMixin:
         router.add_get("/twitch/api/admin/config/overview", self._api_admin_config_overview)
         router.add_post("/twitch/api/admin/config/promo", self._api_admin_config_promo)
         router.add_post("/twitch/api/admin/config/polling", self._api_admin_config_polling)
+        router.add_post("/twitch/api/admin/config/raids", self._api_admin_config_raids)
+        router.add_post("/twitch/api/admin/config/chat", self._api_admin_config_chat)
         router.add_get(
             "/twitch/api/admin/billing/subscriptions",
             self._api_admin_billing_subscriptions,
@@ -134,6 +168,264 @@ class _AnalyticsAdminMixin:
             return False
 
     @staticmethod
+    def _admin_mask_secret(raw_value: Any) -> str:
+        value = str(raw_value or "")
+        if not value:
+            return "[redacted]"
+        return f"[redacted:{min(len(value), 999)}]"
+
+    @classmethod
+    def _admin_sanitize_log_text(cls, raw_value: Any, *, max_length: int) -> str:
+        text = str(raw_value or "").strip()
+        if not text:
+            return ""
+
+        sanitized = _LOG_HEADER_SECRET_RE.sub(
+            lambda match: f"{match.group(1)}{cls._admin_mask_secret(match.group(2))}",
+            text,
+        )
+        sanitized = _LOG_COOKIE_RE.sub(
+            lambda match: f"{match.group(1)}{cls._admin_mask_secret(match.group(2))}",
+            sanitized,
+        )
+        sanitized = _LOG_QUOTED_KEY_VALUE_SECRET_RE.sub(
+            lambda match: f"{match.group(1)}{cls._admin_mask_secret(match.group(3))}",
+            sanitized,
+        )
+        sanitized = _LOG_KEY_VALUE_SECRET_RE.sub(
+            lambda match: f"{match.group(1)}{match.group(2)}{cls._admin_mask_secret(match.group(3))}",
+            sanitized,
+        )
+        sanitized = _LOG_QUERY_SECRET_RE.sub(
+            lambda match: f"{match.group(1)}={cls._admin_mask_secret(match.group(2))}",
+            sanitized,
+        )
+        sanitized = _LOG_JWT_RE.sub(cls._admin_mask_secret("[jwt]"), sanitized)
+        sanitized = _LOG_OAUTH_TOKEN_RE.sub(cls._admin_mask_secret("[oauth-token]"), sanitized)
+        return sanitized[:max_length]
+
+    @staticmethod
+    def _admin_settings_ensure_table(conn: Any) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS twitch_global_settings (
+                setting_key   TEXT PRIMARY KEY,
+                setting_value TEXT NOT NULL,
+                updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_by    TEXT
+            )
+            """
+        )
+        conn.execute(
+            "ALTER TABLE twitch_global_settings ADD COLUMN IF NOT EXISTS updated_by TEXT"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_twitch_global_settings_updated_at "
+            "ON twitch_global_settings(updated_at)"
+        )
+
+    @classmethod
+    def _admin_get_setting(
+        cls,
+        conn: Any,
+        setting_key: str,
+        *,
+        ensure_table: bool = True,
+    ) -> dict[str, Any] | None:
+        if ensure_table:
+            cls._admin_settings_ensure_table(conn)
+        try:
+            row = conn.execute(
+                f"""
+                SELECT setting_key, setting_value, updated_at, updated_by
+                FROM {_POLLING_INTERVAL_SETTINGS_TABLE}
+                WHERE setting_key = ?
+                LIMIT 1
+                """,
+                (setting_key,),
+            ).fetchone()
+        except Exception as exc:
+            if ensure_table:
+                raise
+            normalized_error = str(exc).strip().lower()
+            if any(marker in normalized_error for marker in ("no such table", "does not exist", "undefined table")):
+                return None
+            raise
+        if row is None:
+            return None
+        return {
+            "key": str(_row_get_value(row, "setting_key", 0, "") or "").strip(),
+            "value": str(_row_get_value(row, "setting_value", 1, "") or "").strip(),
+            "updatedAt": _row_get_value(row, "updated_at", 2, None),
+            "updatedBy": _row_get_value(row, "updated_by", 3, None),
+        }
+
+    @classmethod
+    def _admin_upsert_setting(
+        cls,
+        conn: Any,
+        *,
+        setting_key: str,
+        setting_value: str,
+        updated_by: str | None,
+    ) -> dict[str, Any]:
+        cls._admin_settings_ensure_table(conn)
+        row = conn.execute(
+            f"""
+            INSERT INTO {_POLLING_INTERVAL_SETTINGS_TABLE} (setting_key, setting_value, updated_at, updated_by)
+            VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+            ON CONFLICT (setting_key) DO UPDATE
+            SET
+                setting_value = EXCLUDED.setting_value,
+                updated_at = CURRENT_TIMESTAMP,
+                updated_by = EXCLUDED.updated_by
+            RETURNING setting_key, setting_value, updated_at, updated_by
+            """,
+            (setting_key, setting_value, updated_by),
+        ).fetchone()
+        return {
+            "key": str(_row_get_value(row, "setting_key", 0, "") or "").strip(),
+            "value": str(_row_get_value(row, "setting_value", 1, "") or "").strip(),
+            "updatedAt": _row_get_value(row, "updated_at", 2, None),
+            "updatedBy": _row_get_value(row, "updated_by", 3, None),
+        }
+
+    @staticmethod
+    def _admin_normalize_bool(value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in {0, 1}:
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return None
+
+    @staticmethod
+    def _admin_parse_scope(raw_value: Any) -> str | None:
+        if raw_value is None or str(raw_value).strip() == "":
+            return _ADMIN_MANAGED_SCOPE_ACTIVE
+        normalized = str(raw_value).strip().lower()
+        if normalized not in _ADMIN_MANAGED_SCOPES:
+            return None
+        return normalized
+
+    @staticmethod
+    def _admin_scope_filter_sql(scope: str) -> str:
+        if scope == _ADMIN_MANAGED_SCOPE_ALL:
+            return "1=1"
+        return "archived_at IS NULL"
+
+    @classmethod
+    def _admin_load_polling_config(
+        cls,
+        conn: Any,
+        *,
+        runtime_default: int,
+    ) -> dict[str, Any]:
+        clamped_default = min(
+            _MAX_ADMIN_POLLING_INTERVAL_SECONDS,
+            max(_MIN_ADMIN_POLLING_INTERVAL_SECONDS, runtime_default),
+        )
+        setting = cls._admin_get_setting(
+            conn,
+            _POLLING_INTERVAL_SETTING_KEY,
+            ensure_table=False,
+        )
+        if setting is None:
+            return {
+                "intervalSeconds": clamped_default,
+                "persisted": False,
+                "source": "runtime_fallback",
+                "updatedAt": None,
+                "updatedBy": None,
+            }
+
+        interval_seconds = _safe_int(setting.get("value", clamped_default), default=clamped_default)
+        source = "db"
+        if (
+            interval_seconds < _MIN_ADMIN_POLLING_INTERVAL_SECONDS
+            or interval_seconds > _MAX_ADMIN_POLLING_INTERVAL_SECONDS
+        ):
+            interval_seconds = clamped_default
+            source = "db_invalid_fallback"
+        return {
+            "intervalSeconds": interval_seconds,
+            "persisted": True,
+            "source": source,
+            "updatedAt": setting.get("updatedAt"),
+            "updatedBy": setting.get("updatedBy"),
+        }
+
+    @classmethod
+    def _admin_load_streamer_config_snapshots(
+        cls,
+        conn: Any,
+        *,
+        scope: str = _ADMIN_MANAGED_SCOPE_ACTIVE,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        normalized_scope = cls._admin_parse_scope(scope) or _ADMIN_MANAGED_SCOPE_ACTIVE
+        where_clause = cls._admin_scope_filter_sql(normalized_scope)
+        row = conn.execute(
+            f"""
+            SELECT
+                COUNT(*) AS total_managed_streamers,
+                COUNT(*) FILTER (WHERE raid_bot_enabled = 1) AS raid_bot_enabled_count,
+                COUNT(*) FILTER (WHERE COALESCE(live_ping_enabled, 1) = 1) AS live_ping_enabled_count,
+                COUNT(*) FILTER (WHERE silent_ban = 1) AS silent_ban_count,
+                COUNT(*) FILTER (WHERE silent_raid = 1) AS silent_raid_count
+            FROM twitch_streamers
+            WHERE {where_clause}
+            """
+        ).fetchone()
+        total_managed_streamers = _safe_int(
+            _row_get_value(row, "total_managed_streamers", 0, 0),
+            default=0,
+        )
+        raid_bot_enabled_count = _safe_int(
+            _row_get_value(row, "raid_bot_enabled_count", 1, 0),
+            default=0,
+        )
+        live_ping_enabled_count = _safe_int(
+            _row_get_value(row, "live_ping_enabled_count", 2, 0),
+            default=0,
+        )
+        silent_ban_count = _safe_int(
+            _row_get_value(row, "silent_ban_count", 3, 0),
+            default=0,
+        )
+        silent_raid_count = _safe_int(
+            _row_get_value(row, "silent_raid_count", 4, 0),
+            default=0,
+        )
+        raid_snapshot = {
+            "managedScope": normalized_scope,
+            "scope": normalized_scope,
+            "totalManagedStreamers": total_managed_streamers,
+            "raidBotEnabledCount": raid_bot_enabled_count,
+            "livePingEnabledCount": live_ping_enabled_count,
+            "allRaidBotEnabled": total_managed_streamers > 0
+            and raid_bot_enabled_count == total_managed_streamers,
+            "allLivePingEnabled": total_managed_streamers > 0
+            and live_ping_enabled_count == total_managed_streamers,
+        }
+        chat_snapshot = {
+            "managedScope": normalized_scope,
+            "scope": normalized_scope,
+            "totalManagedStreamers": total_managed_streamers,
+            "silentBanCount": silent_ban_count,
+            "silentRaidCount": silent_raid_count,
+            "allSilentBan": total_managed_streamers > 0
+            and silent_ban_count == total_managed_streamers,
+            "allSilentRaid": total_managed_streamers > 0
+            and silent_raid_count == total_managed_streamers,
+        }
+        return raid_snapshot, chat_snapshot
+
+    @staticmethod
     def _admin_eventsub_transport(value: Any) -> str:
         if isinstance(value, dict):
             method = str(value.get("method") or "").strip().lower()
@@ -176,13 +468,21 @@ class _AnalyticsAdminMixin:
             timestamp = str(parts[0]).strip()
             message = str(parts[-1]).strip() or line
 
+        sanitized_message = _AnalyticsAdminMixin._admin_sanitize_log_text(
+            message,
+            max_length=1200,
+        )
+        sanitized_context = _AnalyticsAdminMixin._admin_sanitize_log_text(
+            line,
+            max_length=2000,
+        )
         return {
             "id": f"{source}:{line_number}",
             "timestamp": timestamp or None,
             "level": level or None,
             "source": source,
-            "message": message[:1200],
-            "context": line[:2000],
+            "message": sanitized_message or "[redacted]",
+            "context": sanitized_context or sanitized_message or "[redacted]",
         }
 
     def _load_admin_error_log_entries(self) -> list[dict[str, Any]]:
@@ -719,6 +1019,7 @@ class _AnalyticsAdminMixin:
         promo_config: dict[str, Any] = {}
         raid_snapshot: dict[str, Any] = {}
         chat_snapshot: dict[str, Any] = {}
+        polling_config: dict[str, Any] = {}
         csrf_token = ""
         csrf_getter = getattr(self, "_csrf_get_token", None)
         csrf_generator = getattr(self, "_csrf_generate_token", None)
@@ -733,65 +1034,45 @@ class _AnalyticsAdminMixin:
             except Exception:
                 csrf_token = ""
 
+        runtime_polling_interval = _safe_int(
+            getattr(
+                self,
+                "_poll_interval_seconds",
+                getattr(
+                    self,
+                    "_admin_polling_interval_seconds",
+                    _DEFAULT_ADMIN_POLLING_INTERVAL_SECONDS,
+                ),
+            ),
+            default=_DEFAULT_ADMIN_POLLING_INTERVAL_SECONDS,
+        )
+        scope = self._admin_parse_scope(request.query.get("scope"))
+        if scope is None:
+            return web.json_response(
+                {
+                    "error": "invalid_scope",
+                    "message": "scope muss 'active' oder 'all' sein.",
+                },
+                status=400,
+            )
         try:
             with storage.get_conn() as conn:
                 promo_config = evaluate_global_promo_mode(load_global_promo_mode(conn))
-                raid_row = conn.execute(
-                    """
-                    SELECT
-                        COUNT(*) FILTER (WHERE raid_bot_enabled = 1) AS enabled_count,
-                        COUNT(*) FILTER (WHERE COALESCE(live_ping_enabled, 1) = 1) AS live_ping_enabled_count
-                    FROM twitch_streamers
-                    """
-                ).fetchone()
-                chat_row = conn.execute(
-                    """
-                    SELECT
-                        COUNT(*) FILTER (WHERE silent_ban = 1) AS silent_ban_count,
-                        COUNT(*) FILTER (WHERE silent_raid = 1) AS silent_raid_count
-                    FROM twitch_streamers
-                    """
-                ).fetchone()
-                raid_snapshot = {
-                    "enabledStreamerCount": _safe_int(_row_get_value(raid_row, "enabled_count", 0, 0), default=0)
-                    if raid_row
-                    else 0,
-                    "livePingEnabledCount": _safe_int(
-                        _row_get_value(raid_row, "live_ping_enabled_count", 1, 0),
-                        default=0,
-                    )
-                    if raid_row
-                    else 0,
-                }
-                chat_snapshot = {
-                    "silentBanCount": _safe_int(
-                        _row_get_value(chat_row, "silent_ban_count", 0, 0),
-                        default=0,
-                    )
-                    if chat_row
-                    else 0,
-                    "silentRaidCount": _safe_int(
-                        _row_get_value(chat_row, "silent_raid_count", 1, 0),
-                        default=0,
-                    )
-                    if chat_row
-                    else 0,
-                }
+                polling_config = self._admin_load_polling_config(
+                    conn,
+                    runtime_default=runtime_polling_interval,
+                )
+                raid_snapshot, chat_snapshot = self._admin_load_streamer_config_snapshots(
+                    conn,
+                    scope=scope,
+                )
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=500)
 
-        polling_interval = _safe_int(
-            getattr(self, "_admin_polling_interval_seconds", 60),
-            default=60,
-        )
         return web.json_response(
             {
                 "promo": promo_config,
-                "polling": {
-                    "intervalSeconds": polling_interval,
-                    "persisted": False,
-                    "source": "runtime_fallback",
-                },
+                "polling": polling_config,
                 "raids": raid_snapshot,
                 "chat": chat_snapshot,
                 "announcements": promo_config.get("config", {}) if isinstance(promo_config, dict) else {},
@@ -844,26 +1125,256 @@ class _AnalyticsAdminMixin:
             payload.get("intervalSeconds", payload.get("interval_seconds", 0)),
             default=0,
         )
-        if interval_seconds < 5 or interval_seconds > 3600:
+        if (
+            interval_seconds < _MIN_ADMIN_POLLING_INTERVAL_SECONDS
+            or interval_seconds > _MAX_ADMIN_POLLING_INTERVAL_SECONDS
+        ):
             return web.json_response(
                 {
                     "error": "invalid_interval_seconds",
-                    "message": "intervalSeconds muss zwischen 5 und 3600 liegen.",
+                    "message": (
+                        "intervalSeconds muss zwischen "
+                        f"{_MIN_ADMIN_POLLING_INTERVAL_SECONDS} und "
+                        f"{_MAX_ADMIN_POLLING_INTERVAL_SECONDS} liegen."
+                    ),
                 },
                 status=400,
             )
 
-        setattr(self, "_admin_polling_interval_seconds", interval_seconds)
+        actor_label = self._admin_actor_label(request, getattr(self, "_get_discord_admin_session", None))
+        try:
+            with storage.get_conn() as conn:
+                saved = self._admin_upsert_setting(
+                    conn,
+                    setting_key=_POLLING_INTERVAL_SETTING_KEY,
+                    setting_value=str(interval_seconds),
+                    updated_by=actor_label,
+                )
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+        persisted_interval_seconds = _safe_int(
+            saved.get("value", interval_seconds),
+            default=interval_seconds,
+        )
+        runtime_applied = False
+        runtime_interval_seconds: int | None = None
+        apply_poll_interval = getattr(self, "_apply_poll_interval_seconds", None)
+        if callable(apply_poll_interval):
+            try:
+                runtime_interval_seconds = _safe_int(
+                    apply_poll_interval(persisted_interval_seconds, reason="admin_api"),
+                    default=persisted_interval_seconds,
+                )
+                runtime_applied = True
+            except TypeError:
+                try:
+                    runtime_interval_seconds = _safe_int(
+                        apply_poll_interval(persisted_interval_seconds),
+                        default=persisted_interval_seconds,
+                    )
+                    runtime_applied = True
+                except Exception:
+                    runtime_interval_seconds = None
+            except Exception:
+                runtime_interval_seconds = None
+        else:
+            try:
+                setattr(self, "_admin_polling_interval_seconds", persisted_interval_seconds)
+                if hasattr(self, "_poll_interval_seconds"):
+                    setattr(self, "_poll_interval_seconds", persisted_interval_seconds)
+                runtime_interval_seconds = persisted_interval_seconds
+                runtime_applied = True
+            except Exception:
+                runtime_interval_seconds = None
+
         return web.json_response(
             {
                 "ok": True,
                 "polling": {
-                    "intervalSeconds": interval_seconds,
-                    "persisted": False,
-                    "source": "runtime_fallback",
-                    "message": (
-                        "Kein persistenter Polling-Speicherpfad gefunden; Wert gilt bis zum Neustart."
-                    ),
+                    "intervalSeconds": persisted_interval_seconds,
+                    "persisted": True,
+                    "source": "db",
+                    "updatedAt": saved.get("updatedAt"),
+                    "updatedBy": saved.get("updatedBy"),
+                },
+                "runtimeApplied": runtime_applied,
+                "runtimeIntervalSeconds": runtime_interval_seconds,
+            }
+        )
+
+    async def _api_admin_config_raids(self, request: web.Request) -> web.Response:
+        auth_error = self._admin_auth_error(request, getattr(self, "_require_v2_admin_api", None))
+        if auth_error is not None:
+            return auth_error
+
+        csrf_token, payload = await self._admin_extract_csrf(request)
+        if not self._admin_verify_csrf(request, csrf_token):
+            return web.json_response({"error": "invalid_csrf"}, status=403)
+
+        raid_bot_enabled = self._admin_normalize_bool(payload.get("raid_bot_enabled"))
+        live_ping_enabled = self._admin_normalize_bool(payload.get("live_ping_enabled"))
+        if raid_bot_enabled is None or live_ping_enabled is None:
+            return web.json_response(
+                {
+                    "error": "validation_failed",
+                    "validation": [
+                        {
+                            "path": "raid_bot_enabled",
+                            "message": "raid_bot_enabled muss boolean sein.",
+                        },
+                        {
+                            "path": "live_ping_enabled",
+                            "message": "live_ping_enabled muss boolean sein.",
+                        },
+                    ],
+                },
+                status=400,
+            )
+
+        scope = self._admin_parse_scope(payload.get("scope"))
+        if scope is None:
+            return web.json_response(
+                {
+                    "error": "invalid_scope",
+                    "message": "scope muss 'active' oder 'all' sein.",
+                },
+                status=400,
+            )
+        where_clause = self._admin_scope_filter_sql(scope)
+        actor_label = self._admin_actor_label(request, getattr(self, "_get_discord_admin_session", None))
+        updated_at = datetime.now(UTC).isoformat()
+
+        try:
+            with storage.get_conn() as conn:
+                target_row = conn.execute(
+                    f"SELECT COUNT(*) AS total FROM twitch_streamers WHERE {where_clause}"
+                ).fetchone()
+                target_count = _safe_int(_row_get_value(target_row, "total", 0, 0), default=0)
+                update_result = conn.execute(
+                    f"""
+                    UPDATE twitch_streamers
+                    SET
+                        raid_bot_enabled = ?,
+                        live_ping_enabled = ?
+                    WHERE {where_clause}
+                    """,
+                    (int(raid_bot_enabled), int(live_ping_enabled)),
+                )
+                raw_rowcount = getattr(update_result, "rowcount", target_count)
+                updated_count = (
+                    target_count
+                    if not isinstance(raw_rowcount, int) or raw_rowcount < 0
+                    else raw_rowcount
+                )
+                raid_snapshot, chat_snapshot = self._admin_load_streamer_config_snapshots(
+                    conn,
+                    scope=scope,
+                )
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+        return web.json_response(
+            {
+                "ok": True,
+                "scope": scope,
+                "updatedAt": updated_at,
+                "updatedBy": actor_label,
+                "targetCount": target_count,
+                "updatedCount": updated_count,
+                "raids": {
+                    **raid_snapshot,
+                    "raidBotEnabled": raid_bot_enabled,
+                    "livePingEnabled": live_ping_enabled,
+                },
+                "chat": chat_snapshot,
+            }
+        )
+
+    async def _api_admin_config_chat(self, request: web.Request) -> web.Response:
+        auth_error = self._admin_auth_error(request, getattr(self, "_require_v2_admin_api", None))
+        if auth_error is not None:
+            return auth_error
+
+        csrf_token, payload = await self._admin_extract_csrf(request)
+        if not self._admin_verify_csrf(request, csrf_token):
+            return web.json_response({"error": "invalid_csrf"}, status=403)
+
+        silent_ban = self._admin_normalize_bool(payload.get("silent_ban"))
+        silent_raid = self._admin_normalize_bool(payload.get("silent_raid"))
+        if silent_ban is None or silent_raid is None:
+            return web.json_response(
+                {
+                    "error": "validation_failed",
+                    "validation": [
+                        {
+                            "path": "silent_ban",
+                            "message": "silent_ban muss boolean sein.",
+                        },
+                        {
+                            "path": "silent_raid",
+                            "message": "silent_raid muss boolean sein.",
+                        },
+                    ],
+                },
+                status=400,
+            )
+
+        scope = self._admin_parse_scope(payload.get("scope"))
+        if scope is None:
+            return web.json_response(
+                {
+                    "error": "invalid_scope",
+                    "message": "scope muss 'active' oder 'all' sein.",
+                },
+                status=400,
+            )
+        where_clause = self._admin_scope_filter_sql(scope)
+        actor_label = self._admin_actor_label(request, getattr(self, "_get_discord_admin_session", None))
+        updated_at = datetime.now(UTC).isoformat()
+
+        try:
+            with storage.get_conn() as conn:
+                target_row = conn.execute(
+                    f"SELECT COUNT(*) AS total FROM twitch_streamers WHERE {where_clause}"
+                ).fetchone()
+                target_count = _safe_int(_row_get_value(target_row, "total", 0, 0), default=0)
+                update_result = conn.execute(
+                    f"""
+                    UPDATE twitch_streamers
+                    SET
+                        silent_ban = ?,
+                        silent_raid = ?
+                    WHERE {where_clause}
+                    """,
+                    (int(silent_ban), int(silent_raid)),
+                )
+                raw_rowcount = getattr(update_result, "rowcount", target_count)
+                updated_count = (
+                    target_count
+                    if not isinstance(raw_rowcount, int) or raw_rowcount < 0
+                    else raw_rowcount
+                )
+                raid_snapshot, chat_snapshot = self._admin_load_streamer_config_snapshots(
+                    conn,
+                    scope=scope,
+                )
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+        return web.json_response(
+            {
+                "ok": True,
+                "scope": scope,
+                "updatedAt": updated_at,
+                "updatedBy": actor_label,
+                "targetCount": target_count,
+                "updatedCount": updated_count,
+                "raids": raid_snapshot,
+                "chat": {
+                    **chat_snapshot,
+                    "silentBan": silent_ban,
+                    "silentRaid": silent_raid,
                 },
             }
         )

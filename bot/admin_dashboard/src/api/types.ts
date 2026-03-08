@@ -18,6 +18,8 @@ export interface AdminAuthStatus {
   permissions?: Record<string, unknown>;
 }
 
+export type AdminConfigScope = 'active' | 'all';
+
 export interface StreamerRow {
   login: string;
   displayName?: string;
@@ -143,14 +145,46 @@ export interface ErrorLogsResponse {
   entries: ErrorLogEntry[];
 }
 
+export interface RaidConfigSnapshot {
+  totalManagedStreamers?: number;
+  raidBotEnabledCount?: number;
+  livePingEnabledCount?: number;
+  allRaidBotEnabled?: boolean;
+  allLivePingEnabled?: boolean;
+  scope?: AdminConfigScope;
+  raw?: Record<string, unknown>;
+}
+
+export interface ChatConfigSnapshot {
+  totalManagedStreamers?: number;
+  silentBanCount?: number;
+  silentRaidCount?: number;
+  allSilentBan?: boolean;
+  allSilentRaid?: boolean;
+  scope?: AdminConfigScope;
+  raw?: Record<string, unknown>;
+}
+
 export interface ConfigOverview {
   promo?: Record<string, unknown>;
   polling?: Record<string, unknown>;
-  raids?: Record<string, unknown>;
-  chat?: Record<string, unknown>;
+  raids?: RaidConfigSnapshot;
+  chat?: ChatConfigSnapshot;
   announcements?: Record<string, unknown>;
   csrfToken?: string;
   raw?: Record<string, unknown>;
+}
+
+export interface RaidConfigUpdatePayload {
+  raid_bot_enabled: boolean;
+  live_ping_enabled: boolean;
+  scope?: AdminConfigScope;
+}
+
+export interface ChatConfigUpdatePayload {
+  silent_ban: boolean;
+  silent_raid: boolean;
+  scope?: AdminConfigScope;
 }
 
 export interface SubscriptionRecord {

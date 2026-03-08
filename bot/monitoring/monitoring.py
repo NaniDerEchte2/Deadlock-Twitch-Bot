@@ -30,6 +30,151 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
     """Polling loops and helpers used by the Twitch cog."""
 
     @staticmethod
+    def _normalize_poll_interval_seconds(raw_value: object) -> int | None:
+        raw_text = str(raw_value or "").strip()
+        if not raw_text:
+            return None
+        try:
+            value = int(raw_text)
+        except (TypeError, ValueError):
+            return None
+        if value < 5 or value > 3600:
+            return None
+        return value
+
+    def _default_poll_interval_seconds(self) -> int:
+        default_value = self._normalize_poll_interval_seconds(POLL_INTERVAL_SECONDS)
+        return default_value if default_value is not None else 15
+
+    def _poll_interval_debug(
+        self,
+        message: str,
+        *args: object,
+        exc_info: bool = False,
+    ) -> None:
+        now = time.monotonic()
+        last_logged = float(getattr(self, "_poll_interval_last_error_log_at", 0.0) or 0.0)
+        if last_logged and (now - last_logged) < 300.0:
+            return
+        self._poll_interval_last_error_log_at = now
+        log.debug(message, *args, exc_info=exc_info)
+
+    def _ensure_poll_interval_settings_storage(self, conn) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS twitch_global_settings (
+                setting_key TEXT PRIMARY KEY,
+                setting_value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_twitch_global_settings_updated_at "
+            "ON twitch_global_settings(updated_at)"
+        )
+
+    def _read_persisted_poll_interval_seconds(self) -> int | None:
+        table_name = str(
+            getattr(self, "_poll_interval_settings_table", "twitch_global_settings")
+            or "twitch_global_settings"
+        ).strip()
+        setting_key = str(
+            getattr(self, "_poll_interval_settings_key", "poll_interval_seconds")
+            or "poll_interval_seconds"
+        ).strip()
+
+        try:
+            with storage.get_conn() as conn:
+                self._ensure_poll_interval_settings_storage(conn)
+                row = conn.execute(
+                    f"SELECT setting_value FROM {table_name} WHERE setting_key = ? LIMIT 1",
+                    (setting_key,),
+                ).fetchone()
+        except Exception:
+            self._poll_interval_debug(
+                "Polling-Intervall: Konnte persistente Einstellung nicht lesen",
+                exc_info=True,
+            )
+            return None
+
+        if row is None:
+            self._poll_interval_last_invalid_value = None
+            return None
+
+        if hasattr(row, "get"):
+            raw_value = row.get("setting_value")
+        else:
+            raw_value = row[0] if row else None
+
+        normalized = self._normalize_poll_interval_seconds(raw_value)
+        if normalized is not None:
+            self._poll_interval_last_invalid_value = None
+            return normalized
+
+        invalid_marker = str(raw_value or "").strip() or "<empty>"
+        if invalid_marker != getattr(self, "_poll_interval_last_invalid_value", None):
+            self._poll_interval_last_invalid_value = invalid_marker
+            log.debug(
+                "Polling-Intervall: Ungueltiger DB-Wert %r, verwende Fallback %ss",
+                invalid_marker,
+                self._default_poll_interval_seconds(),
+            )
+        return None
+
+    def _apply_poll_interval_seconds(self, seconds: int, *, reason: str) -> int:
+        normalized = self._normalize_poll_interval_seconds(seconds)
+        target_seconds = normalized if normalized is not None else self._default_poll_interval_seconds()
+        current_seconds = self._normalize_poll_interval_seconds(
+            getattr(self, "_poll_interval_seconds", self._default_poll_interval_seconds())
+        )
+        current_seconds = (
+            current_seconds if current_seconds is not None else self._default_poll_interval_seconds()
+        )
+
+        if current_seconds == target_seconds:
+            self._poll_interval_seconds = target_seconds
+            self._admin_polling_interval_seconds = target_seconds
+            return target_seconds
+
+        self.poll_streams.change_interval(seconds=target_seconds)
+        self._poll_interval_seconds = target_seconds
+        self._admin_polling_interval_seconds = target_seconds
+
+        if reason == "startup":
+            log.info("Polling-Intervall initialisiert auf %ss", target_seconds)
+        else:
+            log.info("Polling-Intervall geaendert auf %ss (%s)", target_seconds, reason)
+        return target_seconds
+
+    def _sync_poll_interval_from_storage(
+        self,
+        *,
+        force: bool = False,
+        startup: bool = False,
+    ) -> int:
+        now = time.monotonic()
+        resync_interval = float(
+            getattr(self, "_poll_interval_resync_interval_seconds", 60.0) or 60.0
+        )
+        last_sync = float(getattr(self, "_poll_interval_last_sync_monotonic", 0.0) or 0.0)
+        if not force and last_sync and (now - last_sync) < max(15.0, resync_interval):
+            current_seconds = self._normalize_poll_interval_seconds(
+                getattr(self, "_poll_interval_seconds", self._default_poll_interval_seconds())
+            )
+            return current_seconds if current_seconds is not None else self._default_poll_interval_seconds()
+
+        self._poll_interval_last_sync_monotonic = now
+        persisted_seconds = self._read_persisted_poll_interval_seconds()
+        target_seconds = (
+            persisted_seconds if persisted_seconds is not None else self._default_poll_interval_seconds()
+        )
+        reason = "startup" if startup else "storage_resync"
+        if persisted_seconds is None and target_seconds == self._default_poll_interval_seconds():
+            reason = "fallback_default"
+        return self._apply_poll_interval_seconds(target_seconds, reason=reason)
+
+    @staticmethod
     def _reauth_chat_reminder_text() -> str:
         return (
             "Kurze Erinnerung: Für den Raid-/Stats-Bot fehlt noch die neue Twitch-Autorisierung. "
@@ -176,6 +321,13 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
 
     @tasks.loop(seconds=POLL_INTERVAL_SECONDS)
     async def poll_streams(self):
+        try:
+            self._sync_poll_interval_from_storage()
+        except Exception:
+            self._poll_interval_debug(
+                "Polling-Intervall: Runtime-Resync fehlgeschlagen",
+                exc_info=True,
+            )
         if self.api is None:
             return
         try:
@@ -188,6 +340,13 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
     @poll_streams.before_loop
     async def _before_poll(self):
         await self.bot.wait_until_ready()
+        try:
+            self._sync_poll_interval_from_storage(force=True, startup=True)
+        except Exception:
+            self._poll_interval_debug(
+                "Polling-Intervall: Start-Resync fehlgeschlagen",
+                exc_info=True,
+            )
 
     @tasks.loop(hours=INVITES_REFRESH_INTERVAL_HOURS)
     async def invites_refresh(self):
