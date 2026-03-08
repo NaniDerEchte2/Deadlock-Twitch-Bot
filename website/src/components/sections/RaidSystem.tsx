@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { CheckCircle2 } from "lucide-react";
+import { ArrowRight, CheckCircle2, Power, Search, Users } from "lucide-react";
 import { ScrollReveal } from "@/components/ui/ScrollReveal";
 import { GradientText } from "@/components/ui/GradientText";
 
@@ -26,10 +26,28 @@ const features = [
   },
 ];
 
-const streamers = [
-  { name: "Live-Partner A", viewers: "Deadlock live", score: "Empfohlen", highlight: true },
-  { name: "Live-Partner B", viewers: "Community live", score: "Starke Option", highlight: false },
-  { name: "Live-Partner C", viewers: "Später Slot live", score: "Fallback", highlight: false },
+const flowSteps = [
+  {
+    title: "Offline",
+    description:
+      "Sobald ein Deadlock-Stream endet, übernimmt das System automatisch den nächsten Schritt.",
+    icon: Power,
+    highlight: true,
+  },
+  {
+    title: "Partner",
+    description:
+      "Ein passender Live-Partner aus dem Netzwerk wird priorisiert, damit die Community im richtigen Umfeld bleibt.",
+    icon: Search,
+    highlight: true,
+  },
+  {
+    title: "Raid",
+    description:
+      "Die Viewer werden direkt in den nächsten relevanten Stream weitergeleitet statt am Ende zu verlieren.",
+    icon: Users,
+    highlight: true,
+  },
 ];
 
 const containerVariants = {
@@ -98,7 +116,7 @@ export function RaidSystem() {
           <ScrollReveal delay={0.2}>
             <div className="panel-card rounded-2xl p-8">
               <p className="text-lg font-semibold text-[var(--color-text-primary)] mb-6">
-                Bevorzugte Raid-Ziele
+                Flow beim Offline-Gehen
               </p>
 
               <motion.div
@@ -106,58 +124,78 @@ export function RaidSystem() {
                 initial="hidden"
                 whileInView="visible"
                 viewport={{ once: true, margin: "-60px" }}
+                className="space-y-3"
               >
-                {streamers.map((streamer) => (
-                  <motion.div
-                    key={streamer.name}
-                    variants={rowVariants}
-                    className="bg-[var(--color-bg)]/50 rounded-lg p-4 mb-3 flex justify-between items-center"
-                    style={{
-                      border: streamer.highlight
-                        ? "1px solid rgba(16,183,173,0.35)"
-                        : "1px solid var(--color-border)",
-                    }}
-                  >
-                    <div className="flex items-center gap-3">
-                      {/* Avatar placeholder */}
-                      <div
-                        className="w-8 h-8 rounded-full shrink-0"
-                        style={{
-                          background: streamer.highlight
-                            ? "linear-gradient(135deg, #ff7a18, #10b7ad)"
-                            : "linear-gradient(135deg, #1a3f57, #204e6b)",
-                        }}
-                      />
-                      <div>
-                        <p className="text-sm font-semibold text-[var(--color-text-primary)]">
-                          {streamer.name}
-                        </p>
-                        <p className="text-xs text-[var(--color-text-secondary)]">
-                          {streamer.viewers}
-                        </p>
-                      </div>
-                    </div>
-                    <span
-                      className="text-xs font-mono font-semibold px-2 py-1 rounded"
+                {flowSteps.map((step) => {
+                  const Icon = step.icon;
+
+                  return (
+                    <motion.div
+                      key={step.title}
+                      variants={rowVariants}
+                      className="bg-[var(--color-bg)]/50 rounded-lg p-4 flex items-start gap-4"
                       style={{
-                        color: streamer.highlight
-                          ? "var(--color-accent)"
-                          : "var(--color-text-secondary)",
-                        background: streamer.highlight
-                          ? "rgba(16,183,173,0.12)"
-                          : "rgba(155,179,197,0.08)",
+                        border: step.highlight
+                          ? "1px solid rgba(16,183,173,0.35)"
+                          : "1px solid var(--color-border)",
                       }}
                     >
-                      {streamer.score}
-                    </span>
-                  </motion.div>
-                ))}
-              </motion.div>
+                      <div
+                        className="w-11 h-11 rounded-xl shrink-0 flex items-center justify-center"
+                        style={{
+                          background: step.highlight
+                            ? "linear-gradient(135deg, rgba(255,122,24,0.22), rgba(16,183,173,0.2))"
+                            : "rgba(155,179,197,0.08)",
+                          border: step.highlight
+                            ? "1px solid rgba(16,183,173,0.24)"
+                            : "1px solid rgba(155,179,197,0.12)",
+                        }}
+                      >
+                        <Icon
+                          size={18}
+                          className={
+                            step.highlight
+                              ? "text-[var(--color-accent)]"
+                              : "text-[var(--color-text-secondary)]"
+                          }
+                        />
+                      </div>
 
-              {/* CTA mock button */}
-              <div className="gradient-accent rounded-lg px-4 py-2 text-sm text-white w-full text-center mt-4 font-semibold select-none">
-                Auto-Raid → Empfohlenes Ziel
-              </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold text-[var(--color-text-primary)]">
+                          {step.title}
+                        </p>
+                        <p className="text-xs text-[var(--color-text-secondary)] mt-2 leading-relaxed">
+                          {step.description}
+                        </p>
+                      </div>
+                    </motion.div>
+                  );
+                })}
+
+                <motion.div
+                  variants={rowVariants}
+                  className="rounded-xl p-4"
+                  style={{
+                    border: "1px solid rgba(16,183,173,0.2)",
+                    background:
+                      "linear-gradient(135deg, rgba(255,122,24,0.1), rgba(16,183,173,0.08))",
+                  }}
+                >
+                  <div className="flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--color-accent)]">
+                    <span>Offline</span>
+                    <ArrowRight size={14} />
+                    <span>Partner</span>
+                    <ArrowRight size={14} />
+                    <span>Raid</span>
+                  </div>
+
+                  <p className="text-sm text-[var(--color-text-primary)] mt-3 leading-relaxed">
+                    So bleibt eure Community in Bewegung und der Stream endet
+                    nicht einfach im Leeren.
+                  </p>
+                </motion.div>
+              </motion.div>
             </div>
           </ScrollReveal>
 
