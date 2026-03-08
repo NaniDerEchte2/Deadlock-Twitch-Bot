@@ -57,6 +57,16 @@ class PartnerRaidScoreTrackingTests(unittest.TestCase):
             """,
             ("wrong-source", "source_login", "2002", "target_login", _iso_utc(confirmed_at)),
         )
+        conn.execute(
+            """
+            INSERT INTO twitch_raid_history (
+                from_broadcaster_id, from_broadcaster_login,
+                to_broadcaster_id, to_broadcaster_login,
+                executed_at, success
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("1001", "source_login", "2002", "target_login", _iso_utc(confirmed_at + timedelta(minutes=1)), False),
+        )
         conn.commit()
 
         with patch(

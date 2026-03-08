@@ -130,6 +130,19 @@ class PartnerRaidScoreCacheTests(unittest.TestCase):
             """,
             ("s2", "sender_two", "1001", "alpha", _iso_utc(now - timedelta(days=1))),
         )
+        conn.execute(
+            """
+            INSERT INTO twitch_raid_history (
+                from_broadcaster_id,
+                from_broadcaster_login,
+                to_broadcaster_id,
+                to_broadcaster_login,
+                executed_at,
+                success
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("s3", "sender_three", "1001", "alpha", _iso_utc(now - timedelta(minutes=30)), False),
+        )
 
         row = service.refresh_partner_score("1001", now=now)
 

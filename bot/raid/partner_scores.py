@@ -359,7 +359,7 @@ class PartnerRaidScoreService:
             "SELECT to_broadcaster_id, executed_at "
             "FROM twitch_raid_history "
             f"WHERE to_broadcaster_id IN ({_placeholders(user_ids)}) "
-            "AND COALESCE(success, 0) = 1",
+            "AND COALESCE(success, FALSE) IS TRUE",
             list(user_ids),
         ).fetchall()
         raid_timestamps: dict[str, list[datetime]] = {user_id: [] for user_id in user_ids}

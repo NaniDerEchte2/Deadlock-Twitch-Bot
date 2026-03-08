@@ -726,6 +726,23 @@ def ensure_schema(conn) -> None:
             )
             return False
 
+    def _column_data_type(table: str, column: str) -> str | None:
+        """Return the normalized information_schema data_type for a column."""
+        try:
+            row = conn.execute(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = %s AND column_name = %s",
+                (table, column),
+            ).fetchone()
+            if not row:
+                return None
+            value = row[0] if not hasattr(row, "keys") else row["data_type"]
+            normalized = str(value or "").strip().lower()
+            return normalized or None
+        except Exception as exc:
+            log.debug("Could not inspect column type for %s.%s: %s", table, column, exc)
+            return None
+
     def _decompress_compressed_chunks(table: str) -> bool:
         """Decompress all compressed chunks for a hypertable. Returns success flag."""
         try:
@@ -1195,7 +1212,7 @@ def ensure_schema(conn) -> None:
             stream_duration_sec      INTEGER,
             reason                   TEXT,
             executed_at              TEXT DEFAULT CURRENT_TIMESTAMP,
-            success                  INTEGER DEFAULT 1,
+            success                  BOOLEAN DEFAULT TRUE,
             error_message            TEXT,
             target_stream_started_at TEXT,
             candidates_count         INTEGER DEFAULT 0
@@ -1211,6 +1228,27 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_twitch_raid_history_executed ON twitch_raid_history(executed_at)"
     )
+    raid_history_success_type = _column_data_type("twitch_raid_history", "success")
+    if raid_history_success_type and raid_history_success_type != "boolean":
+        try:
+            conn.execute(
+                """
+                ALTER TABLE twitch_raid_history
+                ALTER COLUMN success TYPE BOOLEAN
+                USING CASE
+                    WHEN success IS NULL THEN FALSE
+                    WHEN LOWER(BTRIM(success::text)) IN ('1', 'true', 't', 'yes', 'y', 'on') THEN TRUE
+                    ELSE FALSE
+                END
+                """
+            )
+            log.info("DB migration: converted twitch_raid_history.success to BOOLEAN")
+        except Exception as exc:
+            log.warning("DB migration: could not convert twitch_raid_history.success to BOOLEAN: %s", exc)
+    try:
+        conn.execute("ALTER TABLE twitch_raid_history ALTER COLUMN success SET DEFAULT TRUE")
+    except Exception as exc:
+        log.debug("Skipping default migration on twitch_raid_history.success: %s", exc)
     # Ältere Deployments hatten auf twitch_raid_history kein Primary/Unique-Key.
     # Der FK von twitch_raid_retention -> twitch_raid_history(id) schlägt dann fehl.
     raid_history_has_unique_index = _has_unique_constraint("twitch_raid_history", ["id"])

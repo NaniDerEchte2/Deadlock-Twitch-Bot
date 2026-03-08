@@ -327,7 +327,8 @@ class RaidCommandsMixin:
         with get_conn() as conn:
             history = conn.execute(
                 """
-                SELECT COUNT(*) as total, SUM(success) as successful
+                SELECT COUNT(*) as total,
+                       SUM(CASE WHEN COALESCE(success, FALSE) IS TRUE THEN 1 ELSE 0 END) as successful
                 FROM twitch_raid_history
                 WHERE from_broadcaster_id = ?
                 """,

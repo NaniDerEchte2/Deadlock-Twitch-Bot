@@ -148,7 +148,7 @@ def _load_raid_history_id(
               AND LOWER(to_broadcaster_login) = LOWER(?)
               AND from_broadcaster_id = ?
               AND LOWER(from_broadcaster_login) = LOWER(?)
-              AND COALESCE(success, 0) = 1
+              AND COALESCE(success, FALSE) IS TRUE
             ORDER BY id DESC
             LIMIT 1
             """,
@@ -164,7 +164,7 @@ def _load_raid_history_id(
         WHERE to_broadcaster_id = ?
           AND LOWER(to_broadcaster_login) = LOWER(?)
           AND LOWER(from_broadcaster_login) = LOWER(?)
-          AND COALESCE(success, 0) = 1
+          AND COALESCE(success, FALSE) IS TRUE
         ORDER BY id DESC
         LIMIT 1
         """,
