@@ -1,331 +1,263 @@
 import { useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { Sparkles, Flame, Heart } from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  BarChart3,
+  Brain,
+  CalendarRange,
+  GraduationCap,
+  LayoutDashboard,
+  MessageSquare,
+  Sparkles,
+  Target,
+  UserSearch,
+  Users,
+} from "lucide-react";
 import { SectionHeading } from "@/components/ui/SectionHeading";
 import { BrowserMockup } from "@/components/ui/BrowserMockup";
 import { ScrollReveal } from "@/components/ui/ScrollReveal";
 
-// ---------------------------------------------------------------------------
-// Tab definitions
-// ---------------------------------------------------------------------------
+const DEMO_DASHBOARD_URL = "https://demo.earlysalty.com/twitch/demo/";
 
-const TABS = ["Übersicht", "Performance", "Heatmap", "Audience", "Health Score"] as const;
-type Tab = (typeof TABS)[number];
+const PRODUCT_TABS: Array<{ id: string; label: string; beta?: boolean }> = [
+  { id: "overview", label: "Übersicht" },
+  { id: "streams", label: "Streams" },
+  { id: "chat", label: "Chat" },
+  { id: "growth", label: "Wachstum" },
+  { id: "audience", label: "Audience" },
+  { id: "viewers", label: "Viewer" },
+  { id: "compare", label: "Vergleich" },
+  { id: "schedule", label: "Zeitplan" },
+  { id: "coaching", label: "Coaching" },
+  { id: "monetization", label: "Monetization" },
+  { id: "category", label: "Kategorie" },
+  { id: "experimental", label: "Labor", beta: true },
+  { id: "ai", label: "KI Analyse", beta: true },
+] as const;
 
-// ---------------------------------------------------------------------------
-// Tab mock content
-// ---------------------------------------------------------------------------
+const TABS = [
+  {
+    id: "overview",
+    label: "Übersicht",
+    Icon: LayoutDashboard,
+    teaser: "Viewer, Peak, Chat und Momentum in einem schnellen Einstieg.",
+    title: "Alles Wichtige in einem Board",
+    description:
+      "Die Übersicht verdichtet die wichtigsten Signale, bevor du tiefer in Chat, Audience, Viewer, Wachstum oder Coaching gehst.",
+    stats: [
+      ["Ø Viewer", "142", "+12%"],
+      ["Peak", "218", "20:15"],
+      ["Chatters", "63", "starke Basis"],
+    ],
+    rows: [
+      ["Momentum", "19-22 Uhr"],
+      ["Retention", "68%"],
+      ["Fokus", "Chat + Viewer"],
+    ],
+    bars: [46, 54, 51, 67, 74, 88, 79],
+    signals: [
+      "Der schnelle Daily Check-in fuer Performance und Richtung.",
+      "Macht auffaellige Veraenderungen sichtbar, bevor man Details liest.",
+      "Perfekter Startpunkt fuer alle anderen Analytics-Tabs.",
+    ],
+  },
+  {
+    id: "chat",
+    label: "Chat",
+    Icon: MessageSquare,
+    teaser: "Chat-Tiefe, Aktivitaet und Wiederkehrer statt nur Message Count.",
+    title: "Chat als echte Community lesen",
+    description:
+      "Hier wird sichtbar, wann der Chat wirklich lebt, wie tief die Gespräche gehen und ob aus Aktivität echte Bindung entsteht.",
+    stats: [
+      ["Aktive Chatters", "91", "38 wiederkehrend"],
+      ["Penetration", "31%", "stark im Kernslot"],
+      ["Msg / 100 VM", "46.2", "gute Tiefe"],
+    ],
+    rows: [
+      ["Peak", "20:15"],
+      ["Return Rate", "42%"],
+      ["Hype", "3 Spikes"],
+    ],
+    bars: [18, 26, 22, 28, 37, 52, 64, 78, 61, 46, 33, 24],
+    signals: [
+      "Peak-Momente und Tageszeit-Signale werden sofort lesbar.",
+      "Neue und wiederkehrende Chatter lassen sich klar trennen.",
+      "Hilft, Unterhaltung statt nur Aktivitaet zu bewerten.",
+    ],
+  },
+  {
+    id: "audience",
+    label: "Audience",
+    Icon: Target,
+    teaser: "Core Audience, Discovery und Cross-Community sauber getrennt.",
+    title: "Audience mit echtem Kontext",
+    description:
+      "Audience zeigt nicht nur, wie viele Leute da waren, sondern welche Gruppen bleiben, entdecken oder über Partner-Netzwerke ankommen.",
+    stats: [
+      ["Core", "46%", "wiederkehrend"],
+      ["Neu", "28%", "Discovery"],
+      ["Shared", "17%", "Partner-Fit"],
+    ],
+    rows: [
+      ["Watchtime", "34 Min."],
+      ["Discovery", "Do + Fr"],
+      ["Raid Fit", "hoch"],
+    ],
+    bars: [46, 28, 17, 9],
+    signals: [
+      "Zeigt, welche Reichweite wirklich Bindung aufbaut.",
+      "Hilft bei Raid-Entscheidungen und Partner-Matching.",
+      "Macht Cross-Community innerhalb des Netzwerks sichtbar.",
+    ],
+  },
+  {
+    id: "viewers",
+    label: "Viewer",
+    Icon: UserSearch,
+    teaser: "Viewer werden als Profile und Segmente lesbar, nicht nur als Zahl.",
+    title: "Viewer-Daten endlich nutzbar",
+    description:
+      "Der Viewer-Tab macht Wiederkehrer, Dormant Viewer und besonders wertvolle Community-Profile sichtbar.",
+    stats: [
+      ["Wiederkehrer", "58%", "mehrfach aktiv"],
+      ["Dormant", "24", "rueckholbar"],
+      ["High Value", "19", "Chat + Watchtime"],
+    ],
+    rows: [
+      ["Pool", "312"],
+      ["Core Layer", "74"],
+      ["Reactivation", "12"],
+    ],
+    bars: [58, 23, 19],
+    signals: [
+      "Hilft bei Rewards, Reaktivierung und Community-Pflege.",
+      "Macht Viewer-Verhalten über einzelne Streams hinaus sichtbar.",
+      "Verbindet Chat-, Audience- und Growth-Signale sinnvoll.",
+    ],
+  },
+  {
+    id: "growth",
+    label: "Wachstum",
+    Icon: BarChart3,
+    teaser: "Wachstum liest Titel, Timing, Trends und Raid-Retention zusammen.",
+    title: "Wachstum als Muster statt Zufall",
+    description:
+      "Hier laufen Monatsentwicklung, Tags, Titel, Wochentage und Raid-Retention zusammen, damit du den Grund hinter dem Wachstum erkennst.",
+    stats: [
+      ["Hours Watched", "18.4k", "+16%"],
+      ["Follower", "+412", "stabil"],
+      ["Raid Retention", "63%", "nach 10 Min."],
+    ],
+    rows: [
+      ["Bester Tag", "Donnerstag"],
+      ["Titel-Muster", "Road to"],
+      ["Sweet Spot", "19-22 Uhr"],
+    ],
+    bars: [42, 47, 56, 61, 74, 82],
+    signals: [
+      "Macht echte Wachstumshebel statt nur Endwerte sichtbar.",
+      "Verbindet Schedule, Titel und Reichweite in einer Sicht.",
+      "Zeigt, ob Partner-Raids nachhaltig weitertragen.",
+    ],
+  },
+  {
+    id: "coaching",
+    label: "Coaching",
+    Icon: GraduationCap,
+    teaser: "Analytics wird in konkrete nächste Schritte übersetzt.",
+    title: "Coaching macht Analytics handlungsfaehig",
+    description:
+      "Der Coaching-Tab verdichtet Daten in priorisierte Empfehlungen für Timing, Titel, Retention, Community und Netzwerk.",
+    stats: [
+      ["Top Hebel", "3", "priorisiert"],
+      ["Gap", "6%", "zum Peer-Cluster"],
+      ["Effizienz", "1.8x", "Viewer-Hours"],
+    ],
+    rows: [
+      ["Prioritaet 1", "Startzeit"],
+      ["Titel-Coach", "Ranked + Ziel"],
+      ["Netzwerk", "aktiv"],
+    ],
+    bars: [86, 74, 69],
+    signals: [
+      "Bringt Analyse und konkrete Maßnahmen zusammen.",
+      "Gibt Daten durch Peer-Vergleiche einen Maßstab.",
+      "Hilft direkt bei Content-, Titel- und Timing-Entscheidungen.",
+    ],
+  },
+] as const;
 
-function TabÜbersicht() {
-  return (
-    <div className="h-full flex flex-col gap-4">
-      {/* KPI row */}
-      <div className="grid grid-cols-4 gap-3">
-        {[
-          { label: "Avg. Viewer", color: "#ff7a18" },
-          { label: "Peak Viewer", color: "#10b7ad" },
-          { label: "Stunden", color: "#2ecc71" },
-          { label: "Follower", color: "#f5b642" },
-        ].map(({ label, color }) => (
-          <div
-            key={label}
-            className="rounded-lg p-3 flex flex-col gap-2"
-            style={{ background: "rgba(255,255,255,0.04)", border: "1px solid var(--color-border)" }}
-          >
-            <div className="h-2 rounded-full w-3/4" style={{ background: color, opacity: 0.7 }} />
-            <div className="h-5 rounded w-1/2" style={{ background: color }} />
-            <p className="text-xs text-[var(--color-text-secondary)]">{label}</p>
-          </div>
-        ))}
-      </div>
-      {/* Chart placeholder */}
-      <div
-        className="flex-1 rounded-xl p-4 flex flex-col justify-end gap-1"
-        style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--color-border)" }}
-      >
-        <p className="text-xs text-[var(--color-text-secondary)] mb-2">Viewer-Verlauf (7 Tage)</p>
-        <div className="flex items-end gap-1.5 h-20">
-          {[45, 62, 55, 80, 70, 90, 76].map((h, i) => (
-            <div
-              key={i}
-              className="flex-1 rounded-t"
-              style={{
-                height: `${h}%`,
-                background: `linear-gradient(180deg, #ff7a18 0%, rgba(255,122,24,0.3) 100%)`,
-                opacity: 0.75,
-              }}
-            />
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function TabPerformance() {
-  const bars = [
-    { label: "Engagement Rate", value: 82, color: "#ff7a18" },
-    { label: "Chat Activity", value: 67, color: "#10b7ad" },
-    { label: "Viewer Retention", value: 74, color: "#2ecc71" },
-    { label: "Follower Growth", value: 55, color: "#f5b642" },
-    { label: "Clip Views", value: 91, color: "#a78bfa" },
-  ];
-  return (
-    <div className="h-full flex flex-col justify-center gap-4 py-4">
-      <p className="text-xs text-[var(--color-text-secondary)] mb-1">Stream-Performance Metriken</p>
-      {bars.map(({ label, value, color }) => (
-        <div key={label} className="flex items-center gap-3">
-          <p className="text-xs text-[var(--color-text-secondary)] w-36 shrink-0">{label}</p>
-          <div className="flex-1 h-3 rounded-full" style={{ background: "rgba(255,255,255,0.06)" }}>
-            <div
-              className="h-full rounded-full"
-              style={{ width: `${value}%`, background: color, opacity: 0.85 }}
-            />
-          </div>
-          <p className="text-xs font-mono text-[var(--color-text-primary)] w-8 text-right">{value}%</p>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function TabHeatmap() {
-  const cols = 12;
-  const rows = 6;
-  return (
-    <div className="h-full flex flex-col gap-3">
-      <p className="text-xs text-[var(--color-text-secondary)]">Viewer-Aktivität nach Stunde / Wochentag</p>
-      <div className="flex-1 flex flex-col gap-1">
-        {Array.from({ length: rows }).map((_, r) => (
-          <div key={r} className="flex gap-1 flex-1">
-            {Array.from({ length: cols }).map((_, c) => {
-              const intensity = Math.random();
-              const isOrange = intensity > 0.6;
-              const isTeal = intensity > 0.35 && !isOrange;
-              const bg = isOrange
-                ? `rgba(255,122,24,${0.3 + intensity * 0.7})`
-                : isTeal
-                ? `rgba(16,183,173,${0.25 + intensity * 0.6})`
-                : `rgba(255,255,255,0.05)`;
-              return (
-                <div
-                  key={c}
-                  className="flex-1 rounded-sm"
-                  style={{ background: bg }}
-                />
-              );
-            })}
-          </div>
-        ))}
-      </div>
-      <div className="flex items-center gap-3 mt-1">
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded-sm" style={{ background: "rgba(255,122,24,0.8)" }} />
-          <span className="text-xs text-[var(--color-text-secondary)]">Hoch</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded-sm" style={{ background: "rgba(16,183,173,0.7)" }} />
-          <span className="text-xs text-[var(--color-text-secondary)]">Mittel</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded-sm" style={{ background: "rgba(255,255,255,0.08)" }} />
-          <span className="text-xs text-[var(--color-text-secondary)]">Niedrig</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function TabAudience() {
-  const segments = [
-    { label: "Stammzuschauer", pct: 42, color: "#ff7a18" },
-    { label: "Gelegentlich", pct: 31, color: "#10b7ad" },
-    { label: "Neu", pct: 27, color: "#2ecc71" },
-  ];
-  // Simple donut ring using conic-gradient
-  const conicStr = `conic-gradient(#ff7a18 0% 42%, #10b7ad 42% 73%, #2ecc71 73% 100%)`;
-  return (
-    <div className="h-full flex items-center gap-8">
-      {/* Donut */}
-      <div className="shrink-0 flex items-center justify-center">
-        <div
-          className="w-32 h-32 rounded-full flex items-center justify-center"
-          style={{ background: conicStr }}
-        >
-          <div
-            className="w-20 h-20 rounded-full flex flex-col items-center justify-center"
-            style={{ background: "var(--color-card)" }}
-          >
-            <p className="text-lg font-bold text-[var(--color-text-primary)]">42%</p>
-            <p className="text-[10px] text-[var(--color-text-secondary)]">Stamm</p>
-          </div>
-        </div>
-      </div>
-      {/* Legend + stats */}
-      <div className="flex-1 space-y-4">
-        {segments.map(({ label, pct, color }) => (
-          <div key={label} className="flex items-center gap-3">
-            <div className="w-3 h-3 rounded-full shrink-0" style={{ background: color }} />
-            <p className="text-sm text-[var(--color-text-secondary)] flex-1">{label}</p>
-            <p className="text-sm font-semibold text-[var(--color-text-primary)]">{pct}%</p>
-          </div>
-        ))}
-        <div
-          className="mt-2 rounded-lg p-3"
-          style={{ background: "rgba(255,255,255,0.04)", border: "1px solid var(--color-border)" }}
-        >
-          <p className="text-xs text-[var(--color-text-secondary)]">Avg. Beobachtungszeit</p>
-          <p className="text-lg font-bold text-[var(--color-text-primary)]">34 Min.</p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function TabHealthScore() {
-  const score = 87;
-  const circumference = 2 * Math.PI * 44; // r=44
-  const strokeDashoffset = circumference - (score / 100) * circumference;
-  return (
-    <div className="h-full flex flex-col items-center justify-center gap-6">
-      <p className="text-xs text-[var(--color-text-secondary)]">Kanal-Gesundheitsscore</p>
-      {/* Circular progress */}
-      <div className="relative">
-        <svg width="140" height="140" viewBox="0 0 100 100">
-          {/* Track */}
-          <circle cx="50" cy="50" r="44" fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="8" />
-          {/* Progress arc */}
-          <circle
-            cx="50"
-            cy="50"
-            r="44"
-            fill="none"
-            stroke="url(#hsGrad)"
-            strokeWidth="8"
-            strokeLinecap="round"
-            strokeDasharray={circumference}
-            strokeDashoffset={strokeDashoffset}
-            transform="rotate(-90 50 50)"
-          />
-          <defs>
-            <linearGradient id="hsGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#ff7a18" />
-              <stop offset="100%" stopColor="#10b7ad" />
-            </linearGradient>
-          </defs>
-        </svg>
-        <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <p className="text-3xl font-bold text-[var(--color-text-primary)]">{score}</p>
-          <p className="text-xs text-[var(--color-text-secondary)]">/ 100</p>
-        </div>
-      </div>
-      {/* Sub-scores */}
-      <div className="grid grid-cols-3 gap-3 w-full max-w-xs">
-        {[
-          { label: "Wachstum", v: 91, c: "#2ecc71" },
-          { label: "Aktivität", v: 84, c: "#ff7a18" },
-          { label: "Bindung", v: 86, c: "#10b7ad" },
-        ].map(({ label, v, c }) => (
-          <div
-            key={label}
-            className="rounded-lg p-2 text-center"
-            style={{ background: "rgba(255,255,255,0.04)", border: "1px solid var(--color-border)" }}
-          >
-            <p className="text-base font-bold" style={{ color: c }}>{v}</p>
-            <p className="text-[10px] text-[var(--color-text-secondary)]">{label}</p>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Tab content router
-// ---------------------------------------------------------------------------
-
-function TabContent({ tab }: { tab: Tab }) {
-  return (
-    <div className="aspect-video bg-gradient-to-br from-[var(--color-card)] to-[var(--color-bg)] rounded-lg p-8">
-      {tab === "Übersicht" && <TabÜbersicht />}
-      {tab === "Performance" && <TabPerformance />}
-      {tab === "Heatmap" && <TabHeatmap />}
-      {tab === "Audience" && <TabAudience />}
-      {tab === "Health Score" && <TabHealthScore />}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Callout cards
-// ---------------------------------------------------------------------------
+type DemoTabId = (typeof TABS)[number]["id"];
 
 const callouts = [
   {
+    Icon: LayoutDashboard,
+    title: "13 echte Perspektiven",
+    description:
+      "Neben der Vorschau gehören auch Streams, Vergleich, Zeitplan, Kategorie, Monetization, Labor und KI Analyse zum Produkt.",
+  },
+  {
+    Icon: Users,
+    title: "Viewer mit Struktur",
+    description:
+      "Nicht nur Durchschnittswerte: Wiederkehrer, Discovery, Core Audience und Cross-Community lassen sich getrennt lesen.",
+  },
+  {
     Icon: Sparkles,
-    title: "KI-Coaching",
+    title: "Coaching mit Kontext",
     description:
-      "Personalisierte Verbesserungsvorschläge basierend auf deinen Stream-Daten",
-  },
-  {
-    Icon: Flame,
-    title: "Echtzeit-Heatmaps",
-    description:
-      "Visualisiere Viewer-Aktivität ueber den gesamten Stream",
-  },
-  {
-    Icon: Heart,
-    title: "Health Score",
-    description:
-      "Ganzheitliche Bewertung deiner Kanal-Gesundheit",
+      "Empfehlungen entstehen aus Timing, Titeln, Retention, Konkurrenz und Netzwerk statt aus isolierten Metriken.",
   },
 ];
 
-// ---------------------------------------------------------------------------
-// Main export
-// ---------------------------------------------------------------------------
-
 export function Dashboard() {
-  const [activeTab, setActiveTab] = useState<Tab>("Übersicht");
+  const [activeTab, setActiveTab] = useState<DemoTabId>("chat");
+  const activeDemo = TABS.find((tab) => tab.id === activeTab) ?? TABS[0];
+  const secondaryTabs = PRODUCT_TABS.filter(
+    (tab) => !TABS.some((previewTab) => previewTab.id === tab.id),
+  );
 
   return (
     <section id="dashboard" className="py-24">
       <div className="max-w-7xl mx-auto px-6">
-
-        {/* Heading */}
         <SectionHeading
           badge="Analytics"
           title="Analytics auf einem neuen Level"
-          subtitle="13 spezialisierte Tabs für jeden Aspekt deines Streams."
+          subtitle="13 spezialisierte Tabs fuer jeden Aspekt deines Streams. Chat, Audience, Viewer, Wachstum und Coaching greifen direkt ineinander statt isoliert nebeneinander zu stehen."
         />
 
-        {/* Tab selector */}
         <ScrollReveal delay={0.1}>
           <div className="mt-12 flex flex-wrap gap-2 justify-center">
             {TABS.map((tab) => {
-              const isActive = tab === activeTab;
+              const isActive = tab.id === activeTab;
+              const Icon = tab.Icon;
+
               return (
                 <button
-                  key={tab}
-                  onClick={() => setActiveTab(tab)}
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
                   className={[
-                    "rounded-lg px-4 py-2 text-sm transition",
+                    "rounded-lg px-4 py-2 text-sm transition inline-flex items-center gap-2",
                     isActive
                       ? "gradient-accent text-white"
                       : "bg-[var(--color-card)] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]",
                   ].join(" ")}
                 >
-                  {tab}
+                  <Icon size={16} />
+                  {tab.label}
                 </button>
               );
             })}
           </div>
+
+          <p className="mt-4 text-center text-sm text-[var(--color-text-secondary)] max-w-3xl mx-auto">
+            {activeDemo.teaser}
+          </p>
         </ScrollReveal>
 
-        {/* Browser mockup + animated tab content */}
         <ScrollReveal delay={0.15}>
           <div className="mt-8">
-            <BrowserMockup url="demo.earlysalty.com">
+            <BrowserMockup url="demo.earlysalty.com/twitch/demo">
               <AnimatePresence mode="wait">
                 <motion.div
                   key={activeTab}
@@ -333,16 +265,199 @@ export function Dashboard() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -8 }}
                   transition={{ duration: 0.28, ease: "easeOut" }}
-                  className="p-4"
+                  className="bg-[radial-gradient(circle_at_top_right,rgba(255,122,24,0.16),transparent_32%),radial-gradient(circle_at_bottom_left,rgba(16,183,173,0.18),transparent_30%),linear-gradient(180deg,rgba(7,21,29,0.96),rgba(10,29,41,0.96))] p-4 md:p-5"
                 >
-                  <TabContent tab={activeTab} />
+                  <div className="rounded-2xl border border-[var(--color-border)] bg-[rgba(7,21,29,0.62)] p-3 md:p-4">
+                    <div className="flex flex-col gap-4">
+                      <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+                        <div className="max-w-2xl">
+                          <span className="inline-flex items-center gap-2 rounded-full border border-[rgba(16,183,173,0.24)] bg-[rgba(16,183,173,0.12)] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--color-accent)]">
+                            Produktvorschau
+                          </span>
+                          <h3 className="mt-3 text-lg font-semibold text-[var(--color-text-primary)] md:text-xl">
+                            {activeDemo.title}
+                          </h3>
+                          <p className="mt-2 max-w-xl text-sm leading-relaxed text-[var(--color-text-secondary)]">
+                            {activeDemo.description}
+                          </p>
+                        </div>
+
+                        <div className="grid gap-2 rounded-2xl border border-[var(--color-border)] bg-[rgba(255,255,255,0.03)] p-4 text-sm text-[var(--color-text-secondary)] sm:grid-cols-3 xl:min-w-[340px] xl:grid-cols-1">
+                          <div className="flex items-center gap-2">
+                            <LayoutDashboard className="h-4 w-4 text-[var(--color-primary)]" />
+                            13 Tabs im Produkt
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <CalendarRange className="h-4 w-4 text-[var(--color-accent)]" />
+                            Fokus auf 30 Tage
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Brain className="h-4 w-4 text-[var(--color-success)]" />
+                            Direkt auf der Website
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2">
+                        {PRODUCT_TABS.map((tab) => {
+                          const isActive = tab.id === activeTab;
+                          const isPreviewed = TABS.some((previewTab) => previewTab.id === tab.id);
+
+                          return (
+                            <span
+                              key={tab.id}
+                              className={[
+                                "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium",
+                                isActive
+                                  ? "border-transparent gradient-accent text-white"
+                                  : "border-[var(--color-border)] bg-[rgba(255,255,255,0.03)] text-[var(--color-text-secondary)]",
+                              ].join(" ")}
+                            >
+                              {tab.label}
+                              {tab.beta ? (
+                                <span className="rounded-full border border-[rgba(255,255,255,0.18)] px-1.5 py-0.5 text-[9px] uppercase tracking-[0.12em]">
+                                  Beta
+                                </span>
+                              ) : null}
+                              {!isPreviewed && !tab.beta ? (
+                                <span className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-accent)]">
+                                  live
+                                </span>
+                              ) : null}
+                            </span>
+                          );
+                        })}
+                      </div>
+
+                      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_320px]">
+                        <div className="space-y-4">
+                          <div className="grid gap-3 sm:grid-cols-3">
+                            {activeDemo.stats.map(([label, value, detail], index) => (
+                              <div
+                                key={label}
+                                className="rounded-2xl border border-[var(--color-border)] bg-[rgba(8,24,33,0.84)] p-4"
+                              >
+                                <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--color-text-secondary)]">
+                                  {label}
+                                </p>
+                                <div className="mt-3 display-font text-3xl font-bold text-[var(--color-text-primary)]">
+                                  {value}
+                                </div>
+                                <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
+                                  {detail}
+                                </p>
+                                <div
+                                  className={`mt-4 h-1.5 rounded-full ${
+                                    index === 0
+                                      ? "bg-[rgba(255,122,24,0.78)]"
+                                      : index === 1
+                                      ? "bg-[rgba(16,183,173,0.78)]"
+                                      : "bg-[rgba(46,204,113,0.78)]"
+                                  }`}
+                                />
+                              </div>
+                            ))}
+                          </div>
+
+                          <div className="rounded-2xl border border-[var(--color-border)] bg-[rgba(6,18,25,0.65)] p-4 md:p-5">
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                              <div>
+                                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--color-accent)]">
+                                  Analytics Preview
+                                </p>
+                                <h4 className="mt-1 text-base font-semibold text-[var(--color-text-primary)]">
+                                  {activeDemo.label} im Fokus
+                                </h4>
+                              </div>
+                              <span className="rounded-full border border-[var(--color-border)] bg-[rgba(255,255,255,0.03)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">
+                                30 Tage
+                              </span>
+                            </div>
+
+                            <div className="mt-6 flex h-44 items-end gap-2">
+                              {activeDemo.bars.map((bar, index) => (
+                                <div key={`${activeDemo.id}-${index}`} className="flex flex-1 flex-col items-center gap-3">
+                                  <div className="relative flex h-full w-full items-end">
+                                    <div
+                                      className={`w-full rounded-t-xl ${
+                                        index === activeDemo.bars.length - 1
+                                          ? "bg-gradient-to-t from-[rgba(16,183,173,0.28)] to-[rgba(16,183,173,0.96)]"
+                                          : "bg-gradient-to-t from-[rgba(255,122,24,0.28)] to-[rgba(255,122,24,0.9)]"
+                                      }`}
+                                      style={{ height: `${bar}%` }}
+                                    />
+                                  </div>
+                                  <span className="text-[10px] text-[var(--color-text-secondary)]">
+                                    {index + 1}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+
+                            <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                              {activeDemo.rows.map(([label, value]) => (
+                                <div
+                                  key={label}
+                                  className="rounded-xl border border-[var(--color-border)] bg-[rgba(255,255,255,0.03)] p-3"
+                                >
+                                  <p className="text-xs uppercase tracking-[0.14em] text-[var(--color-text-secondary)]">
+                                    {label}
+                                  </p>
+                                  <p className="mt-2 text-sm font-semibold text-[var(--color-text-primary)]">
+                                    {value}
+                                  </p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+
+                        <aside className="panel-card rounded-2xl p-5">
+                          <div className="w-fit rounded-full border border-[rgba(255,122,24,0.24)] bg-[rgba(255,122,24,0.12)] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--color-primary)]">
+                            {activeDemo.label} Tab
+                          </div>
+
+                          <p className="mt-4 text-sm leading-relaxed text-[var(--color-text-secondary)]">
+                            {activeDemo.description}
+                          </p>
+
+                          <div className="mt-6 space-y-3">
+                            {activeDemo.signals.map((signal) => (
+                              <div
+                                key={signal}
+                                className="flex items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[rgba(255,255,255,0.03)] px-3 py-3 text-sm text-[var(--color-text-secondary)]"
+                              >
+                                <span className="mt-1 h-2 w-2 rounded-full bg-[var(--color-accent)]" />
+                                <span>{signal}</span>
+                              </div>
+                            ))}
+                          </div>
+
+                          <div className="mt-6 rounded-2xl border border-[var(--color-border)] bg-[rgba(255,255,255,0.03)] p-4">
+                            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-text-secondary)]">
+                              Weitere Tabs live im Produkt
+                            </p>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              {secondaryTabs.map((tab) => (
+                                <span
+                                  key={tab.id}
+                                  className="rounded-full border border-[var(--color-border)] bg-[rgba(7,21,29,0.75)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)]"
+                                >
+                                  {tab.label}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        </aside>
+                      </div>
+                    </div>
+                  </div>
                 </motion.div>
               </AnimatePresence>
             </BrowserMockup>
           </div>
         </ScrollReveal>
 
-        {/* Callout cards */}
         <ScrollReveal delay={0.2}>
           <div className="mt-12 grid grid-cols-1 md:grid-cols-3 gap-6">
             {callouts.map(({ Icon, title, description }, i) => (
@@ -368,18 +483,16 @@ export function Dashboard() {
           </div>
         </ScrollReveal>
 
-        {/* CTA link */}
         <div className="mt-10 text-center">
           <a
-            href="https://demo.earlysalty.com"
+            href={DEMO_DASHBOARD_URL}
             target="_blank"
             rel="noopener noreferrer"
             className="text-[var(--color-primary)] hover:text-[var(--color-primary-hover)] font-semibold transition"
           >
-            Demo Dashboard ansehen →
+            Komplettes Demo-Dashboard ansehen →
           </a>
         </div>
-
       </div>
     </section>
   );

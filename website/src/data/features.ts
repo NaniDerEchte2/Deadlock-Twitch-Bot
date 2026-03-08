@@ -18,7 +18,7 @@ export const features: Feature[] = [
     icon: "BarChart2",
     title: "Analytics",
     description:
-      "Echtzeit-Dashboard mit 13 Tabs und KI-Coaching – verfolge Viewer-Zahlen, Peak-Stunden, Follower-Wachstum und erhalte personalisierte Optimierungsvorschläge.",
+      "Echtzeit-Dashboard mit 13 Tabs – von Chat und Audience bis Viewer, Wachstum und Coaching. Erkenne schneller, was deinen Stream wirklich nach vorne bringt.",
   },
   {
     id: "clip-manager",
