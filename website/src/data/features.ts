@@ -11,7 +11,7 @@ export const features: Feature[] = [
     icon: "Swords",
     title: "Auto-Raid",
     description:
-      "Intelligentes Raid-System mit fairem Algorithmus – verteilt Raids automatisch an aktive Streamer für gegenseitige Unterstützung.",
+      "Auto-Raid hält eure Community in Bewegung: Endet ein Deadlock-Stream, wird sie automatisch an einen passenden Live-Partner weitergegeben. Manuelle Raids bleiben jederzeit möglich.",
   },
   {
     id: "analytics",

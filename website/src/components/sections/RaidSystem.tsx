@@ -5,31 +5,31 @@ import { GradientText } from "@/components/ui/GradientText";
 
 const features = [
   {
-    title: "Fairer Algorithmus",
+    title: "Fließende Übergänge",
     description:
-      "Gewichtetes System basierend auf letztem Raid-Zeitpunkt und Viewer-Overlap",
+      "Aus einer beendeten Session wird direkt der Einstieg in den nächsten passenden Live-Stream.",
   },
   {
-    title: "Viewer-Tracking",
+    title: "Passende Partner-Ziele",
     description:
-      "Echtzeit-Erfassung der Viewer-Zahlen aller Partner-Kanäle",
+      "Bevorzugt werden aktive Partner aus dem Netzwerk, damit Zuschauer im Deadlock-Umfeld bleiben.",
   },
   {
-    title: "Erfolgsstatistiken",
+    title: "Mehr Sichtbarkeit für alle",
     description:
-      "Detaillierte Auswertung jedes Raids mit Viewer-Retention",
+      "Viewer werden sinnvoll weitergeleitet, sodass große und kleine Creator gemeinsam von mehr Discoverability profitieren.",
   },
   {
-    title: "Silent Mode",
+    title: "Volle Kontrolle",
     description:
-      "Automatische Raids ohne Chat-Ankündigung möglich",
+      "Automatisierung, wenn sie hilft; manuelle Raids bleiben jederzeit Teil eures eigenen Ablaufs.",
   },
 ];
 
 const streamers = [
-  { name: "StreamerA", viewers: "142 Viewer", score: "Score: 0.94", highlight: true },
-  { name: "StreamerB", viewers: "87 Viewer", score: "Score: 0.71", highlight: false },
-  { name: "StreamerC", viewers: "203 Viewer", score: "Score: 0.58", highlight: false },
+  { name: "Live-Partner A", viewers: "Deadlock live", score: "Empfohlen", highlight: true },
+  { name: "Live-Partner B", viewers: "Community live", score: "Starke Option", highlight: false },
+  { name: "Live-Partner C", viewers: "Später Slot live", score: "Fallback", highlight: false },
 ];
 
 const containerVariants = {
@@ -63,8 +63,17 @@ export function RaidSystem() {
             </h2>
 
             <p className="text-[var(--color-text-secondary)] text-lg mb-8 leading-relaxed">
-              Unser Raid-System nutzt einen fairen Algorithmus, der sicherstellt,
-              dass alle Partner gleichmäßig Raids erhalten.
+              Unser Auto-Raid hält die Deadlock-Community in Bewegung. Endet ein
+              Partner-Stream nach einer Deadlock-Session, sucht das System
+              automatisch nach einem passenden Live-Partner und leitet die
+              Community direkt weiter.
+            </p>
+
+            <p className="text-[var(--color-text-secondary)] text-base mb-8 leading-relaxed">
+              Das sorgt für fließende Übergänge statt harter Stream-Enden: mehr
+              Sichtbarkeit, mehr gemeinsame Reichweite und mehr echte
+              Verbindungen im Netzwerk. Wer lieber selbst entscheidet, kann
+              natürlich weiterhin manuell raiden.
             </p>
 
             <ul className="space-y-4">
@@ -89,7 +98,7 @@ export function RaidSystem() {
           <ScrollReveal delay={0.2}>
             <div className="panel-card rounded-2xl p-8">
               <p className="text-lg font-semibold text-[var(--color-text-primary)] mb-6">
-                Raid-Auswahl
+                Bevorzugte Raid-Ziele
               </p>
 
               <motion.div
@@ -147,7 +156,7 @@ export function RaidSystem() {
 
               {/* CTA mock button */}
               <div className="gradient-accent rounded-lg px-4 py-2 text-sm text-white w-full text-center mt-4 font-semibold select-none">
-                Raid starten → StreamerA
+                Auto-Raid → Empfohlenes Ziel
               </div>
             </div>
           </ScrollReveal>

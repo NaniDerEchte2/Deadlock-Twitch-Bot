@@ -66,7 +66,8 @@ export function Hero() {
             className="mt-6 text-xl text-[var(--color-text-secondary)] max-w-2xl mx-auto"
           >
             Auto-Raid, Echtzeit-Analytics, Clip Manager und Community Tools —
-            Auto-Raid, Echtzeit-Analytics, Clip Manager und Community Tools — alles, was du brauchst, um in der Deadlock-Community zu wachsen.
+            alles, was du brauchst, um in der Deadlock-Community sichtbarer zu
+            werden und nachhaltig zu wachsen.
           </motion.p>
 
           {/* CTA Buttons */}
