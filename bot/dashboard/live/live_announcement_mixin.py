@@ -1171,428 +1171,425 @@ class DashboardLiveAnnouncementMixin:
   <title>Live Announcement Builder</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap');
-    :root {{
+    :root{{
       color-scheme:dark;
-      --bg:#07151d;
-      --card:#102635;
-      --card2:#0f2230;
-      --bd:rgba(194,221,240,.14);
-      --bd-strong:rgba(194,221,240,.3);
-      --txt:#e9f1f7;
-      --muted:#9bb3c5;
-      --primary:#ff7a18;
-      --primary-hover:#ff8d39;
-      --accent:#10b7ad;
-      --accent-hover:#1dd4ca;
-      --ok:#2ecc71;
-      --err:#ff6b5e;
-      --discord-bg:#313338;
-      --discord-card:#2b2d31;
-      --discord-embed:#1f2023;
-      --discord-link:#00a8fc;
-      --discord-btn:#5865f2;
-      --discord-btn-hover:#6d77ff;
+      --bg:#07151d;--card:#102635;--card2:#0f2230;
+      --bd:rgba(194,221,240,.14);--bd-strong:rgba(194,221,240,.3);
+      --txt:#e9f1f7;--muted:#9bb3c5;
+      --primary:#ff7a18;--primary-hover:#ff8d39;
+      --accent:#10b7ad;--accent-hover:#1dd4ca;
+      --ok:#2ecc71;--err:#ff6b5e;
+      --discord-bg:#313338;--discord-card:#2b2d31;
+      --discord-embed:#1f2023;--discord-link:#00a8fc;
+      --discord-btn:#5865f2;--discord-btn-hover:#6d77ff;
     }}
-    * {{ box-sizing:border-box; }}
-    body {{
-      margin:0;
-      padding:20px;
-      color:var(--txt);
-      font-family:"Manrope","Segoe UI",sans-serif;
-      background:
-        radial-gradient(1200px 520px at 90% -10%, rgba(255,122,24,.18), transparent 65%),
-        radial-gradient(900px 460px at 12% -20%, rgba(16,183,173,.24), transparent 60%),
-        linear-gradient(160deg, #07151d 0%, #081a24 55%, #0a202c 100%);
-      min-height:100vh;
-    }}
-    .layout {{ display:grid; grid-template-columns:1.1fr .9fr; gap:14px; align-items:start; }}
-    @media (max-width:1100px) {{ .layout {{ grid-template-columns:1fr; }} }}
-    .card {{
-      position:relative;
-      overflow:hidden;
-      background:linear-gradient(160deg, rgba(16,38,53,.92) 0%, rgba(10,30,42,.92) 100%);
-      border:1px solid var(--bd);
-      border-radius:16px;
-      padding:14px;
-      box-shadow:0 10px 30px rgba(0,0,0,.26), inset 0 1px 0 rgba(255,255,255,.05);
-      backdrop-filter:blur(10px);
-    }}
-    .card::after {{
-      content:"";
-      position:absolute;
-      inset:0;
-      pointer-events:none;
-      background:linear-gradient(120deg, rgba(255,255,255,.06), transparent 35%);
-      opacity:.35;
-    }}
-    .card > * {{ position:relative; z-index:1; }}
-    .top {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }}
-    .builder-stack {{ display:grid; gap:10px; }}
-    .cfg-block {{
-      border:1px solid var(--bd);
-      border-radius:12px;
-      padding:10px;
-      background:linear-gradient(160deg, rgba(13,34,47,.78), rgba(8,27,39,.78));
-      box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
-      backdrop-filter:blur(8px);
-    }}
-    .cfg-head {{
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap:10px;
-      margin-bottom:8px;
-    }}
-    .cfg-head h3 {{ margin:0; }}
-    .cfg-tools {{ display:flex; gap:6px; }}
-    .move-btn {{
-      border:1px solid var(--bd);
-      background:rgba(17,43,59,.9);
-      color:#d8e5ef;
-      border-radius:8px;
-      width:30px;
-      height:30px;
-      cursor:pointer;
-      font-weight:700;
-    }}
-    .move-btn:hover:not(:disabled) {{ border-color:var(--accent); color:#d6fffb; }}
-    .move-btn:disabled {{ opacity:.45; cursor:not-allowed; }}
-    .row {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }}
-    @media (max-width:780px) {{ .row {{ grid-template-columns:1fr; }} }}
-    input,textarea,select {{
-      width:100%;
-      border:1px solid var(--bd);
-      background:var(--card2);
-      color:var(--txt);
-      border-radius:10px;
-      padding:9px 10px;
-      font:inherit;
-    }}
-    input:focus,textarea:focus,select:focus {{
-      outline:none;
-      border-color:var(--accent);
-      box-shadow:0 0 0 2px rgba(16,183,173,.16);
-    }}
-    input[readonly] {{ color:var(--muted); background:rgba(7,21,29,.7); }}
-    textarea {{ min-height:88px; resize:vertical; }}
-    h3 {{
-      margin:10px 0 7px;
-      font-size:13px;
-      font-family:"Sora","Manrope",sans-serif;
-      letter-spacing:.02em;
-      color:#d8e5ef;
-    }}
-    .btn {{
-      border:1px solid transparent;
-      border-radius:10px;
-      padding:9px 12px;
-      font-weight:700;
-      cursor:pointer;
-      text-decoration:none;
-      transition:transform .14s ease, border-color .14s ease, background .14s ease;
-    }}
-    .btn:hover {{ transform:translateY(-1px); }}
-    .btn.primary {{ background:linear-gradient(135deg,var(--primary),#ff9c4f); color:#3b1500; }}
-    .btn.primary:hover {{ background:linear-gradient(135deg,var(--primary-hover),#ffb06d); }}
-    .btn.warn {{ background:linear-gradient(135deg,var(--accent),#6ae0d8); color:#022e2b; }}
-    .btn.ghost {{ background:rgba(17,43,59,.85); color:#d1e4f3; border-color:var(--bd); text-decoration:none; }}
-    .btn.ghost:hover {{ border-color:var(--bd-strong); }}
-    .actions {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
-    .pill {{
-      display:inline-flex;
-      align-items:center;
-      border-radius:999px;
-      padding:5px 9px;
-      background:rgba(16,183,173,.12);
-      color:#c6f4f1;
-      border:1px solid var(--bd);
-      font-size:12px;
-      font-weight:700;
-      margin:2px;
-      cursor:pointer;
-    }}
-    .pill:hover {{ border-color:var(--accent); background:rgba(16,183,173,.2); }}
-    .small {{ font-size:12px; color:var(--muted); }}
-    #roleStatus {{
-      margin-top:4px;
-    }}
-    details.advanced {{
-      margin-top:10px;
-      border:1px solid var(--bd);
-      border-radius:10px;
-      padding:10px;
-      background:rgba(8,23,32,.54);
-    }}
-    details.advanced > summary {{
-      cursor:pointer;
-      list-style:none;
-      font-weight:700;
-      color:#d8e5ef;
-      margin-bottom:8px;
-    }}
-    details.advanced > summary::-webkit-details-marker {{ display:none; }}
-    .field-row {{
-      display:grid;
-      grid-template-columns:minmax(100px,.9fr) minmax(140px,1.3fr) auto auto auto auto;
-      gap:8px;
-      align-items:center;
-      margin-bottom:6px;
-      border:1px solid var(--bd);
-      border-radius:10px;
-      padding:8px;
-      background:rgba(8,23,32,.74);
-    }}
-    .field-row .btn {{ padding:7px 9px; border-radius:8px; font-size:12px; }}
-    .field-row label {{ display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; }}
-    .field-row label input {{ width:14px; height:14px; margin:0; }}
-    @media (max-width:860px) {{ .field-row {{ grid-template-columns:1fr; }} }}
-    .validation {{ display:grid; gap:6px; }}
-    .validation .item {{
-      border:1px solid rgba(255,107,94,.45);
-      background:rgba(255,107,94,.12);
-      border-radius:10px;
-      padding:8px;
-      color:#ffc6c0;
-      font-size:12px;
-    }}
-    .status {{ min-height:1.3em; margin-top:4px; font-size:13px; color:var(--muted); font-weight:600; }}
-    .status.ok {{ color:var(--ok); }}
-    .status.err {{ color:var(--err); }}
-    .preview {{ background:var(--discord-bg); border:1px solid #4e5058; border-radius:12px; padding:12px; }}
-    .discord-head {{ display:flex; gap:10px; align-items:flex-start; }}
-    .discord-avatar {{ width:40px; height:40px; border-radius:999px; border:1px solid rgba(255,255,255,.2); object-fit:cover; }}
-    .discord-meta {{ display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; }}
-    .discord-name {{ font-weight:700; color:#fff; font-size:14px; }}
-    .discord-time {{ color:#b4b7bd; font-size:12px; }}
-    .embed {{
-      margin-top:8px;
-      background:var(--discord-embed);
-      border-left:4px solid var(--accent);
-      border-radius:4px;
-      padding:10px 10px 10px 12px;
-      position:relative;
-      display:grid;
-      gap:8px;
-    }}
-    .pv-author {{ display:flex; align-items:center; gap:6px; font-size:12px; font-weight:700; color:#fff; }}
-    .pv-author img {{ width:18px; height:18px; border-radius:999px; object-fit:cover; display:none; }}
-    .pv-title {{ color:var(--discord-link); text-decoration:none; font-size:16px; font-weight:700; }}
-    .pv-title.no-link {{ color:#fff; pointer-events:none; }}
-    .pv-title:hover {{ text-decoration:underline; }}
-    .pv-desc {{ color:#dbdee1; font-size:14px; white-space:pre-wrap; line-height:1.45; }}
-    .pv-fields {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }}
-    .pv-field {{ min-width:0; }}
-    .pv-field.full {{ grid-column:1/-1; }}
-    .pv-field-name {{ font-size:12px; font-weight:700; color:#fff; margin-bottom:2px; }}
-    .pv-field-value {{ font-size:13px; color:#dbdee1; white-space:pre-wrap; word-break:break-word; }}
-    .pv-image {{ width:100%; max-height:260px; object-fit:cover; border-radius:8px; border:1px solid rgba(255,255,255,.1); display:none; }}
-    .pv-thumb {{ position:absolute; top:10px; right:10px; width:76px; height:76px; border-radius:8px; border:1px solid rgba(255,255,255,.1); object-fit:cover; display:none; }}
-    .pv-footer {{ display:flex; align-items:center; gap:6px; color:#b4b7bd; font-size:12px; flex-wrap:wrap; }}
-    .pv-footer img {{ width:16px; height:16px; border-radius:999px; object-fit:cover; display:none; }}
-    #pvBtn {{ display:inline-flex; margin-top:8px; padding:9px 12px; border-radius:10px; background:var(--discord-btn); color:#fff; text-decoration:none; font-weight:700; }}
-    #pvBtn:hover {{ background:var(--discord-btn-hover); }}
-    @media (max-width:780px) {{
-      .pv-fields {{ grid-template-columns:1fr; }}
-      .pv-thumb {{ position:static; width:96px; height:96px; }}
-    }}
+    *{{box-sizing:border-box}}
+    body{{margin:0;padding:20px;color:var(--txt);font-family:"Manrope","Segoe UI",sans-serif;
+      background:radial-gradient(1200px 520px at 90% -10%,rgba(255,122,24,.18),transparent 65%),
+        radial-gradient(900px 460px at 12% -20%,rgba(16,183,173,.24),transparent 60%),
+        linear-gradient(160deg,#07151d,#081a24 55%,#0a202c);min-height:100vh}}
+    .page-hdr{{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:16px}}
+    .page-hdr .ey{{text-transform:uppercase;letter-spacing:.14em;font-size:11px;color:var(--muted);font-weight:700}}
+    .page-hdr h1{{margin:2px 0 0;font-family:"Sora",sans-serif;font-size:22px;letter-spacing:-.02em}}
+    .page-hdr .sub{{margin:4px 0 0;font-size:13px;color:var(--muted)}}
+    .hdr-actions{{display:flex;gap:8px;align-items:center;flex-wrap:wrap}}
+    .layout{{display:grid;grid-template-columns:1.1fr .9fr;gap:14px;align-items:start}}
+    @media(max-width:1100px){{.layout{{grid-template-columns:1fr}}.preview-panel{{order:-1}}}}
+    .builder-stack{{display:grid;gap:10px}}
+    .block{{border:1px solid var(--bd);border-radius:12px;background:linear-gradient(160deg,rgba(13,34,47,.78),rgba(8,27,39,.78));box-shadow:inset 0 1px 0 rgba(255,255,255,.04);overflow:hidden;transition:border-color .2s}}
+    .block[data-expanded="true"]{{border-color:rgba(16,183,173,.25)}}
+    .block-header{{display:flex;align-items:center;gap:10px;padding:12px 14px;cursor:pointer;user-select:none;transition:background .15s}}
+    .block-header:hover{{background:rgba(255,255,255,.03)}}
+    .block-icon{{font-size:18px;flex-shrink:0}}
+    .block-title{{flex:1;font-family:"Sora",sans-serif;font-size:14px;font-weight:600;color:#d8e5ef}}
+    .block-badge{{padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid rgba(16,183,173,.3);background:rgba(16,183,173,.12);color:var(--accent)}}
+    .block-badge.off{{background:rgba(255,255,255,.05);color:var(--muted);border-color:var(--bd)}}
+    .block-tools{{display:flex;gap:4px}}
+    .move-btn{{border:1px solid var(--bd);background:rgba(17,43,59,.9);color:#d8e5ef;border-radius:8px;width:28px;height:28px;cursor:pointer;font-weight:700;font-size:12px;display:flex;align-items:center;justify-content:center}}
+    .move-btn:hover:not(:disabled){{border-color:var(--accent);color:#d6fffb}}
+    .move-btn:disabled{{opacity:.4;cursor:not-allowed}}
+    .chevron{{color:var(--muted);font-size:12px;transition:transform .25s ease;flex-shrink:0}}
+    .block[data-expanded="true"] .chevron{{transform:rotate(180deg)}}
+    .block-body{{max-height:0;opacity:0;overflow:hidden;transition:max-height .35s ease,opacity .2s ease,padding .25s ease;padding:0 14px}}
+    .block[data-expanded="true"] .block-body{{max-height:2200px;opacity:1;padding:0 14px 14px}}
+    .toggle{{display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--muted)}}
+    .toggle input{{position:absolute;opacity:0;width:0;height:0}}
+    .toggle-track{{width:36px;height:20px;background:rgba(194,221,240,.2);border-radius:999px;position:relative;transition:background .2s;flex-shrink:0}}
+    .toggle-track::after{{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;background:#c5d4df;border-radius:999px;transition:transform .2s,background .2s}}
+    .toggle input:checked+.toggle-track{{background:var(--accent)}}
+    .toggle input:checked+.toggle-track::after{{transform:translateX(16px);background:#fff}}
+    .sub-tabs{{display:flex;gap:3px;margin-bottom:12px;background:rgba(7,21,29,.6);border:1px solid var(--bd);border-radius:8px;padding:3px}}
+    .sub-tab{{flex:1;padding:7px 12px;border-radius:6px;border:none;background:transparent;color:var(--muted);font-weight:600;font-size:13px;font-family:inherit;cursor:pointer;transition:all .15s}}
+    .sub-tab.active{{background:rgba(16,183,173,.15);color:var(--accent)}}
+    .sub-tab:hover:not(.active){{color:var(--txt)}}
+    .sub-pane{{display:none}}.sub-pane.active{{display:block}}
+    .color-row{{display:flex;align-items:center;gap:8px;flex-wrap:wrap}}
+    .color-native{{width:40px;height:36px;border:1px solid var(--bd);border-radius:8px;padding:2px;cursor:pointer;background:transparent}}
+    .color-native::-webkit-color-swatch-wrapper{{padding:0}}
+    .color-native::-webkit-color-swatch{{border:none;border-radius:6px}}
+    .color-presets{{display:flex;gap:6px;align-items:center}}
+    .color-dot{{width:22px;height:22px;border-radius:999px;border:2px solid transparent;cursor:pointer;transition:border-color .15s,transform .1s}}
+    .color-dot:hover{{transform:scale(1.15)}}.color-dot.active{{border-color:#fff}}
+    .role-card{{display:flex;align-items:center;gap:10px;padding:10px 12px;background:rgba(16,183,173,.06);border:1px solid rgba(16,183,173,.2);border-radius:10px}}
+    .role-dot{{width:10px;height:10px;border-radius:999px;background:var(--accent);flex-shrink:0}}
+    .role-dot.inactive{{background:var(--muted)}}
+    .role-info{{flex:1;min-width:0}}
+    .role-name{{font-weight:600;color:var(--accent);font-size:14px}}
+    .role-id{{font-family:monospace;font-size:12px;color:var(--muted)}}
+    .token-badge{{display:inline-flex;padding:2px 8px;border-radius:4px;background:rgba(255,255,255,.08);color:var(--accent);font-family:monospace;font-size:12px;font-weight:600}}
+    input,textarea,select{{width:100%;border:1px solid var(--bd);background:var(--card2);color:var(--txt);border-radius:10px;padding:9px 10px;font:inherit}}
+    input:focus,textarea:focus,select:focus{{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px rgba(16,183,173,.16)}}
+    input[readonly]{{color:var(--muted);background:rgba(7,21,29,.7)}}
+    textarea{{min-height:80px;resize:vertical}}
+    .form-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}
+    @media(max-width:780px){{.form-grid{{grid-template-columns:1fr}}}}
+    .form-label{{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted)}}
+    .form-label span{{font-weight:600}}
+    h3{{margin:10px 0 7px;font-size:13px;font-family:"Sora","Manrope",sans-serif;letter-spacing:.02em;color:#d8e5ef}}
+    .btn{{border:1px solid transparent;border-radius:10px;padding:9px 12px;font-weight:700;cursor:pointer;text-decoration:none;font-family:inherit;font-size:13px;transition:transform .14s,border-color .14s,background .14s}}
+    .btn:hover{{transform:translateY(-1px)}}
+    .btn.primary{{background:linear-gradient(135deg,var(--primary),#ff9c4f);color:#3b1500}}
+    .btn.primary:hover{{background:linear-gradient(135deg,var(--primary-hover),#ffb06d)}}
+    .btn.warn{{background:linear-gradient(135deg,var(--accent),#6ae0d8);color:#022e2b}}
+    .btn.ghost{{background:rgba(17,43,59,.85);color:#d1e4f3;border-color:var(--bd);text-decoration:none}}
+    .btn.ghost:hover{{border-color:var(--bd-strong)}}
+    .btn.sm{{padding:6px 9px;font-size:12px}}
+    .actions{{display:flex;align-items:center;gap:8px;flex-wrap:wrap}}
+    .pill{{display:inline-flex;align-items:center;border-radius:999px;padding:5px 9px;background:rgba(16,183,173,.12);color:#c6f4f1;border:1px solid var(--bd);font-size:12px;font-weight:700;margin:2px;cursor:pointer}}
+    .pill:hover{{border-color:var(--accent);background:rgba(16,183,173,.2)}}
+    .field-row{{display:grid;grid-template-columns:minmax(100px,.9fr) minmax(140px,1.3fr) auto auto auto auto;gap:8px;align-items:center;margin-bottom:6px;border:1px solid var(--bd);border-radius:10px;padding:8px;background:rgba(8,23,32,.74)}}
+    .field-row .btn{{padding:7px 9px;border-radius:8px;font-size:12px}}
+    .field-row label{{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:12px}}
+    .field-row label input{{width:14px;height:14px;margin:0}}
+    @media(max-width:860px){{.field-row{{grid-template-columns:1fr}}}}
+    .media-group{{border:1px solid var(--bd);border-radius:10px;padding:10px;background:rgba(8,23,32,.54);margin-bottom:8px}}
+    .media-group h4{{margin:0 0 8px;font-size:12px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.06em}}
+    .validation{{display:grid;gap:6px;margin-top:8px}}
+    .validation .item{{border:1px solid rgba(255,107,94,.45);background:rgba(255,107,94,.12);border-radius:10px;padding:8px;color:#ffc6c0;font-size:12px}}
+    .status{{min-height:1.3em;margin-top:4px;font-size:13px;color:var(--muted);font-weight:600}}
+    .status.ok{{color:var(--ok)}}.status.err{{color:var(--err)}}
+    .editor-section{{margin-top:10px;padding-top:10px;border-top:1px solid var(--bd)}}
+    .small{{font-size:12px;color:var(--muted)}}
+    .preview-panel{{position:sticky;top:20px}}
+    .preview-card{{background:linear-gradient(160deg,rgba(16,38,53,.92),rgba(10,30,42,.92));border:1px solid var(--bd);border-radius:16px;padding:14px;box-shadow:0 10px 30px rgba(0,0,0,.26)}}
+    .preview-card h3{{margin:0 0 10px;font-family:"Sora",sans-serif;font-size:14px;color:#d8e5ef}}
+    .preview{{background:var(--discord-bg);border-radius:12px;overflow:hidden}}
+    .discord-channel-bar{{display:flex;align-items:center;gap:6px;padding:10px 14px;background:var(--discord-card);border-bottom:1px solid rgba(255,255,255,.06);font-size:14px;font-weight:600;color:#fff}}
+    .discord-channel-bar .hash{{color:var(--muted);font-size:18px;font-weight:400}}
+    .preview-body{{padding:12px}}
+    .discord-head{{display:flex;gap:10px;align-items:flex-start}}
+    .discord-avatar{{width:40px;height:40px;border-radius:999px;border:1px solid rgba(255,255,255,.2);object-fit:cover}}
+    .discord-meta{{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}}
+    .discord-name{{font-weight:700;color:#fff;font-size:14px}}
+    .discord-time{{color:#b4b7bd;font-size:12px}}
+    .embed{{margin-top:8px;background:var(--discord-embed);border-left:4px solid var(--accent);border-radius:4px;padding:10px 10px 10px 12px;position:relative;display:grid;gap:8px}}
+    .pv-author{{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:#fff}}
+    .pv-author img{{width:18px;height:18px;border-radius:999px;object-fit:cover;display:none}}
+    .pv-title{{color:var(--discord-link);text-decoration:none;font-size:16px;font-weight:700}}
+    .pv-title.no-link{{color:#fff;pointer-events:none}}
+    .pv-title:hover{{text-decoration:underline}}
+    .pv-desc{{color:#dbdee1;font-size:14px;white-space:pre-wrap;line-height:1.45}}
+    .pv-fields{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}
+    .pv-field{{min-width:0}}.pv-field.full{{grid-column:1/-1}}
+    .pv-field-name{{font-size:12px;font-weight:700;color:#fff;margin-bottom:2px}}
+    .pv-field-value{{font-size:13px;color:#dbdee1;white-space:pre-wrap;word-break:break-word}}
+    .pv-image{{width:100%;max-height:260px;object-fit:cover;border-radius:8px;border:1px solid rgba(255,255,255,.1);display:none}}
+    .pv-thumb{{position:absolute;top:10px;right:10px;width:76px;height:76px;border-radius:8px;border:1px solid rgba(255,255,255,.1);object-fit:cover;display:none}}
+    .pv-footer{{display:flex;align-items:center;gap:6px;color:#b4b7bd;font-size:12px;flex-wrap:wrap}}
+    .pv-footer img{{width:16px;height:16px;border-radius:999px;object-fit:cover;display:none}}
+    #pvBtn{{display:inline-flex;margin-top:8px;padding:9px 12px;border-radius:10px;background:var(--discord-btn);color:#fff;text-decoration:none;font-weight:700}}
+    #pvBtn:hover{{background:var(--discord-btn-hover)}}
+    .pv-highlight{{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px;box-shadow:0 0 12px rgba(16,183,173,.3);transition:outline-color .2s,box-shadow .2s}}
+    @media(max-width:780px){{.pv-fields{{grid-template-columns:1fr}}.pv-thumb{{position:static;width:96px;height:96px}}.page-hdr{{flex-direction:column}}.hdr-actions{{width:100%}}}}
   </style>
 </head>
 <body>
-  <div class='actions' style='margin-bottom:10px; justify-content:space-between;'>
-      <div>
-        <div class='small' style='text-transform:uppercase;letter-spacing:.12em;font-weight:700;'>Go-Live Builder</div>
-        <strong style='font-family:Sora,Manrope,sans-serif;font-size:20px;'>Discord Announcement Designer</strong>
-        <div class='small'>Schnell-Setup fuer Streamer: Rolle automatisch, Nachricht anpassen, Preview direkt sehen.</div>
-      </div>
-    <a class='btn ghost' href='/twitch/dashboard?streamer={html.escape(streamer_login, quote=True)}'>Zurueck zum Dashboard</a>
+  <div class='page-hdr'>
+    <div>
+      <div class='ey'>Go-Live Builder</div>
+      <h1>Discord Announcement Designer</h1>
+      <div class='sub'>Rolle automatisch, Nachricht anpassen, Preview direkt sehen.</div>
+    </div>
+    <div class='hdr-actions'>
+      <select id='streamerSelect' style='width:auto;min-width:140px;'>{options}</select>
+      <button class='btn warn' id='testBtn' type='button'>Test per DM</button>
+      <button class='btn primary' id='saveBtn' type='button'>Speichern</button>
+      <a class='btn ghost' href='/twitch/dashboard?streamer={html.escape(streamer_login, quote=True)}'>Zurueck</a>
+    </div>
   </div>
   <div class='layout'>
-    <section class='card'>
-      <div class='top'>
-        <select id='streamerSelect'>{options}</select>
-        <button class='btn warn' id='testBtn' type='button'>Test per DM</button>
-        <button class='btn primary' id='saveBtn' type='button'>Aenderungen speichern</button>
-      </div>
-
+    <section>
       <div id='builderBlocks' class='builder-stack'>
-        <section class='cfg-block' data-block='ping' style='border-color:var(--accent); background:linear-gradient(160deg, rgba(16,183,173,.08), rgba(8,27,39,.78));'>
-          <div class='cfg-head'>
-            <h3 style='font-size:15px; display:flex; align-items:center; gap:6px;'>
-              <span style='font-size:18px;'>&#128276;</span> Ping-Rolle
-            </h3>
-            <div class='cfg-tools'>
-              <button type='button' class='move-btn' data-move='up' aria-label='Block nach oben'>&#8593;</button>
-              <button type='button' class='move-btn' data-move='down' aria-label='Block nach unten'>&#8595;</button>
+        <div class='block' data-block='ping' data-expanded='false' style='border-color:rgba(16,183,173,.2)'>
+          <div class='block-header'>
+            <span class='block-icon'>&#128276;</span>
+            <span class='block-title'>Ping-Rolle</span>
+            <span class='block-badge' id='pingBadge'>Aktiv</span>
+            <div class='block-tools'>
+              <button type='button' class='move-btn' data-move='up'>&#8593;</button>
+              <button type='button' class='move-btn' data-move='down'>&#8595;</button>
+            </div>
+            <span class='chevron'>&#9662;</span>
+          </div>
+          <div class='block-body'>
+            <div class='role-card'>
+              <span class='role-dot' id='roleDot'></span>
+              <div class='role-info'>
+                <div class='role-name' id='pingRoleName'>&mdash;</div>
+                <div class='role-id'>ID: <span id='pingRoleIdText' style='cursor:text;user-select:all'></span></div>
+              </div>
+              <input type='hidden' id='pingRoleId' readonly>
+              <button type='button' class='btn ghost sm' id='copyRoleIdBtn' title='Rolle-ID kopieren'>Kopieren</button>
+            </div>
+            <div id='roleStatus' style='margin-top:8px;padding:8px 10px;border-radius:10px;border:1px solid var(--bd);background:rgba(16,183,173,.08);color:#c6f4f1;font-size:13px'></div>
+            <div style='margin-top:10px;display:flex;flex-direction:column;gap:8px'>
+              <label class='toggle'>
+                <input id='mentionsEnabled' type='checkbox'>
+                <span class='toggle-track'></span>
+                Rolle erwaehnen <span class='token-badge'>{{{{rolle}}}}</span>
+              </label>
+              <div class='small' style='line-height:1.5'>
+                User tragen sich ueber das <strong>Self-Role-Menue</strong> oder per <strong>Bot-Command</strong> ein.
+                Die Rolle wird automatisch erstellt und verwaltet.
+              </div>
+            </div>
+            <div class='editor-section'>
+              <div class='small' style='font-weight:600;margin-bottom:4px'>Editor-Rollen (optional)</div>
+              <input id='editorRoles' placeholder='Discord Role IDs (kommagetrennt)'>
+              <div class='small' style='margin-top:4px'>Wer diese Konfiguration bearbeiten darf.</div>
             </div>
           </div>
-          <div style='display:grid; gap:8px;'>
-            <div style='display:grid; grid-template-columns:auto 1fr auto; gap:8px; align-items:center;'>
-              <span class='small' style='white-space:nowrap; font-weight:700;'>Rolle:</span>
-              <span id='pingRoleName' style='font-weight:600; color:var(--accent);'>&mdash;</span>
-              <span class='small' style='color:var(--muted);'>ID:</span>
+        </div>
+        <div class='block' data-block='message' data-expanded='true'>
+          <div class='block-header'>
+            <span class='block-icon'>&#128172;</span>
+            <span class='block-title'>Nachricht</span>
+            <div class='block-tools'>
+              <button type='button' class='move-btn' data-move='up'>&#8593;</button>
+              <button type='button' class='move-btn' data-move='down'>&#8595;</button>
             </div>
-            <div style='display:flex; gap:6px; align-items:center;'>
-              <input id='pingRoleId' readonly placeholder='Wird automatisch beim ersten Go-Live erstellt' style='flex:1; font-family:monospace; font-size:13px;'>
-              <button type='button' class='btn ghost' id='copyRoleIdBtn' style='padding:7px 10px; font-size:12px; white-space:nowrap;' title='Rolle-ID kopieren'>Kopieren</button>
+            <span class='chevron'>&#9662;</span>
+          </div>
+          <div class='block-body'>
+            <div id='placeholderPills' style='margin-bottom:8px'></div>
+            <textarea id='contentTpl' placeholder='Nachrichtentext ueber dem Embed (Platzhalter: {{{{channel}}}}, {{{{rolle}}}}, ...)'></textarea>
+          </div>
+        </div>
+        <div class='block' data-block='embed' data-expanded='true'>
+          <div class='block-header'>
+            <span class='block-icon'>&#127912;</span>
+            <span class='block-title'>Embed-Designer</span>
+            <div class='block-tools'>
+              <button type='button' class='move-btn' data-move='up'>&#8593;</button>
+              <button type='button' class='move-btn' data-move='down'>&#8595;</button>
             </div>
-            <div id='roleStatus' style='padding:8px 10px; border-radius:10px; border:1px solid var(--bd); background:rgba(16,183,173,.08); color:#c6f4f1; font-size:13px;'></div>
-            <div class='small' style='color:var(--muted); line-height:1.5;'>
-              User koennen sich selbst fuer Go-Live-Benachrichtigungen eintragen &mdash;
-              ueber das <strong>Self-Role-Menue</strong> im Discord oder per <strong>Bot-Command</strong>.
-              Die Rolle wird automatisch vom Bot erstellt und verwaltet.
+            <span class='chevron'>&#9662;</span>
+          </div>
+          <div class='block-body'>
+            <div class='sub-tabs'>
+              <button type='button' class='sub-tab active' data-tab='appearance'>Aussehen</button>
+              <button type='button' class='sub-tab' data-tab='content'>Inhalt</button>
             </div>
-            <label class='small'><input id='mentionsEnabled' type='checkbox'> Rolle in der Go-Live-Nachricht erwaehnen (<code style='background:rgba(255,255,255,.08); padding:1px 5px; border-radius:4px;'>{{{{rolle}}}}</code>)</label>
-          </div>
-          <details class='advanced' style='margin-top:8px;'>
-            <summary>Zugriff &amp; Editor-Rollen</summary>
-            <div style='margin-top:6px;'>
-              <input id='editorRoles' placeholder='Editor Role IDs (kommagetrennt)'>
-              <div class='small' style='margin-top:4px; color:var(--muted);'>Discord-Rollen-IDs, die diese Konfiguration bearbeiten duerfen.</div>
+            <div class='sub-pane active' data-pane='appearance'>
+              <h3>Embed-Farbe</h3>
+              <div class='color-row'>
+                <input type='color' id='embedColorPicker' class='color-native' value='#10b7ad'>
+                <input id='embedColor' placeholder='#10b7ad' style='width:110px'>
+                <div class='color-presets'>
+                  <span class='color-dot' data-color='#9146ff' style='background:#9146ff' title='Twitch Lila'></span>
+                  <span class='color-dot' data-color='#10b7ad' style='background:#10b7ad' title='Teal'></span>
+                  <span class='color-dot' data-color='#ff7a18' style='background:#ff7a18' title='Orange'></span>
+                  <span class='color-dot' data-color='#2ecc71' style='background:#2ecc71' title='Gruen'></span>
+                  <span class='color-dot' data-color='#e74c3c' style='background:#e74c3c' title='Rot'></span>
+                </div>
+              </div>
+              <h3>Author</h3>
+              <div class='form-grid'>
+                <div class='form-label'>
+                  <span>Author-Name</span>
+                  <input id='authorName' placeholder='LIVE: {{{{channel}}}}'>
+                </div>
+                <div class='form-label'>
+                  <span>Icon</span>
+                  <select id='authorIconMode'>
+                    <option value='twitch_logo'>Twitch Logo</option>
+                    <option value='channel_avatar'>Kanal Avatar</option>
+                    <option value='none'>Kein Icon</option>
+                  </select>
+                </div>
+              </div>
+              <div style='display:flex;gap:16px;flex-wrap:wrap;margin-top:8px'>
+                <label class='toggle'><input id='authorEnabled' type='checkbox'><span class='toggle-track'></span> Author anzeigen</label>
+                <label class='toggle'><input id='authorLinkEnabled' type='checkbox'><span class='toggle-track'></span> Auf Kanal verlinken</label>
+              </div>
             </div>
-          </details>
-        </section>
-
-        <section class='cfg-block' data-block='message'>
-          <div class='cfg-head'>
-            <h3>Nachricht</h3>
-            <div class='cfg-tools'>
-              <button type='button' class='move-btn' data-move='up' aria-label='Block nach oben'>&#8593;</button>
-              <button type='button' class='move-btn' data-move='down' aria-label='Block nach unten'>&#8595;</button>
-            </div>
-          </div>
-          <textarea id='contentTpl' placeholder='Nachrichtentext ueber dem Embed (Platzhalter: {{{{channel}}}}, {{{{rolle}}}}, ...)'></textarea>
-          <div id='placeholderPills' style='margin-top:6px;'></div>
-        </section>
-
-        <section class='cfg-block' data-block='embed'>
-          <div class='cfg-head'>
-            <h3>Embed-Designer</h3>
-            <div class='cfg-tools'>
-              <button type='button' class='move-btn' data-move='up' aria-label='Block nach oben'>&#8593;</button>
-              <button type='button' class='move-btn' data-move='down' aria-label='Block nach unten'>&#8595;</button>
-            </div>
-          </div>
-          <div class='row'>
-            <input id='embedColor' placeholder='#18c5e5'>
-            <input id='authorName' placeholder='LIVE: {{channel}}'>
-            <select id='authorIconMode'>
-              <option value='twitch_logo'>Twitch Logo</option>
-              <option value='channel_avatar'>Kanal Avatar</option>
-              <option value='none'>Kein Icon</option>
-            </select>
-          </div>
-          <div class='actions'>
-            <label class='small'><input id='authorEnabled' type='checkbox'> Author anzeigen</label>
-            <label class='small'><input id='authorLinkEnabled' type='checkbox'> Author auf Kanal verlinken</label>
-          </div>
-          <div class='row' style='margin-top:8px;'>
-            <input id='embedTitle' placeholder='{{channel}} ist LIVE in Deadlock!'>
-            <select id='descMode'>
-              <option value='stream_title'>Auto Streamtitel</option>
-              <option value='custom'>Custom Text</option>
-              <option value='custom_plus_title'>Custom + Streamtitel</option>
-            </select>
-            <textarea id='embedDesc' style='grid-column:1/-1;' placeholder='Beschreibung'></textarea>
-          </div>
-          <div class='actions'>
-            <label class='small'><input id='titleLinkEnabled' type='checkbox'> Titel-Link auf {{url}}</label>
-            <label class='small'><input id='shortenEnabled' type='checkbox'> Zu lange Texte kuerzen</label>
-          </div>
-        </section>
-
-        <section class='cfg-block' data-block='button'>
-          <div class='cfg-head'>
-            <h3>Button</h3>
-            <div class='cfg-tools'>
-              <button type='button' class='move-btn' data-move='up' aria-label='Block nach oben'>↑</button>
-              <button type='button' class='move-btn' data-move='down' aria-label='Block nach unten'>↓</button>
-            </div>
-          </div>
-          <div class='row'>
-            <label class='small'><input id='buttonEnabled' type='checkbox'> Button anzeigen</label>
-            <input id='buttonLabel' placeholder='Auf Twitch ansehen'>
-            <input id='buttonUrl' value='{{url}}' readonly>
-          </div>
-        </section>
-
-        <section class='cfg-block' data-block='advanced'>
-          <div class='cfg-head'>
-            <h3>Mehr Optionen (Optional)</h3>
-            <div class='cfg-tools'>
-              <button type='button' class='move-btn' data-move='up' aria-label='Block nach oben'>↑</button>
-              <button type='button' class='move-btn' data-move='down' aria-label='Block nach unten'>↓</button>
+            <div class='sub-pane' data-pane='content'>
+              <div class='form-grid'>
+                <div class='form-label'>
+                  <span>Embed-Titel</span>
+                  <input id='embedTitle' placeholder='{{{{channel}}}} ist LIVE in Deadlock!'>
+                </div>
+                <div class='form-label'>
+                  <span>Beschreibungs-Modus</span>
+                  <select id='descMode'>
+                    <option value='stream_title'>Auto Streamtitel</option>
+                    <option value='custom'>Custom Text</option>
+                    <option value='custom_plus_title'>Custom + Streamtitel</option>
+                  </select>
+                </div>
+              </div>
+              <div class='form-label' style='margin-top:8px'>
+                <span>Beschreibung</span>
+                <textarea id='embedDesc' placeholder='Beschreibung'></textarea>
+              </div>
+              <div style='display:flex;gap:16px;flex-wrap:wrap;margin-top:8px'>
+                <label class='toggle'><input id='titleLinkEnabled' type='checkbox'><span class='toggle-track'></span> Titel als Link</label>
+                <label class='toggle'><input id='shortenEnabled' type='checkbox'><span class='toggle-track'></span> Texte kuerzen</label>
+              </div>
             </div>
           </div>
-          <details class='advanced'>
-            <summary>Felder, Bilder, Footer</summary>
-            <h3>Fields</h3>
+        </div>
+        <div class='block' data-block='button' data-expanded='false'>
+          <div class='block-header'>
+            <span class='block-icon'>&#128279;</span>
+            <span class='block-title'>Button</span>
+            <span class='block-badge' id='buttonBadge'>Aktiv</span>
+            <div class='block-tools'>
+              <button type='button' class='move-btn' data-move='up'>&#8593;</button>
+              <button type='button' class='move-btn' data-move='down'>&#8595;</button>
+            </div>
+            <span class='chevron'>&#9662;</span>
+          </div>
+          <div class='block-body'>
+            <label class='toggle' style='margin-bottom:8px'>
+              <input id='buttonEnabled' type='checkbox'>
+              <span class='toggle-track'></span>
+              Button anzeigen
+            </label>
+            <div class='form-grid'>
+              <div class='form-label'>
+                <span>Button Text</span>
+                <input id='buttonLabel' placeholder='Auf Twitch ansehen'>
+              </div>
+              <div class='form-label'>
+                <span>URL (automatisch)</span>
+                <input id='buttonUrl' value='{{{{url}}}}' readonly>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class='block' data-block='advanced' data-expanded='false'>
+          <div class='block-header'>
+            <span class='block-icon'>&#128451;</span>
+            <span class='block-title'>Felder &amp; Medien</span>
+            <div class='block-tools'>
+              <button type='button' class='move-btn' data-move='up'>&#8593;</button>
+              <button type='button' class='move-btn' data-move='down'>&#8595;</button>
+            </div>
+            <span class='chevron'>&#9662;</span>
+          </div>
+          <div class='block-body'>
+            <h3>Felder</h3>
             <div id='fieldsWrap'></div>
-            <div class='actions'>
-              <button class='btn ghost' type='button' id='addFieldBtn'>Feld +</button>
-              <button class='btn ghost' type='button' id='presetBtn'>Preset Viewer + Kategorie</button>
-              <button class='btn ghost' type='button' id='presetMetaBtn'>Preset Start + Sprache + Tags</button>
+            <div class='actions' style='margin-top:6px'>
+              <button class='btn ghost sm' type='button' id='addFieldBtn'>+ Feld</button>
+              <button class='btn ghost sm' type='button' id='presetBtn'>Preset: Viewer + Kategorie</button>
+              <button class='btn ghost sm' type='button' id='presetMetaBtn'>Preset: Start + Sprache + Tags</button>
             </div>
-
-            <h3>Bilder & Footer</h3>
-            <div class='row'>
-              <select id='thumbMode'>
-                <option value='none'>Thumbnail aus</option>
-                <option value='channel_avatar'>Kanal Avatar</option>
-                <option value='custom_url'>Custom URL</option>
-              </select>
-              <input id='thumbUrl' placeholder='Thumbnail URL'>
-              <label class='small'><input id='useStreamImage' type='checkbox'> Stream-Thumbnail verwenden</label>
-              <input id='imageUrl' placeholder='Custom Image URL'>
-              <select id='imageFormat'><option value='16:9'>16:9</option><option value='4:3'>4:3</option></select>
-              <label class='small'><input id='imageCb' type='checkbox'> Cache-Buster</label>
-              <input id='footerText' placeholder='Footer Text'>
-              <select id='footerTs'><option value='started_at'>Startzeit</option><option value='now'>Jetzt</option><option value='none'>Aus</option></select>
+            <div class='media-group' style='margin-top:12px'>
+              <h4>Thumbnail</h4>
+              <div class='form-grid'>
+                <div class='form-label'>
+                  <span>Modus</span>
+                  <select id='thumbMode'>
+                    <option value='none'>Aus</option>
+                    <option value='channel_avatar'>Kanal Avatar</option>
+                    <option value='custom_url'>Custom URL</option>
+                  </select>
+                </div>
+                <div class='form-label'>
+                  <span>Custom URL</span>
+                  <input id='thumbUrl' placeholder='https://...'>
+                </div>
+              </div>
             </div>
-          </details>
-        </section>
+            <div class='media-group'>
+              <h4>Stream-Bild</h4>
+              <div class='form-grid'>
+                <label class='toggle'><input id='useStreamImage' type='checkbox'><span class='toggle-track'></span> Stream-Thumbnail verwenden</label>
+                <div class='form-label'>
+                  <span>Custom Image URL</span>
+                  <input id='imageUrl' placeholder='https://...'>
+                </div>
+                <div class='form-label'>
+                  <span>Format</span>
+                  <select id='imageFormat'><option value='16:9'>16:9</option><option value='4:3'>4:3</option></select>
+                </div>
+                <label class='toggle'><input id='imageCb' type='checkbox'><span class='toggle-track'></span> Cache-Buster</label>
+              </div>
+            </div>
+            <div class='media-group'>
+              <h4>Footer</h4>
+              <div class='form-grid'>
+                <div class='form-label'>
+                  <span>Footer Text</span>
+                  <input id='footerText' placeholder='Footer Text'>
+                </div>
+                <div class='form-label'>
+                  <span>Zeitstempel</span>
+                  <select id='footerTs'><option value='started_at'>Startzeit</option><option value='now'>Jetzt</option><option value='none'>Aus</option></select>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-
       <div class='validation' id='validation'></div>
       <div class='status' id='status'></div>
     </section>
-
-    <aside class='card'>
-      <h3>Live Preview</h3>
-      <div class='preview'>
-        <div class='discord-head'>
-          <img id='pvBotAvatar' class='discord-avatar' alt='Bot Avatar'>
-          <div style='min-width:0; width:100%;'>
-            <div class='discord-meta'>
-              <span class='discord-name'>Deadlock Bot</span>
-              <span id='pvMsgTime' class='discord-time'>Heute um --:--</span>
+    <aside class='preview-panel'>
+      <div class='preview-card'>
+        <h3>Live Preview</h3>
+        <div class='preview'>
+          <div class='discord-channel-bar'>
+            <span class='hash'>#</span> go-live-announcements
+          </div>
+          <div class='preview-body'>
+            <div class='discord-head'>
+              <img id='pvBotAvatar' class='discord-avatar' alt='Bot Avatar'>
+              <div style='min-width:0;width:100%'>
+                <div class='discord-meta'>
+                  <span class='discord-name'>Deadlock Bot</span>
+                  <span id='pvMsgTime' class='discord-time'>Heute um --:--</span>
+                </div>
+                <div id='pvContent' class='pv-desc'>(leer)</div>
+              </div>
             </div>
-            <div id='pvContent' class='pv-desc'>(leer)</div>
+            <div class='embed' id='pvEmbed'>
+              <img id='pvThumb' class='pv-thumb' alt='Thumbnail'>
+              <div id='pvAuthorWrap' class='pv-author'>
+                <img id='pvAuthorIcon' alt='Author Icon'>
+                <a id='pvAuthor' class='pv-title no-link' href='#' target='_blank' rel='noopener noreferrer'>LIVE</a>
+              </div>
+              <a id='pvTitle' class='pv-title no-link' href='#' target='_blank' rel='noopener noreferrer'></a>
+              <div id='pvDesc' class='pv-desc'></div>
+              <img id='pvImage' class='pv-image' alt='Stream Preview'>
+              <div id='pvFields' class='pv-fields'></div>
+              <div id='pvFooter' class='pv-footer'>
+                <img id='pvFooterIcon' alt='Footer Icon'>
+                <span id='pvFooterText'></span>
+                <span id='pvFooterTime'></span>
+              </div>
+            </div>
+            <a id='pvBtn' href='#' target='_blank' rel='noopener noreferrer'>Auf Twitch ansehen</a>
           </div>
         </div>
-        <div class='embed' id='pvEmbed'>
-          <img id='pvThumb' class='pv-thumb' alt='Thumbnail'>
-          <div id='pvAuthorWrap' class='pv-author'>
-            <img id='pvAuthorIcon' alt='Author Icon'>
-            <a id='pvAuthor' class='pv-title no-link' href='#' target='_blank' rel='noopener noreferrer'>LIVE</a>
-          </div>
-          <a id='pvTitle' class='pv-title no-link' href='#' target='_blank' rel='noopener noreferrer'></a>
-          <div id='pvDesc' class='pv-desc'></div>
-          <img id='pvImage' class='pv-image' alt='Stream Preview'>
-          <div id='pvFields' class='pv-fields'></div>
-          <div id='pvFooter' class='pv-footer'>
-            <img id='pvFooterIcon' alt='Footer Icon'>
-            <span id='pvFooterText'></span>
-            <span id='pvFooterTime'></span>
-          </div>
-        </div>
-        <a id='pvBtn' href='#' target='_blank' rel='noopener noreferrer'>Auf Twitch ansehen</a>
       </div>
     </aside>
   </div>
-
   <script>
     const ST = {initial};
-    const DEFAULT_BLOCK_ORDER = ['ping', 'message', 'embed', 'button', 'advanced'];
+    const DEFAULT_BLOCK_ORDER = ['ping','message','embed','button','advanced'];
     const S = {{
       streamer: ST.streamer_login || '',
       csrf: ST.csrf_token || '',
@@ -1603,62 +1600,36 @@ class DashboardLiveAnnouncementMixin:
       roleStatusMessage: String(ST.role_status_message || ''),
       preview: ST.preview || {{}},
       blockOrder: [],
-      timer: null
+      timer: null,
+      activeBlock: null
     }};
     const E = (id) => document.getElementById(id);
-    const esc = (value) =>
-      String(value || '')
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#39;');
+    const esc = (v) => String(v||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;');
     const WATCH_IDS = ['editorRoles','mentionsEnabled','contentTpl','embedColor','authorName','authorIconMode','authorEnabled','authorLinkEnabled','embedTitle','descMode','embedDesc','titleLinkEnabled','shortenEnabled','thumbMode','thumbUrl','useStreamImage','imageUrl','imageFormat','imageCb','footerText','footerTs','buttonEnabled','buttonLabel'];
     const BOT_AVATAR = 'https://static-cdn.jtvnw.net/jtv_user_pictures/2f6f9be7-41f7-4fd1-8ca8-13213e63ed05-profile_image-300x300.png';
 
     function toHexColor(raw) {{
-      if (typeof raw === 'number') return '#' + raw.toString(16).padStart(6, '0');
-      const text = String(raw || '').trim();
-      if (text.startsWith('#') && text.length === 7) return text;
-      if (/^[0-9a-fA-F]{{6}}$/.test(text)) return '#' + text;
+      if (typeof raw === 'number') return '#' + raw.toString(16).padStart(6,'0');
+      const t = String(raw||'').trim();
+      if (t.startsWith('#') && t.length === 7) return t;
+      if (/^[0-9a-fA-F]{{6}}$/.test(t)) return '#' + t;
       return '#10b7ad';
     }}
-
-    function formatTime(isoText) {{
-      if (!isoText) return '';
-      const dt = new Date(isoText);
-      if (Number.isNaN(dt.getTime())) return '';
-      return dt.toLocaleString('de-DE', {{ day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }});
+    function formatTime(iso) {{
+      if (!iso) return '';
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return '';
+      return d.toLocaleString('de-DE', {{ day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }});
     }}
-
-    function setImage(node, url, fallbackUrl = '') {{
-      const primary = String(url || '').trim();
-      const fallback = String(fallbackUrl || '').trim();
-      let triedFallback = false;
-      const applySrc = (src) => {{
-        node.style.display = src ? 'block' : 'none';
-        node.src = src || '';
-      }};
-      node.onerror = () => {{
-        if (!triedFallback && fallback) {{
-          triedFallback = true;
-          applySrc(fallback);
-          return;
-        }}
-        node.style.display = 'none';
-      }};
-      if (primary) {{
-        applySrc(primary);
-        return;
-      }}
-      if (fallback) {{
-        triedFallback = true;
-        applySrc(fallback);
-        return;
-      }}
-      applySrc('');
+    function setImage(node, url, fb) {{
+      const p = String(url||'').trim(), f = String(fb||'').trim();
+      let tried = false;
+      const apply = (s) => {{ node.style.display = s ? 'block' : 'none'; node.src = s || ''; }};
+      node.onerror = () => {{ if (!tried && f) {{ tried = true; apply(f); return; }} node.style.display = 'none'; }};
+      if (p) {{ apply(p); return; }}
+      if (f) {{ tried = true; apply(f); return; }}
+      apply('');
     }}
-
     function norm() {{
       S.config.mentions = S.config.mentions || {{}};
       S.config.embed = S.config.embed || {{}};
@@ -1672,75 +1643,141 @@ class DashboardLiveAnnouncementMixin:
       S.config.button.url_template = '{{url}}';
       S.blockOrder = normalizeBlockOrder(S.config.ui.block_order);
     }}
-
     function normalizeBlockOrder(raw) {{
-      const src = Array.isArray(raw) ? raw : [];
-      const out = [];
-      src.forEach((value) => {{
-        const id = String(value || '').trim();
-        if (!DEFAULT_BLOCK_ORDER.includes(id)) return;
-        if (out.includes(id)) return;
-        out.push(id);
-      }});
+      const src = Array.isArray(raw) ? raw : [], out = [];
+      src.forEach((v) => {{ const id = String(v||'').trim(); if (!DEFAULT_BLOCK_ORDER.includes(id) || out.includes(id)) return; out.push(id); }});
       DEFAULT_BLOCK_ORDER.forEach((id) => {{ if (!out.includes(id)) out.push(id); }});
       return out;
     }}
-
-    function roleIdsCsv(text) {{
-      return String(text || '').split(',').map((v) => v.trim()).filter((v) => /^\\d+$/.test(v)).map((v) => Number(v));
-    }}
+    function roleIdsCsv(t) {{ return String(t||'').split(',').map(v=>v.trim()).filter(v=>/^\\d+$/.test(v)).map(v=>Number(v)); }}
 
     function applyBlockOrder() {{
-      const container = E('builderBlocks');
-      if (!container) return;
+      const c = E('builderBlocks');
+      if (!c) return;
       S.blockOrder = normalizeBlockOrder(S.blockOrder);
-      S.blockOrder.forEach((blockId) => {{
-        const node = container.querySelector(`.cfg-block[data-block="${{blockId}}"]`);
-        if (node) container.appendChild(node);
-      }});
-      S.blockOrder.forEach((blockId, index) => {{
-        const node = container.querySelector(`.cfg-block[data-block="${{blockId}}"]`);
-        if (!node) return;
-        const up = node.querySelector('[data-move="up"]');
-        const down = node.querySelector('[data-move="down"]');
-        if (up) up.disabled = index <= 0;
-        if (down) down.disabled = index >= S.blockOrder.length - 1;
+      S.blockOrder.forEach((id) => {{ const n = c.querySelector(`.block[data-block="${{id}}"]`); if (n) c.appendChild(n); }});
+      S.blockOrder.forEach((id, i) => {{
+        const n = c.querySelector(`.block[data-block="${{id}}"]`);
+        if (!n) return;
+        const up = n.querySelector('[data-move="up"]'), dn = n.querySelector('[data-move="down"]');
+        if (up) up.disabled = i <= 0;
+        if (dn) dn.disabled = i >= S.blockOrder.length - 1;
       }});
     }}
-
-    function moveBlock(blockId, direction) {{
-      const idx = S.blockOrder.indexOf(blockId);
-      if (idx < 0) return;
-      const next = direction === 'up' ? idx - 1 : idx + 1;
-      if (next < 0 || next >= S.blockOrder.length) return;
-      const tmp = S.blockOrder[next];
-      S.blockOrder[next] = S.blockOrder[idx];
-      S.blockOrder[idx] = tmp;
-      applyBlockOrder();
-      onMutate();
+    function moveBlock(id, dir) {{
+      const i = S.blockOrder.indexOf(id); if (i < 0) return;
+      const n = dir === 'up' ? i - 1 : i + 1;
+      if (n < 0 || n >= S.blockOrder.length) return;
+      [S.blockOrder[i], S.blockOrder[n]] = [S.blockOrder[n], S.blockOrder[i]];
+      applyBlockOrder(); onMutate();
     }}
-
     function bindBlockMoveButtons() {{
-      document.querySelectorAll('#builderBlocks .cfg-block').forEach((node) => {{
-        const blockId = String(node.getAttribute('data-block') || '');
+      document.querySelectorAll('#builderBlocks .block').forEach((node) => {{
+        const id = String(node.getAttribute('data-block') || '');
         node.querySelectorAll('[data-move]').forEach((btn) => {{
-          btn.addEventListener('click', () => moveBlock(blockId, String(btn.getAttribute('data-move') || '')));
+          btn.addEventListener('click', (e) => {{ e.stopPropagation(); moveBlock(id, String(btn.getAttribute('data-move') || '')); }});
         }});
       }});
     }}
 
+    function toggleBlock(blockId, forceOpen) {{
+      document.querySelectorAll('#builderBlocks .block').forEach((node) => {{
+        const id = node.getAttribute('data-block');
+        if (id === blockId) {{
+          const isOpen = node.getAttribute('data-expanded') === 'true';
+          node.setAttribute('data-expanded', forceOpen !== undefined ? String(forceOpen) : String(!isOpen));
+        }}
+      }});
+      highlightPreview(blockId);
+    }}
+    function initAccordion() {{
+      document.querySelectorAll('#builderBlocks .block-header').forEach((hdr) => {{
+        hdr.addEventListener('click', (e) => {{
+          if (e.target.closest('.block-tools') || e.target.closest('.move-btn')) return;
+          const block = hdr.closest('.block');
+          const id = block.getAttribute('data-block');
+          toggleBlock(id);
+        }});
+      }});
+    }}
+
+    function initSubTabs() {{
+      document.querySelectorAll('.sub-tab').forEach((tab) => {{
+        tab.addEventListener('click', () => {{
+          const pane = tab.getAttribute('data-tab');
+          const parent = tab.closest('.block-body');
+          parent.querySelectorAll('.sub-tab').forEach(t => t.classList.toggle('active', t === tab));
+          parent.querySelectorAll('.sub-pane').forEach(p => p.classList.toggle('active', p.getAttribute('data-pane') === pane));
+        }});
+      }});
+    }}
+
+    function initColorPicker() {{
+      const picker = E('embedColorPicker');
+      const hex = E('embedColor');
+      if (!picker || !hex) return;
+      picker.addEventListener('input', () => {{ hex.value = picker.value; syncColorDots(picker.value); onMutate(); }});
+      hex.addEventListener('input', () => {{
+        const v = toHexColor(hex.value);
+        picker.value = v;
+        syncColorDots(v);
+      }});
+      document.querySelectorAll('.color-dot').forEach((dot) => {{
+        dot.addEventListener('click', () => {{
+          const c = dot.getAttribute('data-color');
+          hex.value = c; picker.value = c;
+          syncColorDots(c); onMutate();
+        }});
+      }});
+    }}
+    function syncColorDots(active) {{
+      document.querySelectorAll('.color-dot').forEach((d) => {{
+        d.classList.toggle('active', d.getAttribute('data-color') === active);
+      }});
+    }}
+
+    function highlightPreview(blockId) {{
+      S.activeBlock = blockId;
+      document.querySelectorAll('.pv-highlight').forEach(el => el.classList.remove('pv-highlight'));
+      const map = {{
+        'message': ['pvContent'],
+        'embed': ['pvEmbed'],
+        'button': ['pvBtn'],
+        'advanced': ['pvFields'],
+        'ping': ['pvContent']
+      }};
+      const ids = map[blockId] || [];
+      ids.forEach((id) => {{ const el = E(id); if (el) el.classList.add('pv-highlight'); }});
+    }}
+    function initFocusTracking() {{
+      document.addEventListener('focusin', (e) => {{
+        const block = e.target.closest('.block');
+        if (!block) return;
+        const id = block.getAttribute('data-block');
+        if (id) highlightPreview(id);
+      }});
+    }}
+
+    function updateBadges() {{
+      const pb = E('pingBadge'), bb = E('buttonBadge');
+      if (pb) {{ const on = E('mentionsEnabled')?.checked; pb.textContent = on ? 'Aktiv' : 'Aus'; pb.className = 'block-badge' + (on ? '' : ' off'); }}
+      if (bb) {{ const on = E('buttonEnabled')?.checked; bb.textContent = on ? 'Aktiv' : 'Aus'; bb.className = 'block-badge' + (on ? '' : ' off'); }}
+    }}
+
     function renderRoleInfo() {{
-      const roleIdText = S.streamerPingRoleId ? String(S.streamerPingRoleId) : '';
-      const roleName = S.streamerPingRoleName || '';
-      E('pingRoleId').value = roleIdText;
-      E('pingRoleName').textContent = roleName || (roleIdText ? `ID: ${{roleIdText}}` : 'Noch nicht erstellt');
-      E('pingRoleName').style.color = roleName ? 'var(--accent)' : 'var(--muted)';
+      const rid = S.streamerPingRoleId ? String(S.streamerPingRoleId) : '';
+      const rn = S.streamerPingRoleName || '';
+      const nameEl = E('pingRoleName');
+      const idTextEl = E('pingRoleIdText');
+      const hiddenEl = E('pingRoleId');
+      if (nameEl) {{ nameEl.textContent = rn || (rid ? 'ID: ' + rid : 'Noch nicht erstellt'); nameEl.style.color = rn ? 'var(--accent)' : 'var(--muted)'; }}
+      if (idTextEl) {{ idTextEl.textContent = rid; }}
+      if (hiddenEl) {{ hiddenEl.value = rid; }}
+      const dot = E('roleDot');
+      if (dot) {{ dot.className = 'role-dot' + (rid ? '' : ' inactive'); }}
       const copyBtn = E('copyRoleIdBtn');
-      if (copyBtn) {{ copyBtn.style.display = roleIdText ? '' : 'none'; }}
-      const fallbackStatus = roleIdText
-        ? `Ping-Rolle verknuepft (ID: ${{roleIdText}}).`
-        : 'Wird automatisch beim ersten Go-Live erstellt.';
-      E('roleStatus').textContent = S.roleStatusMessage || fallbackStatus;
+      if (copyBtn) {{ copyBtn.style.display = rid ? '' : 'none'; }}
+      E('roleStatus').textContent = S.roleStatusMessage || (rid ? 'Ping-Rolle verknuepft (ID: ' + rid + ').' : 'Wird automatisch beim ersten Go-Live erstellt.');
     }}
 
     function fillForm() {{
@@ -1748,7 +1785,11 @@ class DashboardLiveAnnouncementMixin:
       E('mentionsEnabled').checked = Boolean(S.config.mentions.enabled);
       E('editorRoles').value = (S.allowedRoles || []).join(',');
       E('contentTpl').value = S.config.content || '';
-      E('embedColor').value = toHexColor(S.config.embed.color || '#9146ff');
+      const color = toHexColor(S.config.embed.color || '#9146ff');
+      E('embedColor').value = color;
+      const picker = E('embedColorPicker');
+      if (picker) picker.value = color;
+      syncColorDots(color);
       E('authorEnabled').checked = Boolean(S.config.embed.author.enabled);
       E('authorName').value = S.config.embed.author.name || '';
       E('authorIconMode').value = S.config.embed.author.icon_mode || 'twitch_logo';
@@ -1772,6 +1813,7 @@ class DashboardLiveAnnouncementMixin:
       renderRoleInfo();
       renderFields();
       renderPlaceholderPills();
+      updateBadges();
     }}
 
     function readForm() {{
@@ -1808,40 +1850,29 @@ class DashboardLiveAnnouncementMixin:
     }}
 
     function renderFields() {{
-      const wrap = E('fieldsWrap');
-      wrap.innerHTML = '';
+      const wrap = E('fieldsWrap'); wrap.innerHTML = '';
       (S.config.embed.fields || []).forEach((field, idx) => {{
-        const row = document.createElement('div');
-        row.className = 'field-row';
-        row.innerHTML = `<input data-name='${{idx}}' value='${{esc(field.name)}}' placeholder='Field Name'><input data-value='${{idx}}' value='${{esc(field.value)}}' placeholder='Field Value'><label class='small'><input data-inline='${{idx}}' type='checkbox' ${{field.inline ? 'checked' : ''}}> Inline</label><button class='btn ghost' type='button' data-up='${{idx}}'>▲</button><button class='btn ghost' type='button' data-down='${{idx}}'>▼</button><button class='btn ghost' type='button' data-remove='${{idx}}'>Entfernen</button>`;
+        const row = document.createElement('div'); row.className = 'field-row';
+        row.innerHTML = `<input data-name='${{idx}}' value='${{esc(field.name)}}' placeholder='Field Name'><input data-value='${{idx}}' value='${{esc(field.value)}}' placeholder='Field Value'><label class='small'><input data-inline='${{idx}}' type='checkbox' ${{field.inline ? 'checked' : ''}}> Inline</label><button class='btn ghost sm' type='button' data-up='${{idx}}'>&#9650;</button><button class='btn ghost sm' type='button' data-down='${{idx}}'>&#9660;</button><button class='btn ghost sm' type='button' data-remove='${{idx}}'>Entfernen</button>`;
         wrap.appendChild(row);
       }});
       wrap.querySelectorAll('[data-remove]').forEach((btn) => btn.addEventListener('click', () => {{ S.config.embed.fields.splice(Number(btn.getAttribute('data-remove')), 1); renderFields(); onMutate(); }}));
       wrap.querySelectorAll('[data-up]').forEach((btn) => btn.addEventListener('click', () => {{
-        const idx = Number(btn.getAttribute('data-up'));
-        if (idx <= 0) return;
-        const tmp = S.config.embed.fields[idx - 1];
-        S.config.embed.fields[idx - 1] = S.config.embed.fields[idx];
-        S.config.embed.fields[idx] = tmp;
-        renderFields();
-        onMutate();
+        const i = Number(btn.getAttribute('data-up')); if (i <= 0) return;
+        [S.config.embed.fields[i-1], S.config.embed.fields[i]] = [S.config.embed.fields[i], S.config.embed.fields[i-1]];
+        renderFields(); onMutate();
       }}));
       wrap.querySelectorAll('[data-down]').forEach((btn) => btn.addEventListener('click', () => {{
-        const idx = Number(btn.getAttribute('data-down'));
-        if (idx >= S.config.embed.fields.length - 1) return;
-        const tmp = S.config.embed.fields[idx + 1];
-        S.config.embed.fields[idx + 1] = S.config.embed.fields[idx];
-        S.config.embed.fields[idx] = tmp;
-        renderFields();
-        onMutate();
+        const i = Number(btn.getAttribute('data-down')); if (i >= S.config.embed.fields.length - 1) return;
+        [S.config.embed.fields[i+1], S.config.embed.fields[i]] = [S.config.embed.fields[i], S.config.embed.fields[i+1]];
+        renderFields(); onMutate();
       }}));
       wrap.querySelectorAll('input').forEach((inp) => inp.addEventListener('input', onMutate));
       wrap.querySelectorAll('input[type="checkbox"]').forEach((inp) => inp.addEventListener('change', onMutate));
     }}
 
     function collectFields() {{
-      const rows = E('fieldsWrap').querySelectorAll('.field-row');
-      const out = [];
+      const rows = E('fieldsWrap').querySelectorAll('.field-row'), out = [];
       rows.forEach((row) => {{
         const n = (row.querySelector('[data-name]')?.value || '').trim();
         const v = (row.querySelector('[data-value]')?.value || '').trim();
@@ -1852,22 +1883,17 @@ class DashboardLiveAnnouncementMixin:
     }}
 
     function renderPlaceholderPills() {{
-      const wrap = E('placeholderPills');
-      wrap.innerHTML = '';
+      const wrap = E('placeholderPills'); wrap.innerHTML = '';
       (ST.placeholders || []).forEach((ph) => {{
-        const pill = document.createElement('button');
-        pill.type = 'button';
-        pill.className = 'pill';
-        pill.textContent = '{' + ph + '}';
+        const pill = document.createElement('button'); pill.type = 'button'; pill.className = 'pill';
+        pill.textContent = '{{' + ph + '}}';
         pill.addEventListener('click', () => {{
-          const active = document.activeElement;
-          if (!(active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement)) return;
-          const token = '{' + ph + '}';
-          const s = active.selectionStart ?? active.value.length;
-          const e = active.selectionEnd ?? active.value.length;
-          active.value = active.value.slice(0, s) + token + active.value.slice(e);
-          active.focus();
-          active.selectionStart = active.selectionEnd = s + token.length;
+          const a = document.activeElement;
+          if (!(a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement)) return;
+          const token = '{{' + ph + '}}';
+          const s = a.selectionStart ?? a.value.length, e = a.selectionEnd ?? a.value.length;
+          a.value = a.value.slice(0, s) + token + a.value.slice(e);
+          a.focus(); a.selectionStart = a.selectionEnd = s + token.length;
           onMutate();
         }});
         wrap.appendChild(pill);
@@ -1875,19 +1901,15 @@ class DashboardLiveAnnouncementMixin:
     }}
 
     function renderValidation(items) {{
-      const wrap = E('validation');
-      wrap.innerHTML = '';
+      const wrap = E('validation'); wrap.innerHTML = '';
       (items || []).forEach((item) => {{
-        const el = document.createElement('div');
-        el.className = 'item';
+        const el = document.createElement('div'); el.className = 'item';
         el.textContent = `${{item.path || 'config'}}: ${{item.message || 'ungueltig'}}`;
         wrap.appendChild(el);
       }});
     }}
-
     function setStatus(msg, isErr = false) {{
-      const el = E('status');
-      el.textContent = msg || '';
+      const el = E('status'); el.textContent = msg || '';
       el.className = 'status' + (msg ? (isErr ? ' err' : ' ok') : '');
     }}
 
@@ -1897,83 +1919,61 @@ class DashboardLiveAnnouncementMixin:
       const author = embed.author || {{}};
       const footer = embed.footer || {{}};
       const button = p.button || {{}};
-      const fallbackStreamPreview = 'https://static-cdn.jtvnw.net/ttv-static/404_preview-640x360.jpg';
-      const fallbackAvatar = 'https://static-cdn.jtvnw.net/jtv_user_pictures/xarth/404_user_70x70.png';
+      const fbStream = 'https://static-cdn.jtvnw.net/ttv-static/404_preview-640x360.jpg';
+      const fbAvatar = 'https://static-cdn.jtvnw.net/jtv_user_pictures/xarth/404_user_70x70.png';
       E('pvBotAvatar').src = BOT_AVATAR;
-      E('pvMsgTime').textContent = 'Heute um ' + new Date().toLocaleTimeString('de-DE', {{ hour: '2-digit', minute: '2-digit' }});
+      E('pvMsgTime').textContent = 'Heute um ' + new Date().toLocaleTimeString('de-DE', {{ hour:'2-digit', minute:'2-digit' }});
       E('pvContent').textContent = p.content || '(leer)';
       E('pvEmbed').style.borderLeftColor = toHexColor(embed.color);
-
-      const authorEnabled = author.enabled !== false && Boolean(author.name || author.icon_url);
-      E('pvAuthorWrap').style.display = authorEnabled ? 'flex' : 'none';
-      const authorLink = E('pvAuthor');
-      authorLink.textContent = author.name || '';
-      authorLink.href = author.url || '#';
-      authorLink.classList.toggle('no-link', !author.url);
-      setImage(E('pvAuthorIcon'), author.icon_url || '', fallbackAvatar);
-
+      const authOn = author.enabled !== false && Boolean(author.name || author.icon_url);
+      E('pvAuthorWrap').style.display = authOn ? 'flex' : 'none';
+      const authLink = E('pvAuthor');
+      authLink.textContent = author.name || '';
+      authLink.href = author.url || '#';
+      authLink.classList.toggle('no-link', !author.url);
+      setImage(E('pvAuthorIcon'), author.icon_url || '', fbAvatar);
       const titleNode = E('pvTitle');
       const titleText = String(embed.title || '').trim();
       const titleUrl = String(embed.url || '').trim();
-      if (!titleText) {{
-        titleNode.style.display = 'none';
-      }} else {{
-        titleNode.style.display = 'block';
-        titleNode.textContent = titleText;
-        titleNode.href = titleUrl || '#';
-        titleNode.classList.toggle('no-link', !titleUrl);
-      }}
-
+      if (!titleText) {{ titleNode.style.display = 'none'; }}
+      else {{ titleNode.style.display = 'block'; titleNode.textContent = titleText; titleNode.href = titleUrl || '#'; titleNode.classList.toggle('no-link', !titleUrl); }}
       E('pvDesc').textContent = embed.description || '';
-      const fieldsWrap = E('pvFields');
-      fieldsWrap.innerHTML = '';
-      (embed.fields || []).forEach((field) => {{
-        const div = document.createElement('div');
-        div.className = 'pv-field ' + (field.inline ? '' : 'full');
-        const label = document.createElement('div');
-        label.className = 'pv-field-name';
-        label.textContent = String(field.name || '');
-        const value = document.createElement('div');
-        value.className = 'pv-field-value';
-        value.textContent = String(field.value || '');
-        div.appendChild(label);
-        div.appendChild(value);
-        fieldsWrap.appendChild(div);
+      const fWrap = E('pvFields'); fWrap.innerHTML = '';
+      (embed.fields || []).forEach((f) => {{
+        const d = document.createElement('div'); d.className = 'pv-field ' + (f.inline ? '' : 'full');
+        const l = document.createElement('div'); l.className = 'pv-field-name'; l.textContent = String(f.name || '');
+        const v = document.createElement('div'); v.className = 'pv-field-value'; v.textContent = String(f.value || '');
+        d.appendChild(l); d.appendChild(v); fWrap.appendChild(d);
       }});
-
-      setImage(E('pvImage'), (embed.image || {{}}).url || '', fallbackStreamPreview);
-      setImage(E('pvThumb'), (embed.thumbnail || {{}}).url || '', fallbackAvatar);
-
+      setImage(E('pvImage'), (embed.image || {{}}).url || '', fbStream);
+      setImage(E('pvThumb'), (embed.thumbnail || {{}}).url || '', fbAvatar);
       E('pvFooterText').textContent = footer.text || '';
       E('pvFooterTime').textContent = embed.timestamp ? ('• ' + formatTime(embed.timestamp)) : '';
-      setImage(E('pvFooterIcon'), footer.icon_url || '', fallbackAvatar);
+      setImage(E('pvFooterIcon'), footer.icon_url || '', fbAvatar);
       E('pvFooter').style.display = (footer.text || footer.icon_url || embed.timestamp) ? 'flex' : 'none';
-
       const pvBtn = E('pvBtn');
       pvBtn.style.display = button.enabled !== false ? 'inline-flex' : 'none';
       pvBtn.textContent = button.label || 'Auf Twitch ansehen';
       pvBtn.href = button.url || '#';
+      if (S.activeBlock) highlightPreview(S.activeBlock);
     }}
 
     async function fetchPreview() {{
       const cfg = readForm();
+      updateBadges();
       const url = `/twitch/api/live-announcement/preview?streamer=${{encodeURIComponent(S.streamer)}}&config=${{encodeURIComponent(JSON.stringify(cfg))}}`;
       try {{
-        const res = await fetch(url, {{ credentials: 'same-origin' }});
+        const res = await fetch(url, {{ credentials:'same-origin' }});
         const data = await res.json();
         if (!res.ok) {{ setStatus(data.error || 'Preview fehlgeschlagen.', true); return; }}
         S.streamerPingRoleId = Number(data.streamer_ping_role_id || S.streamerPingRoleId || 0) || null;
-        if (data.streamer_ping_role_name) {{ S.streamerPingRoleName = String(data.streamer_ping_role_name); }}
-        if (typeof data.role_status_message === 'string' && data.role_status_message) {{
-          S.roleStatusMessage = data.role_status_message;
-        }}
+        if (data.streamer_ping_role_name) S.streamerPingRoleName = String(data.streamer_ping_role_name);
+        if (typeof data.role_status_message === 'string' && data.role_status_message) S.roleStatusMessage = data.role_status_message;
         renderRoleInfo();
         S.preview = data.preview || {{}};
         renderPreview();
         renderValidation(data.validation || []);
-      }} catch (_err) {{
-        setStatus('Preview Request fehlgeschlagen.', true);
-      }}
+      }} catch (_) {{ setStatus('Preview Request fehlgeschlagen.', true); }}
     }}
 
     async function saveConfig() {{
@@ -1981,26 +1981,21 @@ class DashboardLiveAnnouncementMixin:
       setStatus('Speichere...');
       try {{
         const res = await fetch(`/twitch/api/live-announcement/config?streamer=${{encodeURIComponent(S.streamer)}}`, {{
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: {{ 'Content-Type': 'application/json', 'X-CSRF-Token': S.csrf }},
+          method:'POST', credentials:'same-origin',
+          headers: {{ 'Content-Type':'application/json', 'X-CSRF-Token': S.csrf }},
           body: JSON.stringify({{ csrf_token: S.csrf, streamer_login: S.streamer, config: cfg, allowed_editor_role_ids: S.allowedRoles }})
         }});
         const data = await res.json();
         if (!res.ok) {{ renderValidation(data.validation || []); setStatus(data.message || data.error || 'Speichern fehlgeschlagen.', true); return; }}
         S.streamerPingRoleId = Number(data.streamer_ping_role_id || S.streamerPingRoleId || 0) || null;
-        if (data.streamer_ping_role_name) {{ S.streamerPingRoleName = String(data.streamer_ping_role_name); }}
-        if (typeof data.role_status_message === 'string' && data.role_status_message) {{
-          S.roleStatusMessage = data.role_status_message;
-        }}
+        if (data.streamer_ping_role_name) S.streamerPingRoleName = String(data.streamer_ping_role_name);
+        if (typeof data.role_status_message === 'string' && data.role_status_message) S.roleStatusMessage = data.role_status_message;
         renderRoleInfo();
         S.preview = data.preview || S.preview;
         renderPreview();
         renderValidation([]);
         setStatus('Gespeichert.');
-      }} catch (_err) {{
-        setStatus('Speichern fehlgeschlagen.', true);
-      }}
+      }} catch (_) {{ setStatus('Speichern fehlgeschlagen.', true); }}
     }}
 
     async function sendTestDm() {{
@@ -2008,19 +2003,16 @@ class DashboardLiveAnnouncementMixin:
       setStatus('Sende Test-DM...');
       try {{
         const res = await fetch(`/twitch/api/live-announcement/test?streamer=${{encodeURIComponent(S.streamer)}}`, {{
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: {{ 'Content-Type': 'application/json', 'X-CSRF-Token': S.csrf }},
+          method:'POST', credentials:'same-origin',
+          headers: {{ 'Content-Type':'application/json', 'X-CSRF-Token': S.csrf }},
           body: JSON.stringify({{ csrf_token: S.csrf, streamer_login: S.streamer, config: cfg }})
         }});
         const data = await res.json();
         S.streamerPingRoleId = Number(data.streamer_ping_role_id || S.streamerPingRoleId || 0) || null;
-        if (data.streamer_ping_role_name) {{ S.streamerPingRoleName = String(data.streamer_ping_role_name); }}
+        if (data.streamer_ping_role_name) S.streamerPingRoleName = String(data.streamer_ping_role_name);
         renderRoleInfo();
         setStatus(data.message || (data.ok ? 'Test versendet.' : 'Test fehlgeschlagen.'), !data.ok);
-      }} catch (_err) {{
-        setStatus('Test-DM fehlgeschlagen.', true);
-      }}
+      }} catch (_) {{ setStatus('Test-DM fehlgeschlagen.', true); }}
     }}
 
     function onMutate() {{ if (S.timer) clearTimeout(S.timer); S.timer = setTimeout(fetchPreview, 190); }}
@@ -2028,15 +2020,14 @@ class DashboardLiveAnnouncementMixin:
     function bindEvents() {{
       bindBlockMoveButtons();
       WATCH_IDS.forEach((id) => {{
-        const node = E(id);
-        if (!node) return;
+        const node = E(id); if (!node) return;
         const evt = (node instanceof HTMLInputElement && node.type === 'checkbox') || node instanceof HTMLSelectElement ? 'change' : 'input';
         node.addEventListener(evt, onMutate);
       }});
-      E('streamerSelect').addEventListener('change', () => {{ const next = E('streamerSelect').value; if (next) window.location.href = `/twitch/live-announcement?streamer=${{encodeURIComponent(next)}}`; }});
-      E('addFieldBtn').addEventListener('click', () => {{ S.config.embed.fields.push({{ name: 'Neues Feld', value: '{{title}}', inline: true }}); renderFields(); onMutate(); }});
-      E('presetBtn').addEventListener('click', () => {{ S.config.embed.fields = [{{ name: 'Viewer', value: '{{viewer_count}}', inline: true }}, {{ name: 'Kategorie', value: '{{game}}', inline: true }}]; renderFields(); onMutate(); }});
-      E('presetMetaBtn').addEventListener('click', () => {{ S.config.embed.fields = [{{ name: 'Startzeit', value: '{{started_at}}', inline: true }}, {{ name: 'Sprache', value: '{{language}}', inline: true }}, {{ name: 'Tags', value: '{{tags}}', inline: false }}]; renderFields(); onMutate(); }});
+      E('streamerSelect').addEventListener('change', () => {{ const n = E('streamerSelect').value; if (n) window.location.href = `/twitch/live-announcement?streamer=${{encodeURIComponent(n)}}`; }});
+      E('addFieldBtn').addEventListener('click', () => {{ S.config.embed.fields.push({{ name:'Neues Feld', value:'{{title}}', inline:true }}); renderFields(); onMutate(); }});
+      E('presetBtn').addEventListener('click', () => {{ S.config.embed.fields = [{{ name:'Viewer', value:'{{viewer_count}}', inline:true }}, {{ name:'Kategorie', value:'{{game}}', inline:true }}]; renderFields(); onMutate(); }});
+      E('presetMetaBtn').addEventListener('click', () => {{ S.config.embed.fields = [{{ name:'Startzeit', value:'{{started_at}}', inline:true }}, {{ name:'Sprache', value:'{{language}}', inline:true }}, {{ name:'Tags', value:'{{tags}}', inline:false }}]; renderFields(); onMutate(); }});
       E('saveBtn').addEventListener('click', saveConfig);
       E('testBtn').addEventListener('click', sendTestDm);
       const copyBtn = E('copyRoleIdBtn');
@@ -2048,6 +2039,10 @@ class DashboardLiveAnnouncementMixin:
 
     fillForm();
     bindEvents();
+    initAccordion();
+    initSubTabs();
+    initColorPicker();
+    initFocusTracking();
     renderPreview();
     renderValidation((ST.preview || {{}}).validation || []);
   </script>
