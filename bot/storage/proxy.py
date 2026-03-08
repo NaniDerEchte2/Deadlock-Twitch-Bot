@@ -1051,6 +1051,110 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_clip_templates_global_category ON clip_templates_global(category)"
     )
 
+    # 18) Streamer-Pläne / Abonnements
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS streamer_plans (
+            twitch_user_id          TEXT PRIMARY KEY,
+            twitch_login            TEXT,
+            plan_name               TEXT NOT NULL DEFAULT 'free',
+            promo_disabled          INTEGER NOT NULL DEFAULT 0,
+            activated_at            TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at              TEXT,
+            notes                   TEXT,
+            raid_boost_enabled      INTEGER NOT NULL DEFAULT 0,
+            promo_message           TEXT,
+            manual_plan_id          TEXT,
+            manual_plan_expires_at  TEXT,
+            manual_plan_notes       TEXT NOT NULL DEFAULT '',
+            manual_plan_updated_at  TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_streamer_plans_login ON streamer_plans(twitch_login)"
+    )
+
+    # 19) Vorgecachte Partner-Raid-Scores
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS twitch_partner_raid_scores (
+            twitch_user_id                  TEXT PRIMARY KEY,
+            twitch_login                    TEXT NOT NULL,
+            avg_duration_sec                INTEGER NOT NULL DEFAULT 0,
+            time_pattern_score_base         REAL NOT NULL DEFAULT 0.5,
+            received_successful_raids_total INTEGER NOT NULL DEFAULT 0,
+            is_new_partner_preferred        INTEGER NOT NULL DEFAULT 1,
+            new_partner_multiplier          REAL NOT NULL DEFAULT 1.0,
+            raid_boost_multiplier           REAL NOT NULL DEFAULT 1.0,
+            is_live                         INTEGER NOT NULL DEFAULT 0,
+            current_started_at              TEXT,
+            current_uptime_sec              INTEGER NOT NULL DEFAULT 0,
+            duration_score                  REAL NOT NULL DEFAULT 0.5,
+            time_pattern_score              REAL NOT NULL DEFAULT 0.5,
+            base_score                      REAL NOT NULL DEFAULT 0.5,
+            final_score                     REAL NOT NULL DEFAULT 0.5,
+            today_received_raids            INTEGER NOT NULL DEFAULT 0,
+            last_computed_at                TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_partner_raid_scores_live_score "
+        "ON twitch_partner_raid_scores(is_live, final_score DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_partner_raid_scores_login "
+        "ON twitch_partner_raid_scores(twitch_login)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_partner_raid_scores_computed "
+        "ON twitch_partner_raid_scores(last_computed_at)"
+    )
+
+    # 20) Partner-Raid-Score-Tracking
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS twitch_partner_raid_score_tracking (
+            id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+            raid_history_id           INTEGER,
+            from_broadcaster_id       TEXT,
+            from_broadcaster_login    TEXT NOT NULL,
+            to_broadcaster_id         TEXT NOT NULL,
+            to_broadcaster_login      TEXT NOT NULL,
+            viewer_count              INTEGER NOT NULL DEFAULT 0,
+            confirmed_at              TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            target_session_id         INTEGER,
+            target_stream_started_at  TEXT,
+            score_last_computed_at    TEXT,
+            final_score               REAL,
+            base_score                REAL,
+            duration_score            REAL,
+            time_pattern_score        REAL,
+            new_partner_multiplier    REAL,
+            raid_boost_multiplier     REAL,
+            today_received_raids      INTEGER NOT NULL DEFAULT 0,
+            was_deadlock_at_raid      INTEGER NOT NULL DEFAULT 0,
+            deadlock_continued_until  TEXT,
+            deadlock_continued_sec    INTEGER,
+            resolved_at               TEXT,
+            resolution_reason         TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_partner_raid_tracking_target "
+        "ON twitch_partner_raid_score_tracking(to_broadcaster_id, confirmed_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_partner_raid_tracking_session "
+        "ON twitch_partner_raid_score_tracking(target_session_id, resolved_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_partner_raid_tracking_history "
+        "ON twitch_partner_raid_score_tracking(raid_history_id)"
+    )
+
     # Seed default global templates
     _seed_default_templates(conn)
 

@@ -49,6 +49,7 @@ from .core.constants import (
 )
 from .internal_api import InternalApiRunner
 from .raid.manager import RaidBot
+from .raid import partner_scores as partner_raid_scores
 from .reload_manager import LoopSpec, SubsystemDef, TwitchReloadManager
 from .secret_store import load_secret_value
 
@@ -129,6 +130,7 @@ class TwitchBaseCog(commands.Cog):
         self._twl_command: commands.Command | None = None
         self._target_game_name = (TWITCH_TARGET_GAME_NAME or "").strip()
         self._target_game_lower = self._target_game_name.lower()
+        self.partner_raid_score_service = partner_raid_scores
 
         # Dashboard/Auth (aus Config-Header)
         self._dashboard_token = load_secret_value("TWITCH_DASHBOARD_TOKEN") or None
@@ -301,6 +303,7 @@ class TwitchBaseCog(commands.Cog):
                     redirect_uri=redirect_uri,
                     session=session,
                 )
+                self._raid_bot.partner_raid_score_service = partner_raid_scores
                 self._raid_bot.set_discord_bot(self.bot)
                 self._raid_bot.set_cog(self)  # For dynamic EventSub subscriptions
                 log.debug("Raid-Bot initialisiert (redirect_uri: %s)", redirect_uri)

@@ -11,6 +11,10 @@ from uuid import uuid4
 
 from ... import storage
 from ...core.constants import log
+try:
+    from ...raid.partner_scores import refresh_partner_raid_score
+except Exception:  # pragma: no cover - partial deploy safety
+    refresh_partner_raid_score = None  # type: ignore[assignment]
 from .billing_plans import (
     BILLING_CYCLE_DISCOUNTS as _BILLING_CYCLE_DISCOUNTS,
     BILLING_PLANS as _BILLING_PLANS,
@@ -28,6 +32,34 @@ from .billing_plans import (
 
 class _DashboardBillingMixin:
     """Shared billing helper methods for dashboard route handlers."""
+
+    def _billing_refresh_partner_raid_score_cache(
+        self,
+        *,
+        twitch_user_id: str,
+        twitch_login: str,
+        reason: str,
+    ) -> None:
+        if not callable(refresh_partner_raid_score):
+            return
+        twitch_user_key = str(twitch_user_id or "").strip()
+        if not twitch_user_key:
+            return
+        try:
+            refresh_partner_raid_score(twitch_user_key)
+        except Exception:
+            log.debug(
+                "billing: partner raid score refresh failed for %s (%s)",
+                twitch_login or twitch_user_key,
+                reason,
+                exc_info=True,
+            )
+        else:
+            log.info(
+                "billing: partner raid score refreshed for %s (%s)",
+                twitch_login or twitch_user_key,
+                reason,
+            )
 
     @staticmethod
     def _billing_valid_plan_ids() -> set[str]:
@@ -703,6 +735,8 @@ class _DashboardBillingMixin:
         is_active = status in ("active", "trialing")
         plan_name = self._billing_plan_name_from_id(plan_id)
         effective_plan = plan_name if is_active else "free"
+        refreshed_user_id = ""
+        refreshed_login = str(customer_reference or "").strip().lower()
         try:
             with storage.get_conn() as conn:
                 self._billing_ensure_streamer_plan_columns(conn)
@@ -717,8 +751,32 @@ class _DashboardBillingMixin:
                     """,
                     (effective_plan, customer_reference),
                 )
+                row = conn.execute(
+                    """
+                    SELECT twitch_user_id, twitch_login
+                    FROM twitch_streamers
+                    WHERE LOWER(twitch_login) = LOWER(?)
+                    LIMIT 1
+                    """,
+                    (customer_reference,),
+                ).fetchone()
+                if row is not None:
+                    refreshed_user_id = str(
+                        self._billing_row_value(row, "twitch_user_id", 0, "") or ""
+                    ).strip()
+                    refreshed_login = str(
+                        self._billing_row_value(row, "twitch_login", 1, refreshed_login) or refreshed_login
+                    ).strip().lower()
         except Exception:
             log.debug("billing sync plan to streamer_plans failed", exc_info=True)
+            return
+
+        if refreshed_user_id:
+            self._billing_refresh_partner_raid_score_cache(
+                twitch_user_id=refreshed_user_id,
+                twitch_login=refreshed_login,
+                reason="billing_subscription_sync",
+            )
 
     def _billing_apply_webhook_event(
         self,
@@ -1375,6 +1433,12 @@ class _DashboardBillingMixin:
                 ),
             )
 
+        self._billing_refresh_partner_raid_score_cache(
+            twitch_user_id=twitch_user_id,
+            twitch_login=canonical_login,
+            reason="billing_manual_plan_set",
+        )
+
         for row in self._billing_admin_plan_rows_for_all_streamers():
             if str(row.get("twitch_login") or "").strip().lower() == normalized_login:
                 return row
@@ -1419,6 +1483,12 @@ class _DashboardBillingMixin:
                 """,
                 (updated_at_iso, twitch_user_id),
             )
+
+        self._billing_refresh_partner_raid_score_cache(
+            twitch_user_id=twitch_user_id,
+            twitch_login=normalized_login,
+            reason="billing_manual_plan_clear",
+        )
 
         for row in self._billing_admin_plan_rows_for_all_streamers():
             if str(row.get("twitch_login") or "").strip().lower() == normalized_login:

@@ -5,6 +5,10 @@ from datetime import UTC, datetime
 
 from .. import storage
 from ..core.constants import log
+try:
+    from ..raid.partner_raid_score_tracking import resolve_partner_raid_tracking_for_session
+except Exception:  # pragma: no cover - partial deploy safety
+    resolve_partner_raid_tracking_for_session = None  # type: ignore[assignment]
 
 
 class _SessionsMixin:
@@ -516,6 +520,22 @@ class _SessionsMixin:
             )
         finally:
             cache.pop(login_lower, None)
+
+        if callable(resolve_partner_raid_tracking_for_session):
+            try:
+                resolve_partner_raid_tracking_for_session(
+                    twitch_user_id=twitch_user_id,
+                    streamer_login=login_lower,
+                    session_id=session_id,
+                    session_ended_at=now_dt,
+                )
+            except Exception:
+                log.debug(
+                    "Partner raid score tracking resolve failed for %s session=%s",
+                    login_lower,
+                    session_id,
+                    exc_info=True,
+                )
 
         # --- Experimental hook: session finalize ---
         try:

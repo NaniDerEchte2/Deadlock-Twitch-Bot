@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import time
@@ -28,6 +29,219 @@ from .sessions_mixin import _SessionsMixin
 
 class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _EmbedsMixin):
     """Polling loops and helpers used by the Twitch cog."""
+
+    def _partner_raid_score_refresh_interval_seconds(self) -> float:
+        return 300.0
+
+    def _partner_raid_score_refresh_candidates(self) -> list[object]:
+        candidates: list[object] = []
+        for candidate in (
+            getattr(self, "partner_raid_score_service", None),
+            getattr(getattr(self, "_raid_bot", None), "partner_raid_score_service", None),
+            getattr(self, "_raid_bot", None),
+            self,
+        ):
+            if candidate is None or candidate in candidates:
+                continue
+            candidates.append(candidate)
+        return candidates
+
+    @staticmethod
+    def _build_partner_raid_score_refresh_kwargs(
+        func,
+        *,
+        twitch_user_id: str | None,
+        login: str | None,
+        trigger: str,
+        full_refresh: bool,
+    ) -> dict[str, object]:
+        try:
+            params = inspect.signature(func).parameters
+        except (TypeError, ValueError):
+            params = {}
+
+        kwargs: dict[str, object] = {}
+        for name in params:
+            if name in {"self", "cls"}:
+                continue
+            if name in {"twitch_user_id", "broadcaster_user_id", "user_id", "partner_user_id"}:
+                if twitch_user_id:
+                    kwargs[name] = twitch_user_id
+                continue
+            if name in {"login", "twitch_login", "broadcaster_login", "partner_login"}:
+                if login:
+                    kwargs[name] = login
+                continue
+            if name in {"trigger", "reason", "source"}:
+                kwargs[name] = trigger
+                continue
+            if name in {"full_refresh", "bulk", "refresh_all"}:
+                kwargs[name] = full_refresh
+                continue
+            if name in {"immediate", "force"}:
+                kwargs[name] = True
+                continue
+        return kwargs
+
+    async def _request_partner_raid_score_refresh(
+        self,
+        *,
+        twitch_user_id: str | None = None,
+        login: str | None = None,
+        trigger: str,
+        full_refresh: bool = False,
+    ) -> bool:
+        preferred_names = (
+            (
+                "refresh_all_partner_raid_scores",
+                "refresh_all_partner_raid_score_caches",
+                "refresh_partner_raid_score_cache",
+                "refresh_partner_raid_scores",
+            )
+            if full_refresh
+            else (
+                "refresh_partner_raid_score_cache",
+                "refresh_partner_raid_scores",
+                "refresh_partner_raid_score",
+            )
+        )
+
+        for candidate in self._partner_raid_score_refresh_candidates():
+            for name in preferred_names:
+                func = getattr(candidate, name, None)
+                if not callable(func):
+                    continue
+                try:
+                    func_params = inspect.signature(func).parameters
+                except (TypeError, ValueError):
+                    func_params = {}
+                kwargs = self._build_partner_raid_score_refresh_kwargs(
+                    func,
+                    twitch_user_id=twitch_user_id,
+                    login=login,
+                    trigger=trigger,
+                    full_refresh=full_refresh,
+                )
+                if not full_refresh and not twitch_user_id:
+                    required_id_names = {
+                        "twitch_user_id",
+                        "broadcaster_user_id",
+                        "user_id",
+                        "partner_user_id",
+                    }
+                    if any(required_name in func_params for required_name in required_id_names):
+                        continue
+                try:
+                    result = func(**kwargs)
+                except TypeError:
+                    continue
+                if inspect.isawaitable(result):
+                    await result
+                return True
+
+        log.debug(
+            "Partner raid score refresh skipped: no refresh service available (trigger=%s, user_id=%s, full=%s)",
+            trigger,
+            twitch_user_id or login or "",
+            full_refresh,
+        )
+        return False
+
+    async def _run_partner_raid_score_refresh_task(
+        self,
+        *,
+        task_key: str,
+        twitch_user_id: str | None,
+        login: str | None,
+        trigger: str,
+        full_refresh: bool,
+    ) -> None:
+        try:
+            await self._request_partner_raid_score_refresh(
+                twitch_user_id=twitch_user_id,
+                login=login,
+                trigger=trigger,
+                full_refresh=full_refresh,
+            )
+        except Exception:
+            log.exception(
+                "Partner raid score refresh failed (trigger=%s, user_id=%s, full=%s)",
+                trigger,
+                twitch_user_id or login or "",
+                full_refresh,
+            )
+        finally:
+            pending = getattr(self, "_partner_raid_score_refresh_pending", None)
+            if isinstance(pending, set):
+                pending.discard(task_key)
+
+    def _schedule_partner_raid_score_refresh(
+        self,
+        *,
+        twitch_user_id: str | None = None,
+        login: str | None = None,
+        trigger: str,
+        full_refresh: bool = False,
+    ) -> bool:
+        key = f"all:{trigger}" if full_refresh else str(twitch_user_id or login or "").strip().lower()
+        if not key:
+            return False
+
+        pending = getattr(self, "_partner_raid_score_refresh_pending", None)
+        if not isinstance(pending, set):
+            pending = set()
+            self._partner_raid_score_refresh_pending = pending
+        if key in pending:
+            return False
+        pending.add(key)
+
+        task = self._run_partner_raid_score_refresh_task(
+            task_key=key,
+            twitch_user_id=twitch_user_id,
+            login=login,
+            trigger=trigger,
+            full_refresh=full_refresh,
+        )
+        spawn = getattr(self, "_spawn_bg_task", None)
+        if callable(spawn):
+            spawn(task, f"partner_raid_score_refresh.{key}")
+        else:
+            asyncio.create_task(task, name=f"partner_raid_score_refresh.{key}")
+        return True
+
+    def _schedule_partner_raid_score_refreshes(
+        self,
+        refreshes: list[tuple[str, str | None, str]],
+    ) -> int:
+        scheduled = 0
+        seen: set[str] = set()
+        for twitch_user_id, login, trigger in refreshes:
+            user_id = str(twitch_user_id or "").strip()
+            dedupe_key = user_id or str(login or "").strip().lower()
+            if not dedupe_key or dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            if self._schedule_partner_raid_score_refresh(
+                twitch_user_id=user_id or None,
+                login=login,
+                trigger=trigger,
+            ):
+                scheduled += 1
+        return scheduled
+
+    def _maybe_schedule_partner_raid_score_reconciliation(self, *, trigger: str) -> bool:
+        now = time.monotonic()
+        interval = self._partner_raid_score_refresh_interval_seconds()
+        last_run = float(
+            getattr(self, "_partner_raid_score_reconciliation_last_monotonic", 0.0) or 0.0
+        )
+        if last_run and (now - last_run) < max(60.0, interval):
+            return False
+        self._partner_raid_score_reconciliation_last_monotonic = now
+        return self._schedule_partner_raid_score_refresh(
+            trigger=trigger,
+            full_refresh=True,
+        )
 
     @staticmethod
     def _normalize_poll_interval_seconds(raw_value: object) -> int | None:
@@ -495,6 +709,13 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
             log.exception("Fehler in _process_postings")
 
         try:
+            self._maybe_schedule_partner_raid_score_reconciliation(
+                trigger="poll_tick_reconciliation"
+            )
+        except Exception:
+            log.debug("Partner raid score reconciliation scheduling failed", exc_info=True)
+
+        try:
             await self._record_eventsub_capacity_snapshot("poll_tick")
         except Exception:
             log.debug("EventSub: Snapshot im Poll-Tick fehlgeschlagen", exc_info=True)
@@ -541,6 +762,7 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                 str | None,
             ]
         ] = []
+        partner_score_refreshes: list[tuple[str, str | None, str]] = []
 
         with storage.get_conn() as c:
             live_state_rows = c.execute("SELECT * FROM twitch_live_state").fetchall()
@@ -645,6 +867,10 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                 and previous_stream_id != current_stream_id
             ):
                 had_deadlock_prev = False
+                if twitch_user_id:
+                    partner_score_refreshes.append(
+                        (twitch_user_id, login_lower, "poll_stream_restarted")
+                    )
 
             message_id_previous = (
                 str(previous_state.get("last_discord_message_id") or "").strip() or None
@@ -875,11 +1101,21 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                 )
             )
 
+            if twitch_user_id:
+                if not was_live and is_live:
+                    partner_score_refreshes.append((twitch_user_id, login_lower, "poll_stream_online"))
+                elif was_live and not is_live:
+                    partner_score_refreshes.append((twitch_user_id, login_lower, "poll_stream_offline"))
+
             if need_link and self._alert_channel_id and (now_utc.minute % 10 == 0) and is_live:
                 # Platzhalter für deinen Profil-/Panel-Check
                 pass
 
         await self._persist_live_state_rows(pending_state_rows)
+        try:
+            self._schedule_partner_raid_score_refreshes(partner_score_refreshes)
+        except Exception:
+            log.debug("Partner raid score refresh scheduling failed", exc_info=True)
         await self._auto_archive_inactive_streamers()
 
     async def _persist_live_state_rows(

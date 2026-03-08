@@ -456,6 +456,41 @@ class TwitchAnalyticsMixin:
         self, broadcaster_user_id: str, broadcaster_login: str, event: dict
     ) -> None:
         """Wird von stream.online EventSub aufgerufen – triggert sofort den Go-Live-Handler."""
+        started_at = (event.get("started_at") or "").strip() or None
+        stream_id = str(event.get("id") or event.get("stream_id") or "").strip() or None
+        login_value = (broadcaster_login or event.get("broadcaster_user_login") or "").strip().lower()
+        now_iso = datetime.now(UTC).isoformat(timespec="seconds")
+
+        try:
+            with storage.get_conn() as c:
+                c.execute(
+                    """
+                    INSERT INTO twitch_live_state (
+                        twitch_user_id, streamer_login, is_live, last_seen_at, last_stream_id, last_started_at
+                    )
+                    VALUES (%s, %s, 1, %s, %s, %s)
+                    ON CONFLICT (twitch_user_id) DO UPDATE
+                        SET streamer_login = COALESCE(NULLIF(EXCLUDED.streamer_login, ''), twitch_live_state.streamer_login),
+                            is_live = 1,
+                            last_seen_at = EXCLUDED.last_seen_at,
+                            last_stream_id = COALESCE(EXCLUDED.last_stream_id, twitch_live_state.last_stream_id),
+                            last_started_at = COALESCE(EXCLUDED.last_started_at, twitch_live_state.last_started_at)
+                    """,
+                    (
+                        broadcaster_user_id,
+                        login_value or broadcaster_user_id,
+                        now_iso,
+                        stream_id,
+                        started_at,
+                    ),
+                )
+        except Exception:
+            log.debug(
+                "_handle_stream_online: Konnte minimalen Live-State nicht speichern fuer %s",
+                broadcaster_user_id,
+                exc_info=True,
+            )
+
         handler = getattr(self, "_handle_stream_went_live", None)
         if callable(handler):
             log.info(
@@ -464,6 +499,20 @@ class TwitchAnalyticsMixin:
                 broadcaster_user_id,
             )
             await handler(broadcaster_user_id, broadcaster_login)
+        refresh = getattr(self, "_request_partner_raid_score_refresh", None)
+        if callable(refresh):
+            try:
+                await refresh(
+                    twitch_user_id=broadcaster_user_id,
+                    login=login_value or broadcaster_login,
+                    trigger="eventsub_stream_online",
+                )
+            except Exception:
+                log.debug(
+                    "_handle_stream_online: Partner raid score refresh failed for %s",
+                    broadcaster_user_id,
+                    exc_info=True,
+                )
 
     async def _handle_channel_update(self, broadcaster_user_id: str, event: dict) -> None:
         """Speichert eine channel.update Notification (Titel/Game-Änderung) in der DB."""
@@ -494,6 +543,12 @@ class TwitchAnalyticsMixin:
                      WHERE twitch_user_id = %s AND is_live = 1
                     """,
                     (title, game_name, broadcaster_user_id),
+                )
+            refresh = getattr(self, "_request_partner_raid_score_refresh", None)
+            if callable(refresh):
+                await refresh(
+                    twitch_user_id=broadcaster_user_id,
+                    trigger="eventsub_channel_update",
                 )
         except Exception:
             log.exception("_handle_channel_update: Fehler für %s", broadcaster_user_id)

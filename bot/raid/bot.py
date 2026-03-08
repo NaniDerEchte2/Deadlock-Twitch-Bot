@@ -22,6 +22,18 @@ import discord
 
 from ..discord_role_sync import normalize_discord_user_id, sync_streamer_role
 from ..storage import backfill_tracked_stats_from_category, get_conn
+try:
+    from .partner_scores import (
+        load_partner_raid_score_map,
+        refresh_partner_raid_score_async,
+    )
+except Exception:  # pragma: no cover - best effort if helper is unavailable during partial deploys
+    load_partner_raid_score_map = None  # type: ignore[assignment]
+    refresh_partner_raid_score_async = None  # type: ignore[assignment]
+try:
+    from .partner_raid_score_tracking import track_confirmed_partner_raid
+except Exception:  # pragma: no cover - best effort if helper is unavailable during partial deploys
+    track_confirmed_partner_raid = None  # type: ignore[assignment]
 
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"  # noqa: S105
 TWITCH_AUTHORIZE_URL = "https://id.twitch.tv/oauth2/authorize"
@@ -769,6 +781,25 @@ class RaidBot:
             (time.monotonic() - offline_trigger_ts) if offline_trigger_ts else -1.0,
         )
 
+        if is_partner_raid:
+            await self._refresh_partner_score_cache_if_available(
+                to_broadcaster_id,
+                reason="incoming_partner_raid_confirmed",
+            )
+            if callable(track_confirmed_partner_raid):
+                track_confirmed_partner_raid(
+                    to_broadcaster_id=to_broadcaster_id,
+                    to_broadcaster_login=to_broadcaster_login,
+                    from_broadcaster_login=from_broadcaster_login,
+                    from_broadcaster_id=from_broadcaster_id,
+                    viewer_count=viewer_count,
+                    score_snapshot=(
+                        target_stream_data.get("_partner_score")
+                        if isinstance(target_stream_data, dict)
+                        else None
+                    ),
+                )
+
         # silent_raid Check: Streamer kann Raid-Nachrichten im Chat unterdrücken
         silent_raid = False
         try:
@@ -1274,6 +1305,265 @@ class RaidBot:
 
         await asyncio.gather(*(_fetch_one(c) for c in api_needed), return_exceptions=True)
 
+    def _load_prepared_partner_scores(
+        self,
+        twitch_user_ids: list[str],
+    ) -> dict[str, dict[str, object]]:
+        requested = [str(user_id or "").strip() for user_id in twitch_user_ids if str(user_id or "").strip()]
+        if not requested:
+            return {}
+
+        if callable(load_partner_raid_score_map):
+            try:
+                return load_partner_raid_score_map(requested)
+            except Exception:
+                log.debug("Prepared partner score helper failed", exc_info=True)
+
+        sql = (
+            "SELECT twitch_user_id, twitch_login, is_live, final_score, today_received_raids, "
+            "duration_score, time_pattern_score, base_score, new_partner_multiplier, "
+            "raid_boost_multiplier, last_computed_at "
+            "FROM twitch_partner_raid_scores "
+            f"WHERE twitch_user_id IN ({','.join('?' for _ in requested)})"
+        )
+        try:
+            with get_conn() as conn:
+                rows = conn.execute(sql, tuple(requested)).fetchall()
+        except Exception:
+            log.debug("Prepared partner score DB query failed", exc_info=True)
+            return {}
+
+        def _safe_int(value: object, default: int = 0) -> int:
+            try:
+                if value is None:
+                    return default
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _safe_float(value: object, default: float = 0.0) -> float:
+            try:
+                if value is None:
+                    return default
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        out: dict[str, dict[str, object]] = {}
+        for row in rows:
+            twitch_user_id = str(row["twitch_user_id"] if hasattr(row, "keys") else row[0] or "").strip()
+            if not twitch_user_id:
+                continue
+            out[twitch_user_id] = {
+                "twitch_user_id": twitch_user_id,
+                "twitch_login": str(
+                    row["twitch_login"] if hasattr(row, "keys") else row[1] or ""
+                ).strip().lower(),
+                "is_live": bool(_safe_int(row["is_live"] if hasattr(row, "keys") else row[2], 0)),
+                "final_score": _safe_float(
+                    row["final_score"] if hasattr(row, "keys") else row[3],
+                    0.0,
+                ),
+                "today_received_raids": _safe_int(
+                    row["today_received_raids"] if hasattr(row, "keys") else row[4],
+                    0,
+                ),
+                "duration_score": _safe_float(
+                    row["duration_score"] if hasattr(row, "keys") else row[5],
+                    0.5,
+                ),
+                "time_pattern_score": _safe_float(
+                    row["time_pattern_score"] if hasattr(row, "keys") else row[6],
+                    0.5,
+                ),
+                "base_score": _safe_float(
+                    row["base_score"] if hasattr(row, "keys") else row[7],
+                    0.5,
+                ),
+                "new_partner_multiplier": _safe_float(
+                    row["new_partner_multiplier"] if hasattr(row, "keys") else row[8],
+                    1.0,
+                ),
+                "raid_boost_multiplier": _safe_float(
+                    row["raid_boost_multiplier"] if hasattr(row, "keys") else row[9],
+                    1.0,
+                ),
+                "last_computed_at": row["last_computed_at"] if hasattr(row, "keys") else row[10],
+            }
+        return out
+
+    async def _refresh_partner_score_cache_if_available(
+        self,
+        twitch_user_id: str,
+        *,
+        reason: str,
+    ) -> None:
+        twitch_user_key = str(twitch_user_id or "").strip()
+        if not twitch_user_key or not callable(refresh_partner_raid_score_async):
+            return
+        try:
+            await refresh_partner_raid_score_async(twitch_user_key)
+            log.info(
+                "Prepared partner raid score cache refreshed for %s (%s)",
+                twitch_user_key,
+                reason,
+            )
+        except Exception:
+            log.debug(
+                "Prepared partner raid score cache refresh failed for %s (%s)",
+                twitch_user_key,
+                reason,
+                exc_info=True,
+            )
+
+    async def _select_partner_candidate_by_score(
+        self,
+        candidates: list[dict],
+        from_broadcaster_id: str,
+    ) -> dict | None:
+        """
+        Wählt unter Partnern nur noch vorberechnete Cache-Scores aus.
+
+        Primär: höchster final_score.
+        Bei engem Score (<= 0.05): weniger today_received_raids.
+        Danach: bestehender deterministischer Fallback viewer_count/followers_total/started_at.
+        """
+        if not candidates:
+            return None
+
+        recent_targets = self._get_recent_raid_targets(
+            from_broadcaster_id, RAID_TARGET_COOLDOWN_DAYS
+        )
+        filtered = [
+            candidate
+            for candidate in candidates
+            if str(candidate.get("user_id") or "").strip() not in recent_targets
+        ] if recent_targets else []
+        pool = filtered or candidates
+
+        score_map = self._load_prepared_partner_scores(
+            [str(candidate.get("user_id") or "").strip() for candidate in pool]
+        )
+
+        scored_candidates: list[dict] = []
+        cache_misses = 0
+        stale_not_live = 0
+        for candidate in pool:
+            twitch_user_id = str(candidate.get("user_id") or "").strip()
+            candidate_login = str(candidate.get("user_login") or "").strip().lower()
+            if not twitch_user_id:
+                cache_misses += 1
+                log.info(
+                    "Prepared partner score skipped for %s: missing twitch_user_id",
+                    candidate_login or "<unknown>",
+                )
+                continue
+            score_row = score_map.get(twitch_user_id)
+            if not score_row:
+                cache_misses += 1
+                log.info(
+                    "Prepared partner score cache miss for %s (%s)",
+                    candidate_login or twitch_user_id,
+                    twitch_user_id,
+                )
+                continue
+            if not bool(score_row.get("is_live")):
+                stale_not_live += 1
+                log.info(
+                    "Prepared partner score ignored for %s (%s): cache row is not live",
+                    candidate_login or twitch_user_id,
+                    twitch_user_id,
+                )
+                continue
+            enriched = dict(candidate)
+            enriched["_partner_score"] = score_row
+            scored_candidates.append(enriched)
+
+        if not scored_candidates:
+            log.info(
+                "No prepared partner score candidate available for broadcaster_id=%s "
+                "(input=%d, recent_filtered=%d, cache_misses=%d, stale_not_live=%d)",
+                from_broadcaster_id,
+                len(candidates),
+                max(0, len(candidates) - len(pool)),
+                cache_misses,
+                stale_not_live,
+            )
+            return None
+
+        def _safe_int(value: object, default: int) -> int:
+            try:
+                if value is None:
+                    return default
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _safe_float(value: object, default: float = 0.0) -> float:
+            try:
+                if value is None:
+                    return default
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _score(candidate: dict) -> float:
+            score_row = candidate.get("_partner_score") or {}
+            return _safe_float(score_row.get("final_score"), 0.0)
+
+        def _today_received(candidate: dict) -> int:
+            score_row = candidate.get("_partner_score") or {}
+            return _safe_int(score_row.get("today_received_raids"), 10**9)
+
+        def _fallback_sort_key(candidate: dict) -> tuple[int, int, str]:
+            viewers = _safe_int(candidate.get("viewer_count"), 10**9)
+            followers = _safe_int(candidate.get("followers_total"), 10**9)
+            started_at = candidate.get("started_at") or "9999-99-99"
+            return (viewers, followers, started_at)
+
+        best_final_score = max(_score(candidate) for candidate in scored_candidates)
+        close_candidates = [
+            candidate
+            for candidate in scored_candidates
+            if abs(best_final_score - _score(candidate)) <= 0.05
+        ]
+
+        selection_reason = "highest_final_score"
+        selected: dict
+        if len(close_candidates) == 1:
+            selected = close_candidates[0]
+        else:
+            lowest_today_received = min(_today_received(candidate) for candidate in close_candidates)
+            tie_candidates = [
+                candidate
+                for candidate in close_candidates
+                if _today_received(candidate) == lowest_today_received
+            ]
+            if len(tie_candidates) == 1:
+                selection_reason = "today_received_raids"
+                selected = tie_candidates[0]
+            else:
+                await self._attach_followers_totals(tie_candidates)
+                tie_candidates.sort(key=_fallback_sort_key)
+                selection_reason = "viewer_count_followers_started_at"
+                selected = tie_candidates[0]
+
+        selected_score = selected.get("_partner_score") or {}
+        log.info(
+            "Partner raid target selection (prepared score): %s final=%.3f today=%s "
+            "reason=%s recent_filtered=%d cache_misses=%d stale_not_live=%d from %d candidates",
+            selected.get("user_login"),
+            _safe_float(selected_score.get("final_score"), 0.0),
+            _safe_int(selected_score.get("today_received_raids"), 0),
+            selection_reason,
+            max(0, len(candidates) - len(pool)),
+            cache_misses,
+            stale_not_live,
+            len(candidates),
+        )
+
+        return selected
+
     async def _select_fairest_candidate(
         self, candidates: list[dict], from_broadcaster_id: str
     ) -> dict | None:
@@ -1487,9 +1777,12 @@ class RaidBot:
             ]
 
             if partner_candidates:
-                # Partner vorhanden -> Auswahl nach niedrigsten Viewern
+                # Partner vorhanden -> Auswahl über vorberechneten Score-Cache
                 is_partner_raid = True
-                target = await self._select_fairest_candidate(partner_candidates, broadcaster_id)
+                target = await self._select_partner_candidate_by_score(
+                    partner_candidates,
+                    broadcaster_id,
+                )
                 candidates_count = len(partner_candidates)
 
             # 2. Fallback (Deadlock-DE), falls kein Partner gefunden

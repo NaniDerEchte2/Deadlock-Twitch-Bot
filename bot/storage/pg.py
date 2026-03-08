@@ -1917,6 +1917,86 @@ def ensure_schema(conn) -> None:
     )
     conn.execute("ALTER TABLE streamer_plans ADD COLUMN IF NOT EXISTS manual_plan_updated_at TEXT")
 
+    # 18) Vorgecachte Partner-Raid-Scores
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS twitch_partner_raid_scores (
+            twitch_user_id                  TEXT PRIMARY KEY,
+            twitch_login                    TEXT NOT NULL,
+            avg_duration_sec                INTEGER NOT NULL DEFAULT 0,
+            time_pattern_score_base         DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+            received_successful_raids_total INTEGER NOT NULL DEFAULT 0,
+            is_new_partner_preferred        INTEGER NOT NULL DEFAULT 1,
+            new_partner_multiplier          DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+            raid_boost_multiplier           DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+            is_live                         INTEGER NOT NULL DEFAULT 0,
+            current_started_at              TEXT,
+            current_uptime_sec              INTEGER NOT NULL DEFAULT 0,
+            duration_score                  DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+            time_pattern_score              DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+            base_score                      DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+            final_score                     DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+            today_received_raids            INTEGER NOT NULL DEFAULT 0,
+            last_computed_at                TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_partner_raid_scores_live_score "
+        "ON twitch_partner_raid_scores(is_live, final_score DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_partner_raid_scores_login "
+        "ON twitch_partner_raid_scores(twitch_login)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_partner_raid_scores_computed "
+        "ON twitch_partner_raid_scores(last_computed_at)"
+    )
+
+    # 19) Partner-Raid-Score-Tracking
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS twitch_partner_raid_score_tracking (
+            id                        SERIAL PRIMARY KEY,
+            raid_history_id           INTEGER,
+            from_broadcaster_id       TEXT,
+            from_broadcaster_login    TEXT NOT NULL,
+            to_broadcaster_id         TEXT NOT NULL,
+            to_broadcaster_login      TEXT NOT NULL,
+            viewer_count              INTEGER NOT NULL DEFAULT 0,
+            confirmed_at              TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            target_session_id         INTEGER,
+            target_stream_started_at  TEXT,
+            score_last_computed_at    TEXT,
+            final_score               DOUBLE PRECISION,
+            base_score                DOUBLE PRECISION,
+            duration_score            DOUBLE PRECISION,
+            time_pattern_score        DOUBLE PRECISION,
+            new_partner_multiplier    DOUBLE PRECISION,
+            raid_boost_multiplier     DOUBLE PRECISION,
+            today_received_raids      INTEGER NOT NULL DEFAULT 0,
+            was_deadlock_at_raid      INTEGER NOT NULL DEFAULT 0,
+            deadlock_continued_until  TEXT,
+            deadlock_continued_sec    INTEGER,
+            resolved_at               TEXT,
+            resolution_reason         TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_partner_raid_tracking_target "
+        "ON twitch_partner_raid_score_tracking(to_broadcaster_id, confirmed_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_partner_raid_tracking_session "
+        "ON twitch_partner_raid_score_tracking(target_session_id, resolved_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_partner_raid_tracking_history "
+        "ON twitch_partner_raid_score_tracking(raid_history_id)"
+    )
+
     # 20) Web-Sessions (migrated from SQLite)
     conn.execute(
         """

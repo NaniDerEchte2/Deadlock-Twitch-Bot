@@ -605,6 +605,40 @@ class _EventSubMixin:
         throttle[broadcaster_id] = now
 
         previous_state = self._load_live_state_row(login_lower)
+        try:
+            with storage.get_conn() as c:
+                c.execute(
+                    """
+                    UPDATE twitch_live_state
+                       SET is_live = 0,
+                           last_seen_at = ?
+                     WHERE twitch_user_id = ?
+                    """,
+                    (
+                        datetime.now(UTC).isoformat(timespec="seconds"),
+                        broadcaster_id,
+                    ),
+                )
+        except Exception:
+            log.debug(
+                "EventSub: konnte Live-State nicht sofort auf offline setzen fuer %s",
+                broadcaster_id,
+                exc_info=True,
+            )
+        refresh = getattr(self, "_request_partner_raid_score_refresh", None)
+        if callable(refresh):
+            try:
+                await refresh(
+                    twitch_user_id=broadcaster_id,
+                    login=login_lower or broadcaster_login,
+                    trigger="eventsub_stream_offline",
+                )
+            except Exception:
+                log.debug(
+                    "EventSub: partner raid score refresh failed for offline %s",
+                    broadcaster_login or broadcaster_id,
+                    exc_info=True,
+                )
 
         # Frische Online-Streams sammeln, damit Auto-Raid Partner erkennen kann
         tracked_logins = self._get_tracked_logins_for_eventsub()
