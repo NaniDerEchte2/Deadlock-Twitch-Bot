@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface TerminalCommand {
   input: string;
@@ -50,7 +50,7 @@ export function TerminalMockup({ commands }: TerminalMockupProps) {
       for (const command of commands) {
         if (cancelled) break;
 
-        // Type input character by character
+        // Type input character by character.
         for (let i = 0; i <= command.input.length; i++) {
           if (cancelled) break;
           const partial = command.input.slice(0, i);
@@ -70,7 +70,6 @@ export function TerminalMockup({ commands }: TerminalMockupProps) {
         if (cancelled) break;
         await sleep(500);
 
-        // Show output immediately
         if (!cancelled) {
           setLines((prev) => [
             ...prev,
@@ -93,21 +92,17 @@ export function TerminalMockup({ commands }: TerminalMockupProps) {
       ref={containerRef}
       className="rounded-xl border border-[var(--color-border)] bg-[#0a1a24] overflow-hidden"
     >
-      {/* Title bar */}
       <div className="flex items-center px-4 py-3 bg-[#081520] border-b border-[var(--color-border)] relative">
-        {/* Traffic lights */}
         <div className="flex items-center gap-2 absolute left-4">
           <span className="w-3 h-3 rounded-full bg-[#ff6b5e] block" />
           <span className="w-3 h-3 rounded-full bg-[var(--color-warning)] block" />
           <span className="w-3 h-3 rounded-full bg-[var(--color-success)] block" />
         </div>
-        {/* Centered title */}
         <span className="w-full text-center text-xs text-[var(--color-text-secondary)] font-mono select-none">
           EarlySalty Bot
         </span>
       </div>
 
-      {/* Body */}
       <div className="p-5 font-mono text-sm space-y-3 min-h-[140px]">
         {lines.map((line, i) =>
           line.type === "input" ? (

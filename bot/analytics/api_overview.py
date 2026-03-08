@@ -13,6 +13,7 @@ from typing import Any
 from aiohttp import web
 
 from ..core.chat_bots import build_known_chat_bot_not_in_clause
+from ..dashboard.live import DashboardLiveMixin
 from .raid_metrics import recalculate_raid_chat_metrics
 from ..storage import pg as storage
 
@@ -480,6 +481,8 @@ class _AnalyticsOverviewMixin:
             return gate_response
 
         raw_path = request.match_info.get("path", "")
+        if str(raw_path or "").strip("/") == "legacy":
+            return await DashboardLiveMixin.index(self, request)
         if self._admin_dashboard_path_should_serve_index(raw_path):
             return await self._serve_admin_dashboard(request)
         return self._resolve_admin_dashboard_asset_response(raw_path)
@@ -566,7 +569,10 @@ class _AnalyticsOverviewMixin:
         gate_response = self._admin_dashboard_spa_gate(request)
         if gate_response is not None:
             return gate_response
-        return self._resolve_admin_dashboard_asset_response(request.match_info.get("path", ""))
+        raw_path = str(request.match_info.get("path", "") or "").strip("/")
+        if not raw_path:
+            return web.Response(text="Not found", status=404)
+        return self._resolve_admin_dashboard_asset_response(f"assets/{raw_path}")
 
     async def _serve_demo_dashboard_assets(self, request: web.Request) -> web.Response:
         """Serve static assets for the public demo dashboard without auth."""

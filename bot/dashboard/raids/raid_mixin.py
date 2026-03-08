@@ -18,6 +18,7 @@ from ...raid.views import RaidAuthGenerateView, build_raid_requirements_embed
 
 TWITCH_HELIX_USERS_URL = "https://api.twitch.tv/helix/users"
 DEFAULT_RAID_OAUTH_SUCCESS_REDIRECT_URL = "https://twitch.earlysalty.com/twitch/dashboard"
+PUBLIC_STREAMER_ONBOARDING_URL = "https://earlysalty.de/website/"
 
 
 class _DashboardRaidMixin:
@@ -418,9 +419,9 @@ new Chart(ctx, {{
                 self._require_token(request)
             login = requested_login
         elif not login:
-            # Public onboarding entrypoint: build a fresh Twitch OAuth URL directly,
-            # so domains that only expose raid routes do not depend on /twitch/auth/login.
-            login = "public_onboarding"
+            # Public streamer onboarding was moved to the website landing page.
+            # Unauthenticated visits should no longer enter the raid OAuth flow directly.
+            raise web.HTTPFound(location=PUBLIC_STREAMER_ONBOARDING_URL)
 
         if not login:
             return web.Response(text="Missing login parameter", status=400)

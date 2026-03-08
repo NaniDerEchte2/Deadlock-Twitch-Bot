@@ -1,21 +1,22 @@
 import { useState, useEffect } from 'react';
 import { Menu, X } from 'lucide-react';
 import { useScrollSpy } from '@/hooks/useScrollSpy';
+import { AFFILIATE_PROGRAM_PATH } from '@/data/sitePaths';
 
 interface NavLink {
   label: string;
-  id: string;
+  id?: string;
+  href?: string;
 }
 
 const NAV_LINKS: NavLink[] = [
   { label: 'Features', id: 'features' },
   { label: 'Dashboard', id: 'dashboard' },
   { label: 'Community', id: 'community' },
-  { label: 'Vertriebler', id: 'affiliate' },
-  { label: 'Befehle', id: 'commands' },
+  { label: 'Vertriebler', href: AFFILIATE_PROGRAM_PATH },
 ];
 
-const SECTION_IDS = NAV_LINKS.map((l) => l.id);
+const SECTION_IDS = NAV_LINKS.flatMap((link) => (link.id ? [link.id] : []));
 
 function scrollToId(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' });
@@ -55,19 +56,29 @@ export function Navbar() {
 
         {/* Center nav – desktop only */}
         <nav className="hidden md:flex items-center gap-8">
-          {NAV_LINKS.map(({ label, id }) => (
-            <button
-              key={id}
-              onClick={() => scrollToId(id)}
-              className={`text-sm font-medium transition-colors duration-200 cursor-pointer bg-transparent border-none p-0 ${
-                activeId === id
-                  ? 'text-text-primary'
-                  : 'text-text-secondary hover:text-text-primary'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+          {NAV_LINKS.map(({ label, id, href }) =>
+            id ? (
+              <button
+                key={id}
+                onClick={() => scrollToId(id)}
+                className={`text-sm font-medium transition-colors duration-200 cursor-pointer bg-transparent border-none p-0 ${
+                  activeId === id
+                    ? 'text-text-primary'
+                    : 'text-text-secondary hover:text-text-primary'
+                }`}
+              >
+                {label}
+              </button>
+            ) : (
+              <a
+                key={href}
+                href={href}
+                className="text-sm font-medium text-text-secondary hover:text-text-primary transition-colors duration-200"
+              >
+                {label}
+              </a>
+            ),
+          )}
         </nav>
 
         {/* Right actions – desktop only */}
@@ -102,22 +113,33 @@ export function Navbar() {
       {menuOpen && (
         <div className="md:hidden glass border-t border-border">
           <div className="max-w-7xl mx-auto px-6 py-4 flex flex-col gap-2">
-            {NAV_LINKS.map(({ label, id }) => (
-              <button
-                key={id}
-                onClick={() => {
-                  scrollToId(id);
-                  setMenuOpen(false);
-                }}
-                className={`text-sm font-medium text-left py-2 transition-colors duration-200 bg-transparent border-none cursor-pointer ${
-                  activeId === id
-                    ? 'text-text-primary'
-                    : 'text-text-secondary hover:text-text-primary'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
+            {NAV_LINKS.map(({ label, id, href }) =>
+              id ? (
+                <button
+                  key={id}
+                  onClick={() => {
+                    scrollToId(id);
+                    setMenuOpen(false);
+                  }}
+                  className={`text-sm font-medium text-left py-2 transition-colors duration-200 bg-transparent border-none cursor-pointer ${
+                    activeId === id
+                      ? 'text-text-primary'
+                      : 'text-text-secondary hover:text-text-primary'
+                  }`}
+                >
+                  {label}
+                </button>
+              ) : (
+                <a
+                  key={href}
+                  href={href}
+                  className="text-sm font-medium text-left py-2 text-text-secondary hover:text-text-primary transition-colors duration-200"
+                  onClick={() => setMenuOpen(false)}
+                >
+                  {label}
+                </a>
+              ),
+            )}
             <div className="flex flex-col gap-2 mt-3 pt-3 border-t border-border">
               <a
                 href="https://demo.earlysalty.com"

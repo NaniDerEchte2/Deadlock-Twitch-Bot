@@ -8,8 +8,6 @@ import { RaidSystem } from '@/components/sections/RaidSystem'
 import { Dashboard } from '@/components/sections/Dashboard'
 import { ClipManager } from '@/components/sections/ClipManager'
 import { Community } from '@/components/sections/Community'
-import { AffiliateSection } from '@/components/sections/AffiliateSection'
-import { Commands } from '@/components/sections/Commands'
 import { CTA } from '@/components/sections/CTA'
 
 export default function App() {
@@ -25,8 +23,6 @@ export default function App() {
         <Dashboard />
         <ClipManager />
         <Community />
-        <AffiliateSection />
-        <Commands />
         <CTA />
       </main>
       <Footer />

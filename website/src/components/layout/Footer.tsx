@@ -1,24 +1,20 @@
 import { DISCORD_INVITE_URL } from "@/data/externalLinks";
-
-function scrollToId(id: string) {
-  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' });
-}
+import { AFFILIATE_PROGRAM_PATH, WEBSITE_HOME_PATH } from "@/data/sitePaths";
 
 interface FooterLink {
   label: string;
-  href?: string;
-  sectionId?: string;
+  href: string;
   external?: boolean;
 }
 
 const NAV_SECTION_LINKS: FooterLink[] = [
-  { label: 'Features', sectionId: 'features' },
-  { label: 'Dashboard', sectionId: 'dashboard' },
-  { label: 'Community', sectionId: 'community' },
-  { label: 'Befehle', sectionId: 'commands' },
+  { label: 'Features', href: `${WEBSITE_HOME_PATH}#features` },
+  { label: 'Dashboard', href: `${WEBSITE_HOME_PATH}#dashboard` },
+  { label: 'Community', href: `${WEBSITE_HOME_PATH}#community` },
 ];
 
 const MORE_LINKS: FooterLink[] = [
+  { label: 'Affiliate-Programm', href: AFFILIATE_PROGRAM_PATH },
   { label: 'Demo Dashboard', href: 'https://demo.earlysalty.com', external: true },
   { label: 'Discord beitreten', href: DISCORD_INVITE_URL, external: true },
   { label: 'Impressum', href: 'https://twitch.earlysalty.com/twitch/impressum', external: true },
@@ -29,20 +25,9 @@ function FooterLinkItem({ link }: { link: FooterLink }) {
   const baseClass =
     'text-sm text-text-secondary hover:text-text-primary transition-colors duration-200';
 
-  if (link.sectionId) {
-    return (
-      <button
-        onClick={() => scrollToId(link.sectionId!)}
-        className={`${baseClass} bg-transparent border-none p-0 cursor-pointer text-left`}
-      >
-        {link.label}
-      </button>
-    );
-  }
-
   return (
     <a
-      href={link.href ?? '#'}
+      href={link.href}
       target={link.external ? '_blank' : undefined}
       rel={link.external ? 'noopener noreferrer' : undefined}
       className={baseClass}

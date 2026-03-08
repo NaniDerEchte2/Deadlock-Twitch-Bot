@@ -72,6 +72,12 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
           <p className="mt-2 text-xs leading-5 text-text-secondary">
             Neue React-App unter <code>/twitch/admin</code> mit separater Admin-API.
           </p>
+          <a
+            href="/twitch/admin/legacy"
+            className="mt-3 inline-flex w-full items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white transition hover:border-primary/40 hover:bg-primary/10"
+          >
+            Legacy Admin öffnen
+          </a>
         </div>
       </div>
     </aside>

@@ -11,6 +11,10 @@ import { affiliateFeatures } from "@/data/affiliateFeatures";
 import { SectionHeading } from "@/components/ui/SectionHeading";
 import { ScrollReveal } from "@/components/ui/ScrollReveal";
 
+interface AffiliateSectionProps {
+  standalone?: boolean;
+}
+
 const iconMap: Record<string, ComponentType<{ size?: number; className?: string }>> = {
   Percent,
   UserPlus,
@@ -20,9 +24,9 @@ const iconMap: Record<string, ComponentType<{ size?: number; className?: string 
   LogIn,
 };
 
-export function AffiliateSection() {
+export function AffiliateSection({ standalone = false }: AffiliateSectionProps) {
   return (
-    <section id="affiliate" className="py-24">
+    <section id={standalone ? undefined : "affiliate"} className={standalone ? "pt-32 pb-24" : "py-24"}>
       <div className="max-w-7xl mx-auto px-6">
         <SectionHeading
           badge="Affiliate-Programm"

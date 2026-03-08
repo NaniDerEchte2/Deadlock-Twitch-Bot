@@ -14,5 +14,11 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, 'index.html'),
+        affiliateProgram: path.resolve(__dirname, 'vertriebler/index.html'),
+      },
+    },
   },
 })

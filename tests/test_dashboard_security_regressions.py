@@ -1,4 +1,6 @@
 import json
+import pathlib
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -10,7 +12,7 @@ from bot.analytics.api_v2 import AnalyticsV2Mixin
 from bot.dashboard.auth_mixin import _DashboardAuthMixin
 from bot.dashboard.billing_mixin import _DashboardBillingMixin
 from bot.dashboard.live import DashboardLiveMixin
-from bot.dashboard.raid_mixin import _DashboardRaidMixin
+from bot.dashboard.raid_mixin import PUBLIC_STREAMER_ONBOARDING_URL, _DashboardRaidMixin
 from bot.dashboard.routes_mixin import _DashboardRoutesMixin
 from bot.dashboard.server_v2 import DashboardV2Server
 from bot.social_media.clip_manager import ClipManager
@@ -71,6 +73,17 @@ class _DummyOverviewAssetsAuth(_AnalyticsOverviewMixin):
 
     def _should_use_discord_admin_login(self, request):
         return False
+
+
+class _DummyAdminOverviewAssets(_AnalyticsOverviewMixin):
+    def __init__(self, dist_root: pathlib.Path) -> None:
+        self._dist_root = dist_root.resolve()
+
+    def _admin_dashboard_spa_gate(self, request):
+        return None
+
+    def _admin_dashboard_dist_root(self):
+        return self._dist_root
 
 
 class _DummyInternalHomeApi(AnalyticsV2Mixin):
@@ -769,23 +782,23 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.location, "https://auth.example/victim")
         self.assertEqual(handler.require_token_calls, 1)
 
-    async def test_raid_auth_start_without_session_redirects_to_dashboard_login(self) -> None:
+    async def test_raid_auth_start_without_session_redirects_to_public_onboarding(self) -> None:
         handler = _DummyRaidAuthRoute()
         request = SimpleNamespace(query={})
 
         with self.assertRaises(web.HTTPFound) as ctx:
             await handler.raid_auth_start(request)
-        self.assertEqual(ctx.exception.location, "https://auth.example/public_onboarding")
+        self.assertEqual(ctx.exception.location, PUBLIC_STREAMER_ONBOARDING_URL)
         self.assertEqual(handler.require_token_calls, 0)
 
-    async def test_raid_auth_start_without_session_returns_503_when_oauth_missing(self) -> None:
+    async def test_raid_auth_start_without_session_ignores_missing_oauth(self) -> None:
         handler = _DummyRaidAuthRoute()
         handler._raid_bot.auth_manager.client_id = ""
         request = SimpleNamespace(query={})
 
-        response = await handler.raid_auth_start(request)
-        self.assertEqual(response.status, 503)
-        self.assertIn("Raid bot OAuth is not configured", response.text)
+        with self.assertRaises(web.HTTPFound) as ctx:
+            await handler.raid_auth_start(request)
+        self.assertEqual(ctx.exception.location, PUBLIC_STREAMER_ONBOARDING_URL)
         self.assertEqual(handler.require_token_calls, 0)
 
     def test_canonical_post_login_destination_keeps_raid_auth_path(self) -> None:
@@ -1074,6 +1087,35 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(web.HTTPFound) as ctx:
             await handler._serve_dashboard_v2_assets(request)
         self.assertEqual(ctx.exception.location, "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2")
+
+    async def test_admin_dashboard_assets_route_resolves_dist_assets_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dist_root = pathlib.Path(tmp_dir)
+            asset_path = (dist_root / "assets" / "index.js").resolve()
+            asset_path.parent.mkdir(parents=True, exist_ok=True)
+            asset_path.write_text("console.log('admin asset');", encoding="utf-8")
+
+            handler = _DummyAdminOverviewAssets(dist_root)
+            request = SimpleNamespace(match_info={"path": "index.js"})
+
+            response = await handler._serve_admin_dashboard_assets(request)
+            self.assertIsInstance(response, web.FileResponse)
+            self.assertEqual(pathlib.Path(response._path), asset_path)
+
+    async def test_admin_dashboard_legacy_path_delegates_to_legacy_dashboard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            handler = _DummyAdminOverviewAssets(pathlib.Path(tmp_dir))
+            request = SimpleNamespace(match_info={"path": "legacy"})
+            expected = web.Response(text="legacy")
+
+            with patch(
+                "bot.analytics.api_overview.DashboardLiveMixin.index",
+                AsyncMock(return_value=expected),
+            ) as legacy_index:
+                response = await handler._serve_admin_dashboard_path(request)
+
+        self.assertIs(response, expected)
+        legacy_index.assert_awaited_once_with(handler, request)
 
     async def test_dashboard_redirect_when_unauthenticated_uses_dashboard_next(self) -> None:
         handler = _DummyOverviewAssetsAuth()

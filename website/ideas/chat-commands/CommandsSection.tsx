@@ -1,9 +1,9 @@
-import { SectionHeading } from "@/components/ui/SectionHeading";
-import { TerminalMockup } from "@/components/ui/TerminalMockup";
-import { ScrollReveal } from "@/components/ui/ScrollReveal";
-import { commands } from "@/data/commands";
+import { SectionHeading } from "../../src/components/ui/SectionHeading";
+import { ScrollReveal } from "../../src/components/ui/ScrollReveal";
+import { TerminalMockup } from "./TerminalMockup";
+import { commands } from "./commands";
 
-export function Commands() {
+export function CommandsSection() {
   return (
     <section id="commands" className="py-24">
       <div className="max-w-6xl mx-auto px-6">
