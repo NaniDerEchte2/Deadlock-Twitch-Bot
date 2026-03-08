@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import os
 from datetime import UTC, datetime
@@ -12,9 +13,13 @@ from uuid import uuid4
 from ... import storage
 from ...core.constants import log
 try:
-    from ...raid.partner_scores import refresh_partner_raid_score
+    from ...raid.partner_scores import (
+        refresh_partner_raid_score,
+        refresh_partner_raid_score_async,
+    )
 except Exception:  # pragma: no cover - partial deploy safety
     refresh_partner_raid_score = None  # type: ignore[assignment]
+    refresh_partner_raid_score_async = None  # type: ignore[assignment]
 from .billing_plans import (
     BILLING_CYCLE_DISCOUNTS as _BILLING_CYCLE_DISCOUNTS,
     BILLING_PLANS as _BILLING_PLANS,
@@ -40,10 +45,38 @@ class _DashboardBillingMixin:
         twitch_login: str,
         reason: str,
     ) -> None:
-        if not callable(refresh_partner_raid_score):
-            return
         twitch_user_key = str(twitch_user_id or "").strip()
         if not twitch_user_key:
+            return
+        if callable(refresh_partner_raid_score_async):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                async def _run_async_refresh() -> None:
+                    try:
+                        await refresh_partner_raid_score_async(twitch_user_key)
+                    except Exception:
+                        log.debug(
+                            "billing: partner raid score refresh failed for %s (%s)",
+                            twitch_login or twitch_user_key,
+                            reason,
+                            exc_info=True,
+                        )
+                    else:
+                        log.info(
+                            "billing: partner raid score refreshed for %s (%s)",
+                            twitch_login or twitch_user_key,
+                            reason,
+                        )
+
+                loop.create_task(
+                    _run_async_refresh(),
+                    name=f"billing.partner_raid_score_refresh.{twitch_user_key}",
+                )
+                return
+        if not callable(refresh_partner_raid_score):
             return
         try:
             refresh_partner_raid_score(twitch_user_key)

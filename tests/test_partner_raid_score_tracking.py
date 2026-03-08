@@ -45,7 +45,17 @@ class PartnerRaidScoreTrackingTests(unittest.TestCase):
                 executed_at, success
             ) VALUES (?, ?, ?, ?, ?, 1)
             """,
-            ("1001", "source_login", "2002", "target_login", _iso_utc(confirmed_at)),
+            ("1001", "source_login", "2002", "target_login", _iso_utc(confirmed_at - timedelta(minutes=1))),
+        )
+        conn.execute(
+            """
+            INSERT INTO twitch_raid_history (
+                from_broadcaster_id, from_broadcaster_login,
+                to_broadcaster_id, to_broadcaster_login,
+                executed_at, success
+            ) VALUES (?, ?, ?, ?, ?, 1)
+            """,
+            ("wrong-source", "source_login", "2002", "target_login", _iso_utc(confirmed_at)),
         )
         conn.commit()
 
@@ -140,6 +150,153 @@ class PartnerRaidScoreTrackingTests(unittest.TestCase):
             row["deadlock_continued_until"],
             _iso_utc(confirmed_at + timedelta(minutes=12)),
         )
+        conn.close()
+
+    def test_resolve_partner_raid_tracking_falls_back_to_session_timing_when_session_id_missing(self) -> None:
+        conn = self._make_conn()
+        started_at = datetime(2026, 3, 9, 19, 0, tzinfo=UTC)
+        confirmed_at = started_at + timedelta(minutes=5)
+        ended_at = started_at + timedelta(minutes=40)
+        conn.execute(
+            """
+            INSERT INTO twitch_stream_sessions (
+                id, streamer_login, stream_id, started_at, ended_at, duration_seconds
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (77, "target_login", "stream-77", _iso_utc(started_at), _iso_utc(ended_at), 2400),
+        )
+        conn.execute(
+            """
+            INSERT INTO twitch_partner_raid_score_tracking (
+                from_broadcaster_login,
+                to_broadcaster_id,
+                to_broadcaster_login,
+                confirmed_at,
+                target_session_id,
+                target_stream_started_at,
+                was_deadlock_at_raid
+            ) VALUES (?, ?, ?, ?, NULL, ?, 1)
+            """,
+            ("source_login", "2002", "target_login", _iso_utc(confirmed_at), _iso_utc(started_at)),
+        )
+        conn.execute(
+            """
+            INSERT INTO twitch_channel_updates (twitch_user_id, game_name, recorded_at)
+            VALUES (?, ?, ?)
+            """,
+            ("2002", "Just Chatting", _iso_utc(confirmed_at + timedelta(minutes=12))),
+        )
+        conn.commit()
+
+        with patch(
+            "bot.raid.partner_raid_score_tracking.get_conn",
+            side_effect=lambda: contextlib.nullcontext(conn),
+        ):
+            resolved = resolve_partner_raid_tracking_for_session(
+                twitch_user_id="2002",
+                streamer_login="target_login",
+                session_id=77,
+                session_ended_at=ended_at,
+            )
+
+        self.assertEqual(resolved, 1)
+        row = conn.execute(
+            """
+            SELECT deadlock_continued_sec, deadlock_continued_until, resolved_at, resolution_reason
+            FROM twitch_partner_raid_score_tracking
+            WHERE to_broadcaster_id = '2002'
+            """
+        ).fetchone()
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(int(row["deadlock_continued_sec"]), 12 * 60)
+        self.assertEqual(row["resolution_reason"], "channel_update_non_deadlock")
+        self.assertEqual(row["resolved_at"], _iso_utc(ended_at))
+        conn.close()
+
+    def test_resolve_partner_raid_tracking_merges_direct_and_fallback_rows_for_same_session(self) -> None:
+        conn = self._make_conn()
+        started_at = datetime(2026, 3, 9, 19, 0, tzinfo=UTC)
+        confirmed_at = started_at + timedelta(minutes=5)
+        ended_at = started_at + timedelta(minutes=40)
+        conn.execute(
+            """
+            INSERT INTO twitch_stream_sessions (
+                id, streamer_login, stream_id, started_at, ended_at, duration_seconds
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (77, "target_login", "stream-77", _iso_utc(started_at), _iso_utc(ended_at), 2400),
+        )
+        conn.execute(
+            """
+            INSERT INTO twitch_partner_raid_score_tracking (
+                from_broadcaster_login,
+                to_broadcaster_id,
+                to_broadcaster_login,
+                confirmed_at,
+                target_session_id,
+                was_deadlock_at_raid
+            ) VALUES (?, ?, ?, ?, ?, 1)
+            """,
+            ("direct_source", "2002", "target_login", _iso_utc(confirmed_at), 77),
+        )
+        conn.execute(
+            """
+            INSERT INTO twitch_partner_raid_score_tracking (
+                from_broadcaster_login,
+                to_broadcaster_id,
+                to_broadcaster_login,
+                confirmed_at,
+                target_session_id,
+                target_stream_started_at,
+                was_deadlock_at_raid
+            ) VALUES (?, ?, ?, ?, NULL, ?, 1)
+            """,
+            (
+                "fallback_source",
+                "2002",
+                "target_login",
+                _iso_utc(confirmed_at + timedelta(minutes=1)),
+                _iso_utc(started_at),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO twitch_channel_updates (twitch_user_id, game_name, recorded_at)
+            VALUES (?, ?, ?)
+            """,
+            ("2002", "Just Chatting", _iso_utc(confirmed_at + timedelta(minutes=12))),
+        )
+        conn.commit()
+
+        with patch(
+            "bot.raid.partner_raid_score_tracking.get_conn",
+            side_effect=lambda: contextlib.nullcontext(conn),
+        ):
+            resolved = resolve_partner_raid_tracking_for_session(
+                twitch_user_id="2002",
+                streamer_login="target_login",
+                session_id=77,
+                session_ended_at=ended_at,
+            )
+
+        self.assertEqual(resolved, 2)
+        rows = conn.execute(
+            """
+            SELECT deadlock_continued_until, resolved_at, resolution_reason
+            FROM twitch_partner_raid_score_tracking
+            WHERE to_broadcaster_id = '2002'
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertEqual(row["resolution_reason"], "channel_update_non_deadlock")
+            self.assertEqual(row["resolved_at"], _iso_utc(ended_at))
+            self.assertEqual(
+                row["deadlock_continued_until"],
+                _iso_utc(confirmed_at + timedelta(minutes=12)),
+            )
         conn.close()
 
 

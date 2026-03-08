@@ -1,8 +1,10 @@
+import asyncio
 import contextlib
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from bot.analytics.mixin import TwitchAnalyticsMixin
+from bot.dashboard.billing.billing_mixin import _DashboardBillingMixin
 from bot.monitoring.eventsub_mixin import _EventSubMixin
 from bot.monitoring.monitoring import TwitchMonitoringMixin
 
@@ -66,6 +68,49 @@ class _MonitoringHarness(TwitchMonitoringMixin):
         )
 
 
+class _MonitoringDispatchHarness(TwitchMonitoringMixin):
+    def __init__(self, service: object) -> None:
+        self.partner_raid_score_service = service
+
+
+class _AsyncPreferredService:
+    def __init__(self) -> None:
+        self.sync_calls: list[dict[str, object]] = []
+        self.async_calls: list[dict[str, object]] = []
+
+    def refresh_partner_raid_score(
+        self,
+        *,
+        twitch_user_id: str | None = None,
+        login: str | None = None,
+        trigger: str,
+    ):
+        self.sync_calls.append(
+            {
+                "twitch_user_id": twitch_user_id,
+                "login": login,
+                "trigger": trigger,
+            }
+        )
+        return {"mode": "sync"}
+
+    async def refresh_partner_raid_score_async(
+        self,
+        *,
+        twitch_user_id: str | None = None,
+        login: str | None = None,
+        trigger: str,
+    ):
+        self.async_calls.append(
+            {
+                "twitch_user_id": twitch_user_id,
+                "login": login,
+                "trigger": trigger,
+            }
+        )
+        return {"mode": "async"}
+
+
 class _EventSubHarness(_EventSubMixin):
     def __init__(self) -> None:
         self.offline_calls: list[dict[str, object]] = []
@@ -91,6 +136,10 @@ class _EventSubHarness(_EventSubMixin):
     async def _request_partner_raid_score_refresh(self, **kwargs):
         self.refresh_events.append(dict(kwargs))
         return True
+
+
+class _BillingHarness(_DashboardBillingMixin):
+    pass
 
 
 class PartnerRaidScoreRefreshTriggerTests(unittest.IsolatedAsyncioTestCase):
@@ -173,6 +222,51 @@ class PartnerRaidScoreRefreshTriggerTests(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         )
+
+    async def test_request_partner_raid_score_refresh_prefers_async_wrapper(self) -> None:
+        service = _AsyncPreferredService()
+        harness = _MonitoringDispatchHarness(service)
+
+        ok = await harness._request_partner_raid_score_refresh(
+            twitch_user_id="9999",
+            login="partner_x",
+            trigger="unit_test",
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(service.sync_calls, [])
+        self.assertEqual(
+            service.async_calls,
+            [
+                {
+                    "twitch_user_id": "9999",
+                    "login": "partner_x",
+                    "trigger": "unit_test",
+                }
+            ],
+        )
+
+    async def test_billing_refresh_uses_async_wrapper_on_running_loop(self) -> None:
+        harness = _BillingHarness()
+
+        with (
+            patch(
+                "bot.dashboard.billing.billing_mixin.refresh_partner_raid_score_async",
+                new=AsyncMock(return_value={"twitch_user_id": "9009"}),
+            ) as async_refresh,
+            patch(
+                "bot.dashboard.billing.billing_mixin.refresh_partner_raid_score",
+                side_effect=AssertionError("sync refresh should not be called"),
+            ),
+        ):
+            harness._billing_refresh_partner_raid_score_cache(
+                twitch_user_id="9009",
+                twitch_login="partner_x",
+                reason="billing_test",
+            )
+            await asyncio.sleep(0)
+
+        async_refresh.assert_awaited_once_with("9009")
 
     async def test_schedule_partner_raid_score_refreshes_deduplicates_targets(self) -> None:
         harness = _MonitoringHarness()

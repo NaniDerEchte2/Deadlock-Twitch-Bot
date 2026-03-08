@@ -169,7 +169,7 @@ class RaidPartnerScoreSelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(selected["user_login"], "charlie")
         attach_mock.assert_awaited_once()
 
-    async def test_select_partner_candidate_skips_cache_miss_and_recent_cooldown_targets(self) -> None:
+    async def test_select_partner_candidate_ignores_recent_target_cooldown_for_partners(self) -> None:
         candidates = [
             {
                 "user_id": "1001",
@@ -214,7 +214,40 @@ class RaidPartnerScoreSelectionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(selected)
         assert selected is not None
-        self.assertEqual(selected["user_login"], "charlie")
+        self.assertEqual(selected["user_login"], "alpha")
+
+    async def test_select_fairest_candidate_keeps_recent_target_cooldown_for_fallback(self) -> None:
+        candidates = [
+            {
+                "user_id": "1001",
+                "user_login": "alpha",
+                "viewer_count": 10,
+                "followers_total": 100,
+                "started_at": "2026-03-08T18:00:00+00:00",
+            },
+            {
+                "user_id": "2002",
+                "user_login": "bravo",
+                "viewer_count": 25,
+                "followers_total": 100,
+                "started_at": "2026-03-08T17:00:00+00:00",
+            },
+        ]
+
+        with (
+            self._conn_patch(),
+            patch.object(self.raid_bot, "_get_recent_raid_targets", return_value={"1001"}),
+            patch.object(self.raid_bot, "_attach_followers_totals", new=AsyncMock()) as attach_mock,
+        ):
+            selected = await self.raid_bot._select_fairest_candidate(
+                candidates,
+                "source-5",
+            )
+
+        self.assertIsNotNone(selected)
+        assert selected is not None
+        self.assertEqual(selected["user_login"], "bravo")
+        attach_mock.assert_awaited_once()
 
     async def test_on_raid_arrival_refreshes_cache_after_partner_confirmation(self) -> None:
         self.conn.execute(

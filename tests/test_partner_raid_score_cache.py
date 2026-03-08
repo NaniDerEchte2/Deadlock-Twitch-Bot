@@ -264,6 +264,43 @@ class PartnerRaidScoreCacheTests(unittest.TestCase):
         self.assertEqual(set(loaded_live_only), {"3003"})
         conn.close()
 
+    def test_refresh_partner_score_treats_billing_bundle_plan_as_raid_boost(self) -> None:
+        conn = self._make_conn()
+        service = self._make_service(conn)
+        now = datetime(2026, 3, 8, 18, 0, tzinfo=UTC)
+
+        self._insert_partner(conn, "echo", "5005")
+        conn.execute(
+            """
+            INSERT INTO twitch_live_state (twitch_user_id, streamer_login, is_live, last_started_at)
+            VALUES (?, ?, 1, ?)
+            """,
+            ("5005", "echo", _iso_utc(now - timedelta(minutes=30))),
+        )
+        conn.execute(
+            """
+            INSERT INTO streamer_plans (twitch_user_id, twitch_login, plan_name)
+            VALUES (?, ?, ?)
+            """,
+            ("5005", "echo", "bundle"),
+        )
+        matching_bucket = datetime(2026, 3, 1, 19, 0, tzinfo=BERLIN_TZ).astimezone(UTC)
+        for weeks_ago in (0, 1, 2):
+            self._insert_session(
+                conn,
+                login="echo",
+                started_at=matching_bucket - timedelta(days=7 * weeks_ago),
+                duration_seconds=3600,
+            )
+
+        row = service.refresh_partner_score("5005", now=now)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertAlmostEqual(row["raid_boost_multiplier"], 1.5, places=6)
+        self.assertGreater(float(row["final_score"]), float(row["base_score"]))
+        conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

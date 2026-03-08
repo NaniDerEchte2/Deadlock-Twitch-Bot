@@ -80,6 +80,32 @@ def _score_payload(score_snapshot: dict | None) -> dict[str, object]:
     }
 
 
+def _lookup_open_session_id(
+    conn,
+    *,
+    streamer_login: str,
+    target_stream_started_at: str | None,
+) -> int | None:
+    login_lower = str(streamer_login or "").strip().lower()
+    if not login_lower:
+        return None
+    row = conn.execute(
+        """
+        SELECT id
+        FROM twitch_stream_sessions
+        WHERE LOWER(streamer_login) = LOWER(?)
+          AND ended_at IS NULL
+        ORDER BY
+            CASE WHEN COALESCE(started_at, '') = COALESCE(?, '') THEN 0 ELSE 1 END,
+            started_at DESC,
+            id DESC
+        LIMIT 1
+        """,
+        (login_lower, target_stream_started_at),
+    ).fetchone()
+    return _safe_int(_row_value(row, "id", 0), 0) or None
+
+
 def _load_cached_score_snapshot(conn, twitch_user_id: str) -> dict[str, object]:
     row = conn.execute(
         """
@@ -103,6 +129,141 @@ def _load_cached_score_snapshot(conn, twitch_user_id: str) -> dict[str, object]:
         "today_received_raids": _safe_int(_row_value(row, "today_received_raids", 6), 0),
         "last_computed_at": str(_row_value(row, "last_computed_at", 7) or "").strip() or None,
     }
+
+
+def _load_raid_history_id(
+    conn,
+    *,
+    target_id: str,
+    target_login: str,
+    source_login: str,
+    source_id: str | None,
+) -> int | None:
+    if source_id:
+        row = conn.execute(
+            """
+            SELECT id
+            FROM twitch_raid_history
+            WHERE to_broadcaster_id = ?
+              AND LOWER(to_broadcaster_login) = LOWER(?)
+              AND from_broadcaster_id = ?
+              AND LOWER(from_broadcaster_login) = LOWER(?)
+              AND COALESCE(success, 0) = 1
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (target_id, target_login, source_id, source_login),
+        ).fetchone()
+        raid_history_id = _safe_int(_row_value(row, "id", 0), 0) or None
+        if raid_history_id is not None:
+            return raid_history_id
+    row = conn.execute(
+        """
+        SELECT id
+        FROM twitch_raid_history
+        WHERE to_broadcaster_id = ?
+          AND LOWER(to_broadcaster_login) = LOWER(?)
+          AND LOWER(from_broadcaster_login) = LOWER(?)
+          AND COALESCE(success, 0) = 1
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (target_id, target_login, source_login),
+    ).fetchone()
+    return _safe_int(_row_value(row, "id", 0), 0) or None
+
+
+def _load_session_started_at(conn, session_id: int) -> datetime | None:
+    row = conn.execute(
+        """
+        SELECT started_at
+        FROM twitch_stream_sessions
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (int(session_id),),
+    ).fetchone()
+    return _parse_dt(_row_value(row, "started_at", 0))
+
+
+def _load_unresolved_tracking_rows_for_session(
+    conn,
+    *,
+    session_id: int,
+    target_id: str,
+    login_lower: str,
+    session_started_at: datetime | None,
+    session_ended_at: datetime,
+) -> list[Any]:
+    rows = conn.execute(
+        """
+        SELECT id, confirmed_at, to_broadcaster_id, was_deadlock_at_raid
+        FROM twitch_partner_raid_score_tracking
+        WHERE target_session_id = ?
+          AND resolved_at IS NULL
+        ORDER BY confirmed_at ASC, id ASC
+        """,
+        (int(session_id),),
+    ).fetchall()
+    if session_started_at is None:
+        return rows
+
+    target_identifier_sql = ""
+    params: list[object] = []
+    if target_id:
+        target_identifier_sql = "to_broadcaster_id = ?"
+        params.append(target_id)
+    elif login_lower:
+        target_identifier_sql = "LOWER(to_broadcaster_login) = LOWER(?)"
+        params.append(login_lower)
+    else:
+        return []
+
+    params.extend(
+        [
+            _iso_utc(session_started_at),
+            _iso_utc(session_ended_at),
+            _iso_utc(session_started_at),
+        ]
+    )
+    fallback_rows = conn.execute(
+        f"""
+        SELECT id, confirmed_at, to_broadcaster_id, was_deadlock_at_raid
+        FROM twitch_partner_raid_score_tracking
+        WHERE target_session_id IS NULL
+          AND resolved_at IS NULL
+          AND {target_identifier_sql}
+          AND confirmed_at >= ?
+          AND confirmed_at <= ?
+          AND (
+              target_stream_started_at IS NULL
+              OR target_stream_started_at = ?
+          )
+        ORDER BY confirmed_at ASC, id ASC
+        """,
+        tuple(params),
+    ).fetchall()
+
+    if not fallback_rows:
+        return rows
+
+    combined: dict[int, Any] = {}
+    for row in rows:
+        row_id = _safe_int(_row_value(row, "id", 0), 0)
+        if row_id:
+            combined[row_id] = row
+    for row in fallback_rows:
+        row_id = _safe_int(_row_value(row, "id", 0), 0)
+        if row_id and row_id not in combined:
+            combined[row_id] = row
+
+    return sorted(
+        combined.values(),
+        key=lambda row: (
+            _parse_dt(_row_value(row, "confirmed_at", 1)) or datetime.min.replace(tzinfo=UTC),
+            _safe_int(_row_value(row, "id", 0), 0),
+        ),
+    )
 
 
 def track_confirmed_partner_raid(
@@ -129,7 +290,7 @@ def track_confirmed_partner_raid(
         with get_conn() as conn:
             live_state = conn.execute(
                 """
-                SELECT active_session_id, last_started_at, last_game
+                SELECT active_session_id, last_started_at, last_game, streamer_login
                 FROM twitch_live_state
                 WHERE twitch_user_id = ?
                 """,
@@ -145,22 +306,25 @@ def track_confirmed_partner_raid(
                 str(_row_value(live_state, "last_started_at", 1) or "").strip() or None
             )
             last_game = str(_row_value(live_state, "last_game", 2) or "").strip().lower()
+            streamer_login = str(
+                _row_value(live_state, "streamer_login", 3, target_login) or target_login
+            ).strip().lower()
+            active_session_id_value = _safe_int(active_session_id, 0) or None
+            if active_session_id_value is None:
+                active_session_id_value = _lookup_open_session_id(
+                    conn,
+                    streamer_login=streamer_login,
+                    target_stream_started_at=target_stream_started_at,
+                )
             was_deadlock_at_raid = bool(last_game and last_game == _target_game_lower())
 
-            row = conn.execute(
-                """
-                SELECT id
-                FROM twitch_raid_history
-                WHERE to_broadcaster_id = ?
-                  AND LOWER(to_broadcaster_login) = LOWER(?)
-                  AND LOWER(from_broadcaster_login) = LOWER(?)
-                  AND COALESCE(success, 0) = 1
-                ORDER BY id DESC
-                LIMIT 1
-                """,
-                (target_id, target_login, source_login),
-            ).fetchone()
-            raid_history_id = _safe_int(_row_value(row, "id", 0), 0) or None
+            raid_history_id = _load_raid_history_id(
+                conn,
+                target_id=target_id,
+                target_login=target_login,
+                source_login=source_login,
+                source_id=source_id,
+            )
 
             deadlock_continued_until = None if was_deadlock_at_raid else confirmed_at_iso
             deadlock_continued_sec = None if was_deadlock_at_raid else 0
@@ -202,7 +366,7 @@ def track_confirmed_partner_raid(
                     target_login,
                     _safe_int(viewer_count, 0),
                     confirmed_at_iso,
-                    active_session_id,
+                    active_session_id_value,
                     target_stream_started_at,
                     score_payload.get("score_last_computed_at"),
                     score_payload.get("final_score"),
@@ -270,16 +434,15 @@ def resolve_partner_raid_tracking_for_session(
 
     try:
         with get_conn() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, confirmed_at, to_broadcaster_id, was_deadlock_at_raid
-                FROM twitch_partner_raid_score_tracking
-                WHERE target_session_id = ?
-                  AND resolved_at IS NULL
-                ORDER BY confirmed_at ASC, id ASC
-                """,
-                (int(session_id),),
-            ).fetchall()
+            session_started_at = _load_session_started_at(conn, int(session_id))
+            rows = _load_unresolved_tracking_rows_for_session(
+                conn,
+                session_id=int(session_id),
+                target_id=target_id,
+                login_lower=login_lower,
+                session_started_at=session_started_at,
+                session_ended_at=ended_at_dt,
+            )
             if not rows:
                 return 0
 

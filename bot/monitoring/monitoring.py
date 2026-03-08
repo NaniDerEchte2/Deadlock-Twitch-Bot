@@ -33,6 +33,28 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
     def _partner_raid_score_refresh_interval_seconds(self) -> float:
         return 300.0
 
+    @staticmethod
+    def _partner_raid_score_refresh_preferred_names(*, full_refresh: bool) -> tuple[str, ...]:
+        if full_refresh:
+            return (
+                "refresh_all_partner_raid_scores_async",
+                "refresh_all_partner_raid_score_caches_async",
+                "refresh_partner_raid_score_cache_async",
+                "refresh_partner_raid_scores_async",
+                "refresh_all_partner_raid_scores",
+                "refresh_all_partner_raid_score_caches",
+                "refresh_partner_raid_score_cache",
+                "refresh_partner_raid_scores",
+            )
+        return (
+            "refresh_partner_raid_score_cache_async",
+            "refresh_partner_raid_scores_async",
+            "refresh_partner_raid_score_async",
+            "refresh_partner_raid_score_cache",
+            "refresh_partner_raid_scores",
+            "refresh_partner_raid_score",
+        )
+
     def _partner_raid_score_refresh_candidates(self) -> list[object]:
         candidates: list[object] = []
         for candidate in (
@@ -91,19 +113,8 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
         trigger: str,
         full_refresh: bool = False,
     ) -> bool:
-        preferred_names = (
-            (
-                "refresh_all_partner_raid_scores",
-                "refresh_all_partner_raid_score_caches",
-                "refresh_partner_raid_score_cache",
-                "refresh_partner_raid_scores",
-            )
-            if full_refresh
-            else (
-                "refresh_partner_raid_score_cache",
-                "refresh_partner_raid_scores",
-                "refresh_partner_raid_score",
-            )
+        preferred_names = self._partner_raid_score_refresh_preferred_names(
+            full_refresh=full_refresh
         )
 
         for candidate in self._partner_raid_score_refresh_candidates():
@@ -132,7 +143,10 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                     if any(required_name in func_params for required_name in required_id_names):
                         continue
                 try:
-                    result = func(**kwargs)
+                    if inspect.iscoroutinefunction(func):
+                        result = await func(**kwargs)
+                    else:
+                        result = await asyncio.to_thread(func, **kwargs)
                 except TypeError:
                     continue
                 if inspect.isawaitable(result):

@@ -1427,19 +1427,15 @@ class RaidBot:
         Primär: höchster final_score.
         Bei engem Score (<= 0.05): weniger today_received_raids.
         Danach: bestehender deterministischer Fallback viewer_count/followers_total/started_at.
+
+        Wichtig: Der 7-Tage-Target-Cooldown gilt hier bewusst NICHT.
+        Partner-Raids sollen innerhalb des Partner-Pools rein nach Score priorisiert werden.
+        Der Cooldown bleibt nur für den Non-Partner-Fallback aktiv.
         """
         if not candidates:
             return None
 
-        recent_targets = self._get_recent_raid_targets(
-            from_broadcaster_id, RAID_TARGET_COOLDOWN_DAYS
-        )
-        filtered = [
-            candidate
-            for candidate in candidates
-            if str(candidate.get("user_id") or "").strip() not in recent_targets
-        ] if recent_targets else []
-        pool = filtered or candidates
+        pool = list(candidates)
 
         score_map = self._load_prepared_partner_scores(
             [str(candidate.get("user_id") or "").strip() for candidate in pool]
@@ -1482,10 +1478,9 @@ class RaidBot:
         if not scored_candidates:
             log.info(
                 "No prepared partner score candidate available for broadcaster_id=%s "
-                "(input=%d, recent_filtered=%d, cache_misses=%d, stale_not_live=%d)",
+                "(input=%d, cache_misses=%d, stale_not_live=%d)",
                 from_broadcaster_id,
                 len(candidates),
-                max(0, len(candidates) - len(pool)),
                 cache_misses,
                 stale_not_live,
             )
@@ -1551,12 +1546,11 @@ class RaidBot:
         selected_score = selected.get("_partner_score") or {}
         log.info(
             "Partner raid target selection (prepared score): %s final=%.3f today=%s "
-            "reason=%s recent_filtered=%d cache_misses=%d stale_not_live=%d from %d candidates",
+            "reason=%s cache_misses=%d stale_not_live=%d from %d candidates",
             selected.get("user_login"),
             _safe_float(selected_score.get("final_score"), 0.0),
             _safe_int(selected_score.get("today_received_raids"), 0),
             selection_reason,
-            max(0, len(candidates) - len(pool)),
             cache_misses,
             stale_not_live,
             len(candidates),

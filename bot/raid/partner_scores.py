@@ -21,6 +21,7 @@ NEW_PARTNER_MAX_MULTIPLIER = 1.25
 NEW_PARTNER_RAID_THRESHOLD = 10
 RAID_BOOST_MULTIPLIER = 1.5
 DEFAULT_RAID_BOOST_MULTIPLIER = 1.0
+RAID_BOOST_PLAN_NAMES = {"raid_boost", "bundle_analysis_raid_boost", "bundle"}
 
 try:
     BERLIN_TZ = ZoneInfo("Europe/Berlin")
@@ -257,7 +258,7 @@ class PartnerRaidScoreService:
             live_state_by_id = self._load_live_state(conn, partner_ids)
             sessions_by_login = self._load_sessions(conn, partner_logins)
             raid_timestamps_by_id = self._load_raid_timestamps(conn, partner_ids)
-            boost_flags = self._load_boost_flags(conn, partner_ids)
+            boost_flags = self._load_boost_flags(conn, partner_ids, now_utc=now_utc)
             existing_cache = self._load_cached_rows_by_id(conn, partner_ids)
 
             prepared_rows = [
@@ -370,7 +371,13 @@ class PartnerRaidScoreService:
             raid_timestamps.setdefault(user_id, []).append(executed_at)
         return raid_timestamps
 
-    def _load_boost_flags(self, conn, user_ids: Sequence[str]) -> dict[str, bool]:
+    def _load_boost_flags(
+        self,
+        conn,
+        user_ids: Sequence[str],
+        *,
+        now_utc: datetime,
+    ) -> dict[str, bool]:
         if not user_ids:
             return {}
         rows = conn.execute(
@@ -382,9 +389,7 @@ class PartnerRaidScoreService:
             f"WHERE twitch_user_id IN ({_placeholders(user_ids)})",
             list(user_ids),
         ).fetchall()
-        boost_plan_ids = {"raid_boost", "bundle_analysis_raid_boost"}
         flags: dict[str, bool] = {}
-        now_utc = datetime.now(UTC)
         for row in rows:
             twitch_user_id = str(_row_value(row, "twitch_user_id", "")).strip()
             if not twitch_user_id:
@@ -399,8 +404,8 @@ class PartnerRaidScoreService:
             )
             flags[twitch_user_id] = bool(
                 raid_boost_enabled
-                or plan_name in boost_plan_ids
-                or (manual_override_active and manual_plan_id in boost_plan_ids)
+                or plan_name in RAID_BOOST_PLAN_NAMES
+                or (manual_override_active and manual_plan_id in RAID_BOOST_PLAN_NAMES)
             )
         return flags
 
