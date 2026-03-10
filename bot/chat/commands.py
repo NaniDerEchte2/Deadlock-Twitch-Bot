@@ -1,6 +1,5 @@
 import logging
 import secrets
-from datetime import UTC, datetime
 
 from ..storage import get_conn
 from .constants import TWITCHIO_AVAILABLE, twitchio_commands
@@ -630,187 +629,49 @@ if TWITCHIO_AVAILABLE:
                         exc_info=True,
                     )
 
-            api_session = getattr(self._raid_bot, "session", None)
-            executor = getattr(self._raid_bot, "raid_executor", None)
-            if not api_session or not executor:
+            if getattr(self._raid_bot, "session", None) is None:
                 await ctx.send(f"@{ctx.author.name} Twitch-Bot nicht verfügbar.")
                 return
 
-            # Partner-Kandidaten laden (verifizierte Partner, Opt-out respektieren)
-            with get_conn() as conn:
-                partners = conn.execute(
-                    """
-                    SELECT twitch_login, twitch_user_id
-                      FROM twitch_streamers_partner_state
-                     WHERE is_partner_active = 1
-                       AND twitch_user_id IS NOT NULL
-                       AND twitch_login IS NOT NULL
-                       AND twitch_user_id != ?
-                    """,
-                    (twitch_user_id,),
-                ).fetchall()
-
-            partner_logins = [str(r[0]).lower() for r in partners]
-
-            # Live-Streams holen
-            candidates = []
-            api = None
             try:
-                from ..api.twitch_api import (
-                    TwitchAPI,
-                )  # lokal importieren, um Zyklus zu vermeiden
-
-                api = TwitchAPI(
-                    self._raid_bot.auth_manager.client_id,
-                    self._raid_bot.auth_manager.client_secret,
-                    session=api_session,
-                )
-                streams = await api.get_streams_by_logins(partner_logins, language=None)
-                for stream in streams:
-                    user_id = str(stream.get("user_id") or "")
-                    user_login = (stream.get("user_login") or "").lower()
-                    started_at = stream.get("started_at") or ""
-                    candidates.append(
-                        {
-                            "user_id": user_id,
-                            "user_login": user_login,
-                            "started_at": started_at,
-                            "viewer_count": int(stream.get("viewer_count") or 0),
-                        }
-                    )
-            except Exception:
-                log.exception("Manual raid: konnte Streams nicht abrufen")
-
-            is_partner_raid = True
-            target = None
-
-            if candidates:
-                # Auswahl nach niedrigsten Viewern wiederverwenden
-                target = await self._raid_bot._select_fairest_candidate(candidates, twitch_user_id)  # type: ignore[attr-defined]
-
-            if not target:
-                # Fallback auf DE Deadlock-Streamer
-                try:
-                    if api is None:
-                        from ..api.twitch_api import (
-                            TwitchAPI,
-                        )  # lokal importieren, um Zyklus zu vermeiden
-
-                        api = TwitchAPI(
-                            self._raid_bot.auth_manager.client_id,
-                            self._raid_bot.auth_manager.client_secret,
-                            session=api_session,
-                        )
-                    from ..core.constants import TWITCH_TARGET_GAME_NAME
-
-                    category_id = await api.get_category_id(TWITCH_TARGET_GAME_NAME)
-                    if category_id:
-                        de_streams = await api.get_streams_by_category(
-                            category_id, language="de", limit=50
-                        )
-                        # Filter out self
-                        de_streams = [
-                            s for s in de_streams if str(s.get("user_id")) != str(twitch_user_id)
-                        ]
-                        if de_streams:
-                            is_partner_raid = False
-                            target = await self._raid_bot._select_fairest_candidate(
-                                de_streams, twitch_user_id
-                            )  # type: ignore[attr-defined]
-                            if not target:
-                                await ctx.send(
-                                    f"@{ctx.author.name} Kein geeigneter Fallback-Streamer gefunden."
-                                )
-                                return
-                            # Normalisieren für executor
-                            if "user_login" not in target and "user_name" in target:
-                                target["user_login"] = target["user_name"].lower()
-                        else:
-                            await ctx.send(
-                                f"@{ctx.author.name} Weder Partner noch andere deutsche Deadlock-Streamer live."
-                            )
-                            return
-                    else:
-                        await ctx.send(
-                            f"@{ctx.author.name} Kein Partner live (Kategorie-ID nicht gefunden)."
-                        )
-                        return
-                except Exception:
-                    log.exception("Manual raid fallback failed")
-                    await ctx.send(
-                        f"@{ctx.author.name} Kein Partner live und Fallback fehlgeschlagen."
-                    )
-                    return
-
-            target_id = target.get("user_id") or ""
-            target_login = target.get("user_login") or ""
-            target_started_at = target.get("started_at", "")
-            viewer_count = int(target.get("viewer_count") or 0)
-
-            # Streamdauer best-effort
-            stream_duration_sec = 0
-            try:
-                if target_started_at:
-                    started_dt = datetime.fromisoformat(target_started_at.replace("Z", "+00:00"))
-                    stream_duration_sec = int((datetime.now(UTC) - started_dt).total_seconds())
-            except Exception as exc:
-                log.debug(
-                    "Konnte Stream-Dauer nicht berechnen für %s",
-                    target_login,
-                    exc_info=exc,
-                )
-
-            try:
-                success, error = await executor.start_raid(
-                    from_broadcaster_id=twitch_user_id,
-                    from_broadcaster_login=twitch_login,
-                    to_broadcaster_id=target_id,
-                    to_broadcaster_login=target_login,
-                    viewer_count=viewer_count,
-                    stream_duration_sec=stream_duration_sec,
-                    target_stream_started_at=target_started_at,
-                    candidates_count=len(candidates) if is_partner_raid else 0,
-                    reason="manual_chat_command",
-                    session=api_session,
+                result = await self._raid_bot.start_manual_raid(
+                    broadcaster_id=str(twitch_user_id),
+                    broadcaster_login=str(twitch_login).lower(),
                 )
             except Exception as exc:
-                log.exception("Manual raid failed for %s -> %s", twitch_login, target_login)
+                log.exception("Manual raid failed for %s", twitch_login)
                 await ctx.send(f"@{ctx.author.name} Raid fehlgeschlagen: {exc}")
                 return
 
-            if success:
-                if hasattr(self._raid_bot, "mark_manual_raid_started"):
-                    try:
-                        self._raid_bot.mark_manual_raid_started(
-                            broadcaster_id=str(twitch_user_id),
-                            ttl_seconds=180.0,  # 3 Minuten: verhindert Auto-Raid nach manuellem Raid
-                        )
-                    except Exception:
-                        log.debug(
-                            "Konnte Manual-Raid-Suppression nicht setzen für %s",
-                            twitch_login,
-                            exc_info=True,
-                        )
-
+            status = str(result.get("status") or "")
+            if status == "started":
+                target_login = str(result.get("target_login") or "").strip()
                 await ctx.send(
                     f"@{ctx.author.name} Raid auf {target_login} gestartet! (Twitch-Countdown ~90s)"
                 )
-
-                # Pending Raid registrieren (Nachricht wird erst nach EventSub gesendet)
-                # Funktioniert für Partner-Raids UND Non-Partner-Raids
-                if hasattr(self._raid_bot, "_register_pending_raid"):
-                    await self._raid_bot._register_pending_raid(
-                        from_broadcaster_login=twitch_login,
-                        to_broadcaster_id=target_id,
-                        to_broadcaster_login=target_login,
-                        target_stream_data=target,
-                        is_partner_raid=is_partner_raid,
-                        viewer_count=viewer_count,
-                    )
-            else:
+                return
+            if status == "source_not_live":
                 await ctx.send(
-                    f"@{ctx.author.name} Raid fehlgeschlagen: {error or 'unbekannter Fehler'}"
+                    f"@{ctx.author.name} Du musst live sein, um !raid zu benutzen."
                 )
+                return
+            if status == "source_not_eligible":
+                await ctx.send(
+                    f"@{ctx.author.name} !raid ist nur verfügbar, wenn du gerade Deadlock streamst oder gerade erst von Deadlock auf Just Chatting gewechselt bist."
+                )
+                return
+            if status == "no_target":
+                await ctx.send(
+                    f"@{ctx.author.name} Weder Deadlock-Partner noch andere deutsche Deadlock-Streamer live."
+                )
+                return
+            if status == "unavailable":
+                await ctx.send(f"@{ctx.author.name} Twitch-Bot nicht verfügbar.")
+                return
+
+            await ctx.send(
+                f"@{ctx.author.name} Raid fehlgeschlagen: {result.get('error') or 'unbekannter Fehler'}"
+            )
 else:
 
     class RaidCommandsMixin:

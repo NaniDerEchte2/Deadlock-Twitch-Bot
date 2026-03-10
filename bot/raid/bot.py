@@ -20,6 +20,7 @@ from urllib.parse import urlencode
 import aiohttp
 import discord
 
+from ..core.constants import TWITCH_TARGET_GAME_NAME
 from ..discord_role_sync import normalize_discord_user_id, sync_streamer_role
 from ..storage import backfill_tracked_stats_from_category, get_conn
 try:
@@ -259,6 +260,372 @@ class RaidBot:
         """
         self._cog = cog
         log.debug("Cog reference set for dynamic EventSub subscriptions")
+
+    @staticmethod
+    def _row_value(row, key: str, index: int, default=None):
+        if row is None:
+            return default
+        try:
+            if hasattr(row, "keys"):
+                return row[key]
+            return row[index]
+        except Exception:
+            return default
+
+    @staticmethod
+    def _safe_int(value: object, default: int = 0) -> int:
+        try:
+            if value is None:
+                return default
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _parse_datetime(value: object) -> datetime | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+    def _get_target_game_lower(self) -> str:
+        cached = getattr(self, "_target_game_lower", None)
+        if isinstance(cached, str) and cached:
+            return cached
+
+        resolved = ""
+        cog = getattr(self, "_cog", None)
+        get_target_lower = getattr(cog, "_get_target_game_lower", None) if cog else None
+        if callable(get_target_lower):
+            try:
+                resolved = str(get_target_lower() or "").strip().lower()
+            except Exception:
+                resolved = ""
+
+        if not resolved:
+            resolved = (TWITCH_TARGET_GAME_NAME or "").strip().lower()
+
+        self._target_game_lower = resolved
+        return resolved
+
+    def _is_recent_deadlock(
+        self,
+        last_deadlock_seen_at: str | None,
+        *,
+        now_utc: datetime | None = None,
+        recency_cap_seconds: int = 360,
+    ) -> bool:
+        last_deadlock_dt = self._parse_datetime(last_deadlock_seen_at)
+        if last_deadlock_dt is None:
+            return False
+        reference = now_utc if now_utc is not None else datetime.now(UTC)
+        return (reference - last_deadlock_dt).total_seconds() <= recency_cap_seconds
+
+    def _is_deadlock_raid_source_eligible(
+        self,
+        *,
+        last_game: str,
+        had_deadlock_session: bool,
+        last_deadlock_seen_at: str | None,
+    ) -> bool:
+        target_game_lower = self._get_target_game_lower()
+        if not target_game_lower:
+            return False
+
+        last_game_lower = str(last_game or "").strip().lower()
+        if last_game_lower == target_game_lower:
+            return True
+        if last_game_lower == "just chatting" and had_deadlock_session:
+            return self._is_recent_deadlock(last_deadlock_seen_at)
+        return False
+
+    def _is_deadlock_partner_candidate_eligible(
+        self,
+        *,
+        game_name: str,
+        had_deadlock_session: bool,
+        last_deadlock_seen_at: str | None,
+    ) -> bool:
+        target_game_lower = self._get_target_game_lower()
+        if not target_game_lower:
+            return True
+
+        game_lower = str(game_name or "").strip().lower()
+        if game_lower == target_game_lower:
+            return True
+        if game_lower == "just chatting" and had_deadlock_session:
+            return self._is_recent_deadlock(last_deadlock_seen_at)
+        return False
+
+    def _load_partner_roster_for_raid(self, source_user_id: str) -> list[dict[str, object]]:
+        with get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT s.twitch_login, s.twitch_user_id,
+                       r.raid_enabled, r.authorized_at
+                  FROM twitch_streamers_partner_state s
+                  LEFT JOIN twitch_raid_auth r ON s.twitch_user_id = r.twitch_user_id
+                 WHERE s.is_partner_active = 1
+                   AND s.twitch_user_id IS NOT NULL
+                   AND s.twitch_login IS NOT NULL
+                   AND s.twitch_user_id != ?
+                """,
+                (source_user_id,),
+            ).fetchall()
+
+        partners: list[dict[str, object]] = []
+        for row in rows:
+            partner_login = str(self._row_value(row, "twitch_login", 0, "") or "").strip().lower()
+            partner_user_id = str(self._row_value(row, "twitch_user_id", 1, "") or "").strip()
+            raid_enabled = bool(self._row_value(row, "raid_enabled", 2, False))
+            raid_authorized_at = self._row_value(row, "authorized_at", 3, None)
+            if not partner_login or not partner_user_id:
+                continue
+            if not raid_enabled and not raid_authorized_at:
+                continue
+            partners.append(
+                {
+                    "twitch_login": partner_login,
+                    "twitch_user_id": partner_user_id,
+                    "raid_enabled": raid_enabled or bool(raid_authorized_at),
+                }
+            )
+        return partners
+
+    def _build_online_partner_candidates(
+        self,
+        partner_rows: list[dict[str, object]],
+        streams_by_login: dict[str, dict],
+    ) -> list[dict]:
+        online_partners: list[dict] = []
+        for partner_row in partner_rows:
+            partner_login = str(partner_row.get("twitch_login") or "").strip().lower()
+            partner_user_id = str(partner_row.get("twitch_user_id") or "").strip()
+            if not partner_login or not partner_user_id:
+                continue
+            stream_data = streams_by_login.get(partner_login)
+            if not stream_data:
+                continue
+            candidate = dict(stream_data)
+            candidate["user_id"] = partner_user_id
+            candidate["raid_enabled"] = bool(partner_row.get("raid_enabled", True))
+            online_partners.append(candidate)
+        return online_partners
+
+    def _load_partner_live_state_map(
+        self,
+        partner_logins_lower: list[str],
+    ) -> dict[str, dict[str, object]]:
+        if not partner_logins_lower:
+            return {}
+
+        placeholders = ",".join("?" * len(partner_logins_lower))
+        with get_conn() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT streamer_login, had_deadlock_in_session, last_game, last_deadlock_seen_at
+                  FROM twitch_live_state
+                 WHERE streamer_login IN ({placeholders})
+                """,
+                partner_logins_lower,
+            ).fetchall()
+
+        live_state_by_login: dict[str, dict[str, object]] = {}
+        for row in rows:
+            login_lower = str(self._row_value(row, "streamer_login", 0, "") or "").strip().lower()
+            if not login_lower:
+                continue
+            live_state_by_login[login_lower] = {
+                "had_deadlock_in_session": bool(
+                    self._safe_int(self._row_value(row, "had_deadlock_in_session", 1, 0), 0)
+                ),
+                "last_game": str(self._row_value(row, "last_game", 2, "") or "").strip(),
+                "last_deadlock_seen_at": str(
+                    self._row_value(row, "last_deadlock_seen_at", 3, "") or ""
+                ).strip(),
+            }
+        return live_state_by_login
+
+    def _filter_deadlock_eligible_partner_candidates(
+        self,
+        online_partners: list[dict],
+    ) -> tuple[list[dict], list[str]]:
+        target_game_lower = self._get_target_game_lower()
+        if not target_game_lower or not online_partners:
+            return list(online_partners), []
+
+        partner_logins_lower = [
+            str(stream_data.get("user_login") or "").strip().lower()
+            for stream_data in online_partners
+            if str(stream_data.get("user_login") or "").strip()
+        ]
+        live_state_by_login: dict[str, dict[str, object]] = {}
+        try:
+            live_state_by_login = self._load_partner_live_state_map(partner_logins_lower)
+        except Exception:
+            log.debug("Konnte Live-State für Partner nicht laden", exc_info=True)
+
+        filtered_active: list[dict] = []
+        filtered_recent: list[dict] = []
+        filtered_out: list[str] = []
+
+        for stream_data in online_partners:
+            partner_login_lower = str(stream_data.get("user_login") or "").strip().lower()
+            game_name = str(stream_data.get("game_name") or "").strip()
+            game_lower = game_name.lower()
+            live_state = live_state_by_login.get(partner_login_lower, {})
+            had_deadlock_partner = bool(live_state.get("had_deadlock_in_session", False))
+            last_game_state = str(live_state.get("last_game") or "").strip()
+            last_deadlock_seen_partner = (
+                str(live_state.get("last_deadlock_seen_at") or "").strip() or None
+            )
+
+            allow_partner = self._is_deadlock_partner_candidate_eligible(
+                game_name=game_name,
+                had_deadlock_session=had_deadlock_partner,
+                last_deadlock_seen_at=last_deadlock_seen_partner,
+            )
+            if allow_partner:
+                if game_lower == target_game_lower:
+                    filtered_active.append(stream_data)
+                else:
+                    filtered_recent.append(stream_data)
+                continue
+
+            filtered_out.append(
+                f"{partner_login_lower} (game='{game_name or last_game_state}', "
+                f"had_deadlock_session={had_deadlock_partner}, "
+                f"last_deadlock_seen={last_deadlock_seen_partner or 'none'})"
+            )
+
+        eligible_partners = filtered_active if filtered_active else filtered_recent
+        return eligible_partners, filtered_out
+
+    def _load_broadcaster_live_state(self, broadcaster_id: str) -> dict[str, object]:
+        with get_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT twitch_user_id, streamer_login, is_live, last_started_at,
+                       last_game, last_viewer_count, had_deadlock_in_session, last_deadlock_seen_at
+                  FROM twitch_live_state
+                 WHERE twitch_user_id = ?
+                """,
+                (broadcaster_id,),
+            ).fetchone()
+
+        if not row:
+            return {}
+
+        return {
+            "twitch_user_id": str(self._row_value(row, "twitch_user_id", 0, "") or "").strip(),
+            "streamer_login": str(self._row_value(row, "streamer_login", 1, "") or "").strip().lower(),
+            "is_live": bool(self._safe_int(self._row_value(row, "is_live", 2, 0), 0)),
+            "last_started_at": str(self._row_value(row, "last_started_at", 3, "") or "").strip(),
+            "last_game": str(self._row_value(row, "last_game", 4, "") or "").strip(),
+            "last_viewer_count": self._safe_int(self._row_value(row, "last_viewer_count", 5, 0), 0),
+            "had_deadlock_in_session": bool(
+                self._safe_int(self._row_value(row, "had_deadlock_in_session", 6, 0), 0)
+            ),
+            "last_deadlock_seen_at": str(
+                self._row_value(row, "last_deadlock_seen_at", 7, "") or ""
+            ).strip(),
+        }
+
+    def _calculate_stream_duration_sec(self, started_at: str | None) -> int:
+        started_dt = self._parse_datetime(started_at)
+        if started_dt is None:
+            return 0
+        return max(0, int((datetime.now(UTC) - started_dt).total_seconds()))
+
+    def _raid_language_filters(self) -> list[str | None]:
+        cog = getattr(self, "_cog", None)
+        language_filter_values = getattr(cog, "_language_filter_values", None) if cog else None
+        if callable(language_filter_values):
+            try:
+                values = list(language_filter_values())
+            except Exception:
+                values = []
+            if values:
+                return values
+        return [None]
+
+    def _create_twitch_api(self):
+        session = self.session
+        if session is None:
+            return None
+        try:
+            from ..api.twitch_api import TwitchAPI
+        except Exception:
+            return None
+        return TwitchAPI(
+            self.auth_manager.client_id,
+            self.auth_manager.client_secret,
+            session=session,
+        )
+
+    async def _fetch_streams_by_logins_for_raid(self, logins: list[str]) -> dict[str, dict]:
+        normalized_logins = [
+            login.lower()
+            for login in dict.fromkeys(str(login or "").strip() for login in logins)
+            if login
+        ]
+        if not normalized_logins:
+            return {}
+
+        cog = getattr(self, "_cog", None)
+        shared_fetch = getattr(cog, "_fetch_streams_by_logins_quick", None) if cog else None
+        if callable(shared_fetch):
+            try:
+                streams_by_login = await shared_fetch(normalized_logins)
+                if streams_by_login:
+                    return streams_by_login
+            except Exception:
+                log.debug("RaidBot: shared stream fetch failed", exc_info=True)
+
+        api = self._create_twitch_api()
+        if api is None:
+            return {}
+
+        streams_by_login: dict[str, dict] = {}
+        for language in self._raid_language_filters():
+            try:
+                streams = await api.get_streams_by_logins(normalized_logins, language=language)
+            except Exception:
+                log.debug(
+                    "RaidBot: get_streams_by_logins failed (language=%s)",
+                    language or "any",
+                    exc_info=True,
+                )
+                continue
+            for stream in streams:
+                login_lower = str(stream.get("user_login") or "").strip().lower()
+                if login_lower:
+                    streams_by_login[login_lower] = stream
+        return streams_by_login
+
+    async def _resolve_target_category_id(self, api=None) -> str | None:
+        cog = getattr(self, "_cog", None)
+        cached_category_id = getattr(cog, "_category_id", None) if cog else None
+        if cached_category_id:
+            return str(cached_category_id)
+
+        api_client = api or self._create_twitch_api()
+        if api_client is None:
+            return None
+
+        try:
+            return await api_client.get_category_id(TWITCH_TARGET_GAME_NAME)
+        except Exception:
+            log.debug("RaidBot: could not resolve target category id", exc_info=True)
+            return None
 
     def mark_manual_raid_started(self, broadcaster_id: str, ttl_seconds: float = 300.0) -> None:
         """Unterdrückt den nächsten Offline-Auto-Raid für einen Streamer (z.B. nach !raid/!traid)."""
@@ -1667,6 +2034,280 @@ class RaidBot:
         )
         return any(marker in msg for marker in retryable_markers)
 
+    async def _execute_raid_pipeline(
+        self,
+        *,
+        broadcaster_id: str,
+        broadcaster_login: str,
+        viewer_count: int,
+        stream_duration_sec: int,
+        online_partners: list[dict],
+        api=None,
+        category_id: str | None = None,
+        offline_trigger_ts: float | None = None,
+        reason: str,
+        set_manual_suppression: bool = False,
+    ) -> dict[str, object]:
+        flow_start_ts = offline_trigger_ts if offline_trigger_ts is not None else time.monotonic()
+        offline_trigger_ts = flow_start_ts
+        active_session = self.session
+        if active_session is None:
+            log.warning(
+                "Raid pipeline unavailable for %s: no active HTTP session",
+                broadcaster_login,
+            )
+            return {"status": "unavailable", "error": "no_active_session"}
+
+        max_attempts = 3
+        exclude_ids = {broadcaster_id}
+        cached_de_streams = None
+
+        blacklisted_ids: set[str] = set()
+        blacklisted_logins: set[str] = set()
+        try:
+            with get_conn() as conn:
+                for bl_row in conn.execute(
+                    "SELECT target_id, lower(target_login) FROM twitch_raid_blacklist"
+                ).fetchall():
+                    if bl_row[0]:
+                        blacklisted_ids.add(str(bl_row[0]))
+                    blacklisted_logins.add(str(bl_row[1]))
+        except Exception:
+            log.error("Error loading blacklist", exc_info=True)
+
+        for attempt in range(max_attempts):
+            attempt_start_ts = time.monotonic()
+            target = None
+            is_partner_raid = False
+            candidates_count = 0
+
+            partner_candidates = [
+                stream_data
+                for stream_data in online_partners
+                if stream_data.get("user_id") not in exclude_ids
+                and bool(stream_data.get("raid_enabled", True))
+                and str(stream_data.get("user_id") or "") not in blacklisted_ids
+                and (stream_data.get("user_login") or "").lower() not in blacklisted_logins
+            ]
+
+            if partner_candidates:
+                is_partner_raid = True
+                target = await self._select_partner_candidate_by_score(
+                    partner_candidates,
+                    broadcaster_id,
+                )
+                candidates_count = len(partner_candidates)
+
+            if not target and api and category_id:
+                if cached_de_streams is None:
+                    try:
+                        log.info(
+                            "No partners online for %s, fetching Deadlock-DE fallback",
+                            broadcaster_login,
+                        )
+                        cached_de_streams = await api.get_streams_by_category(
+                            category_id, language="de", limit=50
+                        )
+                    except Exception:
+                        log.exception("Failed to get Deadlock-DE streams for fallback raid")
+                        cached_de_streams = []
+
+                fallback_candidates = [
+                    stream_data
+                    for stream_data in cached_de_streams
+                    if stream_data.get("user_id") not in exclude_ids
+                    and str(stream_data.get("user_id") or "") not in blacklisted_ids
+                    and (stream_data.get("user_login") or "").lower() not in blacklisted_logins
+                ]
+
+                if fallback_candidates:
+                    target = await self._select_fairest_candidate(
+                        fallback_candidates,
+                        broadcaster_id,
+                    )
+                    candidates_count = len(fallback_candidates)
+
+            if not target:
+                log.info(
+                    "No valid raid target found for %s (Attempt %d/%d, total_elapsed=%.0fms, reason=%s)",
+                    broadcaster_login,
+                    attempt + 1,
+                    max_attempts,
+                    (time.monotonic() - flow_start_ts) * 1000.0,
+                    reason,
+                )
+                return {"status": "no_target"}
+
+            target_id = str(target.get("user_id") or "").strip()
+            target_login = str(target.get("user_login") or "").strip().lower()
+            target_started_at = target.get("started_at", "")
+
+            selection_ms = (time.monotonic() - attempt_start_ts) * 1000.0
+            log.info(
+                "Executing raid attempt %d/%d: %s -> %s (selection %.0fms, candidates=%d, reason=%s)",
+                attempt + 1,
+                max_attempts,
+                broadcaster_login,
+                target_login,
+                selection_ms,
+                candidates_count,
+                reason,
+            )
+
+            api_call_start = time.monotonic()
+            success, error = await self.raid_executor.start_raid(
+                from_broadcaster_id=broadcaster_id,
+                from_broadcaster_login=broadcaster_login,
+                to_broadcaster_id=target_id,
+                to_broadcaster_login=target_login,
+                viewer_count=viewer_count,
+                stream_duration_sec=stream_duration_sec,
+                target_stream_started_at=target_started_at,
+                candidates_count=candidates_count,
+                session=active_session,
+                reason=reason,
+            )
+            api_call_ms = (time.monotonic() - api_call_start) * 1000.0
+            total_ms = (time.monotonic() - flow_start_ts) * 1000.0
+
+            if success:
+                await self._register_pending_raid(
+                    from_broadcaster_login=broadcaster_login,
+                    to_broadcaster_id=target_id,
+                    to_broadcaster_login=target_login,
+                    target_stream_data=target,
+                    is_partner_raid=is_partner_raid,
+                    viewer_count=viewer_count,
+                    offline_trigger_ts=offline_trigger_ts,
+                )
+                if set_manual_suppression:
+                    self.mark_manual_raid_started(
+                        broadcaster_id=str(broadcaster_id),
+                        ttl_seconds=180.0,
+                    )
+                log.info(
+                    "Raid attempt %d/%d succeeded (%s -> %s) api=%.0fms, total_elapsed=%.0fms, reason=%s",
+                    attempt + 1,
+                    max_attempts,
+                    broadcaster_login,
+                    target_login,
+                    api_call_ms,
+                    total_ms,
+                    reason,
+                )
+                return {
+                    "status": "started",
+                    "target_login": target_login,
+                    "target": target,
+                    "is_partner_raid": is_partner_raid,
+                    "viewer_count": viewer_count,
+                }
+
+            exclude_ids.add(target_id)
+
+            if self._is_retryable_raid_error(error):
+                if is_partner_raid:
+                    log.warning(
+                        "Raid failed: Partner target %s does not allow raids. Skipping without blacklist.",
+                        target_login,
+                    )
+                else:
+                    log.warning(
+                        "Raid failed: Target %s does not allow raids. Blacklisting and retrying.",
+                        target_login,
+                    )
+                    self._add_to_blacklist(target_id, target_login, error)
+                continue
+
+            log.error(
+                "Raid failed with non-retriable error after %.0fms (api=%.0fms, attempt=%d/%d, reason=%s): %s",
+                total_ms,
+                api_call_ms,
+                attempt + 1,
+                max_attempts,
+                reason,
+                error,
+            )
+            return {"status": "raid_failed", "error": error or "unknown_error"}
+
+        return {"status": "raid_failed", "error": "no_valid_target_after_retries"}
+
+    async def start_manual_raid(
+        self,
+        *,
+        broadcaster_id: str,
+        broadcaster_login: str,
+    ) -> dict[str, object]:
+        live_state = self._load_broadcaster_live_state(broadcaster_id)
+        if not live_state or not bool(live_state.get("is_live")):
+            log.info(
+                "Manual raid skipped for %s: broadcaster is not live",
+                broadcaster_login,
+            )
+            return {"status": "source_not_live"}
+
+        last_game = str(live_state.get("last_game") or "").strip()
+        had_deadlock_session = bool(live_state.get("had_deadlock_in_session", False))
+        last_deadlock_seen_at = (
+            str(live_state.get("last_deadlock_seen_at") or "").strip() or None
+        )
+        if not self._is_deadlock_raid_source_eligible(
+            last_game=last_game,
+            had_deadlock_session=had_deadlock_session,
+            last_deadlock_seen_at=last_deadlock_seen_at,
+        ):
+            log.info(
+                "Manual raid skipped for %s: source not Deadlock-eligible (last_game=%s, had_deadlock_session=%s, last_deadlock_seen_at=%s)",
+                broadcaster_login,
+                last_game or "unbekannt",
+                had_deadlock_session,
+                last_deadlock_seen_at or "none",
+            )
+            return {"status": "source_not_eligible"}
+
+        viewer_count = self._safe_int(live_state.get("last_viewer_count"), 0)
+        stream_duration_sec = self._calculate_stream_duration_sec(
+            str(live_state.get("last_started_at") or "").strip() or None
+        )
+
+        partner_rows = self._load_partner_roster_for_raid(broadcaster_id)
+        streams_by_login = await self._fetch_streams_by_logins_for_raid(
+            [str(row.get("twitch_login") or "") for row in partner_rows]
+        )
+        online_partners = self._build_online_partner_candidates(partner_rows, streams_by_login)
+        eligible_partners, filtered_out = self._filter_deadlock_eligible_partner_candidates(
+            online_partners
+        )
+
+        log.info(
+            "Manual raid pipeline started for %s (id=%s): viewers=%d, stream_duration=%ds, online_partners=%d, eligible_partners=%d",
+            broadcaster_login,
+            broadcaster_id,
+            viewer_count,
+            stream_duration_sec,
+            len(online_partners),
+            len(eligible_partners),
+        )
+        if filtered_out:
+            log.debug(
+                "Manual raid: Partner ausgeschlossen (Kategorie/Session): %s",
+                "; ".join(filtered_out),
+            )
+
+        api = self._create_twitch_api()
+        category_id = await self._resolve_target_category_id(api)
+        return await self._execute_raid_pipeline(
+            broadcaster_id=broadcaster_id,
+            broadcaster_login=broadcaster_login,
+            viewer_count=viewer_count,
+            stream_duration_sec=stream_duration_sec,
+            online_partners=eligible_partners,
+            api=api,
+            category_id=category_id,
+            reason="manual_chat_command",
+            set_manual_suppression=True,
+        )
+
     async def handle_streamer_offline(
         self,
         broadcaster_id: str,
@@ -1733,174 +2374,19 @@ class RaidBot:
             stream_duration_sec,
             len(online_partners),
         )
-
-        # Retry-Loop Setup
-        max_attempts = 3
-        exclude_ids = {broadcaster_id}
-        cached_de_streams = None  # Cache für Fallback-Streams um API zu schonen
-
-        # Blacklist einmalig bulk-laden für den gesamten Retry-Loop
-        blacklisted_ids: set[str] = set()
-        blacklisted_logins: set[str] = set()
-        try:
-            with get_conn() as conn:
-                for _bl_row in conn.execute(
-                    "SELECT target_id, lower(target_login) FROM twitch_raid_blacklist"
-                ).fetchall():
-                    if _bl_row[0]:
-                        blacklisted_ids.add(str(_bl_row[0]))
-                    blacklisted_logins.add(str(_bl_row[1]))
-        except Exception:
-            log.error("Error loading blacklist", exc_info=True)
-
-        for attempt in range(max_attempts):
-            attempt_start_ts = time.monotonic()
-            target = None
-            is_partner_raid = False
-            candidates_count = 0
-
-            # 1. Partner-Kandidaten filtern
-            # Wir prüfen Blacklist und bereits versuchte IDs
-            partner_candidates = [
-                s
-                for s in online_partners
-                if s.get("user_id") not in exclude_ids
-                and bool(s.get("raid_enabled", True))
-                and str(s.get("user_id") or "") not in blacklisted_ids
-                and (s.get("user_login") or "").lower() not in blacklisted_logins
-            ]
-
-            if partner_candidates:
-                # Partner vorhanden -> Auswahl über vorberechneten Score-Cache
-                is_partner_raid = True
-                target = await self._select_partner_candidate_by_score(
-                    partner_candidates,
-                    broadcaster_id,
-                )
-                candidates_count = len(partner_candidates)
-
-            # 2. Fallback (Deadlock-DE), falls kein Partner gefunden
-            if not target and api and category_id:
-                if cached_de_streams is None:
-                    try:
-                        log.info(
-                            "No partners online for %s, fetching Deadlock-DE fallback",
-                            broadcaster_login,
-                        )
-                        cached_de_streams = await api.get_streams_by_category(
-                            category_id, language="de", limit=50
-                        )
-                    except Exception:
-                        log.exception("Failed to get Deadlock-DE streams for fallback raid")
-                        cached_de_streams = []
-
-                # Fallback-Kandidaten filtern
-                fallback_candidates = [
-                    s
-                    for s in cached_de_streams
-                    if s.get("user_id") not in exclude_ids
-                    and str(s.get("user_id") or "") not in blacklisted_ids
-                    and (s.get("user_login") or "").lower() not in blacklisted_logins
-                ]
-
-                if fallback_candidates:
-                    target = await self._select_fairest_candidate(
-                        fallback_candidates, broadcaster_id
-                    )
-                    candidates_count = len(fallback_candidates)
-
-            if not target:
-                log.info(
-                    "No valid raid target found for %s (Attempt %d/%d, total_since_offline=%.0fms)",
-                    broadcaster_login,
-                    attempt + 1,
-                    max_attempts,
-                    (time.monotonic() - flow_start_ts) * 1000.0,
-                )
-                return None
-
-            # 3. Raid ausführen
-            target_id = target["user_id"]
-            target_login = target["user_login"]
-            target_started_at = target.get("started_at", "")
-
-            selection_ms = (time.monotonic() - attempt_start_ts) * 1000.0
-            log.info(
-                "Executing raid attempt %d/%d: %s -> %s (selection %.0fms, candidates=%d)",
-                attempt + 1,
-                max_attempts,
-                broadcaster_login,
-                target_login,
-                selection_ms,
-                candidates_count,
-            )
-
-            api_call_start = time.monotonic()
-            success, error = await self.raid_executor.start_raid(
-                from_broadcaster_id=broadcaster_id,
-                from_broadcaster_login=broadcaster_login,
-                to_broadcaster_id=target_id,
-                to_broadcaster_login=target_login,
-                viewer_count=viewer_count,
-                stream_duration_sec=stream_duration_sec,
-                target_stream_started_at=target_started_at,
-                candidates_count=candidates_count,
-                session=self.session,
-                reason="auto_raid_on_offline",
-            )
-            api_call_ms = (time.monotonic() - api_call_start) * 1000.0
-            total_ms = (time.monotonic() - flow_start_ts) * 1000.0
-
-            if success:
-                # Pending Raid registrieren (Nachricht wird erst nach EventSub gesendet)
-                # Funktioniert für Partner-Raids UND Non-Partner-Raids
-                await self._register_pending_raid(
-                    from_broadcaster_login=broadcaster_login,
-                    to_broadcaster_id=target_id,
-                    to_broadcaster_login=target_login,
-                    target_stream_data=target,
-                    is_partner_raid=is_partner_raid,
-                    viewer_count=viewer_count,
-                    offline_trigger_ts=offline_trigger_ts,
-                )
-                log.info(
-                    "Raid attempt %d/%d succeeded (%s -> %s) api=%.0fms, total_since_offline=%.0fms",
-                    attempt + 1,
-                    max_attempts,
-                    broadcaster_login,
-                    target_login,
-                    api_call_ms,
-                    total_ms,
-                )
-                return target_login
-
-            # Fehler-Behandlung
-            exclude_ids.add(target_id)  # Diesen Kandidaten nicht nochmal versuchen
-
-            # Check auf "Cannot be raided"/Raid-Settings (HTTP 400)
-            if self._is_retryable_raid_error(error):
-                if is_partner_raid:
-                    log.warning(
-                        "Raid failed: Partner target %s does not allow raids. Skipping without blacklist.",
-                        target_login,
-                    )
-                else:
-                    log.warning(
-                        "Raid failed: Target %s does not allow raids. Blacklisting and retrying.",
-                        target_login,
-                    )
-                    self._add_to_blacklist(target_id, target_login, error)
-                continue  # Nächster Versuch
-
-            # Bei anderen Fehlern (z.B. API Down, Auth Error) brechen wir ab
-            log.error(
-                "Raid failed with non-retriable error after %.0fms (api=%.0fms, attempt=%d/%d): %s",
-                total_ms,
-                api_call_ms,
-                attempt + 1,
-                max_attempts,
-                error,
-            )
-            return None
+        result = await self._execute_raid_pipeline(
+            broadcaster_id=broadcaster_id,
+            broadcaster_login=broadcaster_login,
+            viewer_count=viewer_count,
+            stream_duration_sec=stream_duration_sec,
+            online_partners=online_partners,
+            api=api,
+            category_id=category_id,
+            offline_trigger_ts=offline_trigger_ts,
+            reason="auto_raid_on_offline",
+        )
+        if str(result.get("status") or "") == "started":
+            return str(result.get("target_login") or "") or None
+        return None
 
         return None

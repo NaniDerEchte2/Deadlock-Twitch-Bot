@@ -5,7 +5,6 @@ import logging
 import time
 from datetime import UTC, datetime
 
-from ..core.constants import TWITCH_TARGET_GAME_NAME
 from ..storage import get_conn
 
 log = logging.getLogger("TwitchStreams.RaidMixin")
@@ -29,7 +28,6 @@ class TwitchRaidMixin:
         if offline_trigger_ts is None:
             offline_trigger_ts = time.monotonic()
 
-        now = datetime.now(UTC)
         recency_cap_seconds = 360  # Maximaler Abstand (10min), damit Deadlock noch relevant ist
 
         if not twitch_user_id:
@@ -95,10 +93,7 @@ class TwitchRaidMixin:
             )
             return
 
-        get_target_lower = getattr(self, "_get_target_game_lower", None)
-        target_game_lower = get_target_lower() if callable(get_target_lower) else ""
-        if not target_game_lower:
-            target_game_lower = (TWITCH_TARGET_GAME_NAME or "").strip().lower()
+        target_game_lower = self._raid_bot._get_target_game_lower()
 
         last_game = (previous_state.get("last_game") or "").strip()
         last_game_lower = last_game.lower()
@@ -106,26 +101,12 @@ class TwitchRaidMixin:
         last_deadlock_seen_at_str = (
             previous_state.get("last_deadlock_seen_at") or ""
         ).strip() or None
-        allow_auto_raid = False
-        if target_game_lower:
-            if last_game_lower == target_game_lower:
-                allow_auto_raid = True
-            elif last_game_lower == "just chatting" and had_deadlock_session:
-                allow_auto_raid = True
+        allow_auto_raid = self._raid_bot._is_deadlock_raid_source_eligible(
+            last_game=last_game,
+            had_deadlock_session=had_deadlock_session,
+            last_deadlock_seen_at=last_deadlock_seen_at_str,
+        )
 
-        def _is_recent_deadlock(ts_str: str | None) -> bool:
-            if not ts_str:
-                return False
-            try:
-                dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=UTC)
-            except Exception:
-                return False
-            return (now - dt).total_seconds() <= recency_cap_seconds
-
-        # BUGFIX: Wenn der Streamer AKTIV Deadlock streamt (last_game == target_game),
-        # dann ist die Recency-Prüfung NICHT nötig! Nur bei "Just Chatting" ist sie relevant.
         if allow_auto_raid and target_game_lower:
             # Wenn aktuell Deadlock läuft, ist die Recency automatisch erfüllt
             if last_game_lower == target_game_lower:
@@ -138,7 +119,7 @@ class TwitchRaidMixin:
                 )
             else:
                 # Just Chatting mit Deadlock-Session -> Recency-Check
-                recent_deadlock = _is_recent_deadlock(last_deadlock_seen_at_str)
+                recent_deadlock = self._raid_bot._is_recent_deadlock(last_deadlock_seen_at_str)
                 if not recent_deadlock:
                     log.info(
                         "Auto-Raid ausgelassen für %s: letzter Deadlock > %ds her (last_seen=%s, last_game=%s)",
@@ -180,123 +161,14 @@ class TwitchRaidMixin:
             stream_duration_sec,
         )
 
-        # Online-Partner finden (nur verifizierte Partner, die gerade live sind)
-        online_partners = []
-        partner_logins_lower: list[str] = []
-        with get_conn() as conn:
-            partners = conn.execute(
-                """
-                SELECT DISTINCT s.twitch_login, s.twitch_user_id,
-                       r.raid_enabled, r.authorized_at
-                  FROM twitch_streamers_partner_state s
-                  LEFT JOIN twitch_raid_auth r ON s.twitch_user_id = r.twitch_user_id
-                 WHERE s.is_partner_active = 1
-                   AND s.twitch_user_id IS NOT NULL
-                   AND s.twitch_user_id != ?
-                """,
-                (twitch_user_id,),
-            ).fetchall()
-
-        # Nur Partner, die gerade live sind
-        for (
-            partner_login,
-            partner_user_id,
-            raid_enabled,
-            raid_authorized_at,
-        ) in partners:
-            if not raid_enabled and not raid_authorized_at:
-                continue
-            partner_login_lower = partner_login.lower()
-            stream_data = streams_by_login.get(partner_login_lower)
-            if stream_data:
-                # Stream-Daten mit user_id anreichern
-                stream_data["user_id"] = partner_user_id
-                stream_data["raid_enabled"] = bool(raid_enabled) or bool(raid_authorized_at)
-                online_partners.append(stream_data)
-                partner_logins_lower.append(partner_login_lower)
-
-        # Nur Partner raiden, die aktuell (oder mindestens in dieser Session) Deadlock streamen
-        eligible_partners = online_partners
-        filtered_out: list[str] = []
-        if target_game_lower and online_partners:
-            live_state_by_login: dict[str, dict[str, object]] = {}
-            if partner_logins_lower:
-                try:
-                    rows = []
-                    _ls_placeholders = ",".join("?" * len(partner_logins_lower))
-                    with get_conn() as conn:
-                        rows = conn.execute(
-                            f"""
-                            SELECT streamer_login, had_deadlock_in_session, last_game, last_deadlock_seen_at
-                              FROM twitch_live_state
-                             WHERE streamer_login IN ({_ls_placeholders})
-                            """,
-                            partner_logins_lower,
-                        ).fetchall()
-                    for row in rows:
-                        login_lower = (
-                            str(row["streamer_login"] if hasattr(row, "keys") else row[0])
-                            .strip()
-                            .lower()
-                        )
-                        live_state_by_login[login_lower] = {
-                            "had_deadlock_in_session": bool(
-                                int(
-                                    (
-                                        row["had_deadlock_in_session"]
-                                        if hasattr(row, "keys")
-                                        else row[1]
-                                    )
-                                    or 0
-                                )
-                            ),
-                            "last_game": (row["last_game"] if hasattr(row, "keys") else row[2])
-                            or "",
-                            "last_deadlock_seen_at": (
-                                row["last_deadlock_seen_at"] if hasattr(row, "keys") else row[3]
-                            )
-                            or "",
-                        }
-                except Exception:
-                    log.debug("Konnte Live-State für Partner nicht laden", exc_info=True)
-
-            filtered_active: list[dict] = []
-            filtered_recent: list[dict] = []
-            for stream_data in online_partners:
-                partner_login_lower = (stream_data.get("user_login") or "").lower()
-                game_name = (stream_data.get("game_name") or "").strip()
-                game_lower = game_name.lower()
-                live_state = live_state_by_login.get(partner_login_lower, {})
-                had_deadlock_partner = bool(live_state.get("had_deadlock_in_session", False))
-                last_game_state = (live_state.get("last_game") or "").strip()
-                last_deadlock_seen_partner = (
-                    live_state.get("last_deadlock_seen_at") or ""
-                ).strip() or None
-                recent_deadlock_partner = _is_recent_deadlock(last_deadlock_seen_partner)
-
-                allow_partner = False
-                if game_lower == target_game_lower:
-                    allow_partner = True
-                elif (
-                    game_lower == "just chatting"
-                    and had_deadlock_partner
-                    and recent_deadlock_partner
-                ):
-                    allow_partner = True
-
-                if allow_partner:
-                    if game_lower == target_game_lower:
-                        filtered_active.append(stream_data)
-                    else:
-                        filtered_recent.append(stream_data)
-                else:
-                    filtered_out.append(
-                        f"{partner_login_lower} (game='{game_name or last_game_state}', "
-                        f"had_deadlock_session={had_deadlock_partner}, "
-                        f"last_deadlock_seen={last_deadlock_seen_partner or 'none'})"
-                    )
-
-            eligible_partners = filtered_active if filtered_active else filtered_recent
+        partner_rows = self._raid_bot._load_partner_roster_for_raid(twitch_user_id)
+        online_partners = self._raid_bot._build_online_partner_candidates(
+            partner_rows,
+            streams_by_login,
+        )
+        eligible_partners, filtered_out = self._raid_bot._filter_deadlock_eligible_partner_candidates(
+            online_partners
+        )
 
         log.info(
             "Auto-Raid triggered für %s (offline): %d Online-Partner gefunden (%d eligible), "
