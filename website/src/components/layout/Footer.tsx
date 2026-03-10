@@ -1,4 +1,8 @@
-import { DISCORD_INVITE_URL } from "@/data/externalLinks";
+import {
+  DISCORD_INVITE_URL,
+  TWITCH_FAQ_URL,
+  TWITCH_ONBOARDING_URL,
+} from "@/data/externalLinks";
 import { AFFILIATE_PROGRAM_PATH, WEBSITE_HOME_PATH } from "@/data/sitePaths";
 
 interface FooterLink {
@@ -14,6 +18,8 @@ const NAV_SECTION_LINKS: FooterLink[] = [
 ];
 
 const MORE_LINKS: FooterLink[] = [
+  { label: 'Streamer Onboarding', href: TWITCH_ONBOARDING_URL, external: true },
+  { label: 'Bot FAQ', href: TWITCH_FAQ_URL, external: true },
   { label: 'Affiliate-Programm', href: AFFILIATE_PROGRAM_PATH },
   { label: 'Demo Dashboard', href: 'https://demo.earlysalty.com', external: true },
   { label: 'Discord beitreten', href: DISCORD_INVITE_URL, external: true },

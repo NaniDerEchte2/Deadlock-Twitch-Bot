@@ -155,6 +155,13 @@ if TWITCHIO_AVAILABLE:
             self._discord_invite_channel_id: int | None = None
             self._promo_invite_cache: dict[str, str] = {}
             self._monitored_only_channels: set[str] = set()
+            self._restart_lock = asyncio.Lock()
+            self._restart_task: asyncio.Task | None = None
+            self._restart_cooldown_until: float = 0.0
+            self._restart_cooldown_seconds: float = 30.0
+            self._managed_start_with_adapter: bool | None = None
+            self._managed_load_tokens: bool = False
+            self._managed_save_tokens: bool = False
             self._register_inline_commands()
             log.info(
                 "Twitch Chat Bot initialized with %d initial channels",
@@ -168,6 +175,132 @@ if TWITCHIO_AVAILABLE:
 
         def _is_monitored_only(self, channel_name: str) -> bool:
             return channel_name.lower() in self._monitored_only_channels
+
+        def configure_managed_start(
+            self,
+            *,
+            with_adapter: bool,
+            load_tokens: bool = False,
+            save_tokens: bool = False,
+        ) -> None:
+            """Persist start options so the bot can restart itself after transport failures."""
+            self._managed_start_with_adapter = bool(with_adapter)
+            self._managed_load_tokens = bool(load_tokens)
+            self._managed_save_tokens = bool(save_tokens)
+
+        async def request_transport_restart(
+            self,
+            *,
+            reason: str,
+            failed_channel: str | None = None,
+        ) -> bool:
+            """
+            Schedule a throttled bot restart after a broken EventSub chat transport.
+
+            Returns True if a restart was scheduled, False if one is already pending or throttled.
+            """
+            now = time.monotonic()
+            if self._restart_task and not self._restart_task.done():
+                log.info(
+                    "Chat transport restart already pending; ignoring duplicate request (%s).",
+                    reason,
+                )
+                return False
+            if now < self._restart_cooldown_until:
+                remaining = max(0.0, self._restart_cooldown_until - now)
+                log.info(
+                    "Chat transport restart throttled for %.1fs (%s).",
+                    remaining,
+                    reason,
+                )
+                return False
+
+            channel_list = sorted(self._monitored_streamers)
+            normalized_failed = self._normalize_channel_login(failed_channel or "")
+            if normalized_failed and normalized_failed not in channel_list:
+                channel_list.append(normalized_failed)
+
+            self._restart_cooldown_until = now + self._restart_cooldown_seconds
+            self._restart_task = asyncio.create_task(
+                self._restart_after_transport_failure(channel_list=channel_list, reason=reason),
+                name="twitch.chat_bot.transport_restart",
+            )
+            return True
+
+        async def _restart_after_transport_failure(
+            self,
+            *,
+            channel_list: list[str],
+            reason: str,
+        ) -> None:
+            async with self._restart_lock:
+                log.warning(
+                    "Restarting Twitch Chat Bot after broken EventSub transport (%s). channels=%d",
+                    reason,
+                    len(channel_list),
+                )
+
+                self._monitored_streamers.clear()
+                self._channel_ids.clear()
+
+                try:
+                    await self.close()
+                except Exception:
+                    log.exception("Chat transport restart: close() failed")
+
+                await asyncio.sleep(2.0)
+
+                with_adapter = self._managed_start_with_adapter
+                if with_adapter is None:
+                    with_adapter = getattr(self, "adapter", None) is not None
+
+                try:
+                    asyncio.create_task(
+                        self.start(
+                            with_adapter=with_adapter,
+                            load_tokens=self._managed_load_tokens,
+                            save_tokens=self._managed_save_tokens,
+                        ),
+                        name="twitch.chat_bot.restart_start",
+                    )
+                except Exception:
+                    log.exception("Chat transport restart: could not schedule bot start")
+                    return
+
+                if channel_list:
+                    asyncio.create_task(
+                        self._rejoin_channels_after_restart(channel_list),
+                        name="twitch.chat_bot.restart_rejoin",
+                    )
+
+        async def _rejoin_channels_after_restart(self, channels: list[str]) -> None:
+            try:
+                await self.wait_until_ready()
+            except Exception:
+                log.exception("Chat transport restart: wait_until_ready failed during rejoin")
+                return
+
+            normalized = []
+            seen: set[str] = set()
+            for channel in channels:
+                login = self._normalize_channel_login(channel)
+                if not login or login in seen:
+                    continue
+                seen.add(login)
+                normalized.append(login)
+
+            if not normalized:
+                return
+
+            try:
+                joined = await self.join_channels(normalized, rate_limit_delay=0.35)
+                log.info(
+                    "Chat transport restart: rejoin finished (%d/%d).",
+                    joined,
+                    len(normalized),
+                )
+            except Exception:
+                log.exception("Chat transport restart: rejoin failed")
 
         def _is_partner_channel_for_chat_tracking(self, login: str) -> bool:
             """

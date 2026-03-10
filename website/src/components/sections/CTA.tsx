@@ -1,8 +1,8 @@
 import { ExternalLink } from "lucide-react";
 import { ScrollReveal } from "@/components/ui/ScrollReveal";
 import {
-  TWITCH_BOT_AUTH_START_URL,
-  buildTwitchBotAuthUrl,
+  TWITCH_FAQ_URL,
+  TWITCH_ONBOARDING_URL,
 } from "@/data/externalLinks";
 
 export function CTA() {
@@ -27,21 +27,17 @@ export function CTA() {
 
           <div className="flex gap-4 justify-center flex-wrap">
             <a
-              href={TWITCH_BOT_AUTH_START_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(event) => {
-                event.preventDefault();
-                window.open(
-                  buildTwitchBotAuthUrl(),
-                  "_blank",
-                  "noopener,noreferrer",
-                );
-              }}
+              href={TWITCH_ONBOARDING_URL}
               className="gradient-accent rounded-xl px-8 py-4 font-semibold text-white text-lg inline-flex items-center gap-2"
             >
               <ExternalLink size={20} />
-              Partner werden
+              Zum Onboarding
+            </a>
+            <a
+              href={TWITCH_FAQ_URL}
+              className="rounded-xl border border-[var(--color-border)] px-8 py-4 font-semibold text-[var(--color-text-primary)] text-lg inline-flex items-center gap-2 transition-colors duration-200 hover:border-[var(--color-border-hover)] hover:bg-white/5"
+            >
+              Alle Bot-Funktionen
             </a>
           </div>
         </ScrollReveal>

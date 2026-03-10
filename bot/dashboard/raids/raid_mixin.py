@@ -18,7 +18,7 @@ from ...raid.views import RaidAuthGenerateView, build_raid_requirements_embed
 
 TWITCH_HELIX_USERS_URL = "https://api.twitch.tv/helix/users"
 DEFAULT_RAID_OAUTH_SUCCESS_REDIRECT_URL = "https://twitch.earlysalty.com/twitch/dashboard"
-PUBLIC_STREAMER_ONBOARDING_URL = "https://earlysalty.de/website/"
+PUBLIC_STREAMER_ONBOARDING_URL = "https://twitch.earlysalty.com/twitch/onboarding"
 
 
 class _DashboardRaidMixin:

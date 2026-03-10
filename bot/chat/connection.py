@@ -11,6 +11,16 @@ log = logging.getLogger("TwitchStreams.ChatBot")
 
 class ConnectionMixin:
     @staticmethod
+    def _looks_like_transport_session_gone_error(text: str) -> bool:
+        lowered = str(text or "").lower()
+        return (
+            "websocket transport session does not exist" in lowered
+            or "session does not exist" in lowered
+            or "has already disconnected" in lowered
+            or "session has disconnected" in lowered
+        )
+
+    @staticmethod
     def _looks_like_bot_banned_error(status: int | None, text: str) -> bool:
         if not text:
             return False
@@ -228,6 +238,25 @@ class ConnectionMixin:
             return True
         except Exception as e:
             msg = str(e)
+            if self._looks_like_transport_session_gone_error(msg):
+                log.warning(
+                    "join(): transport session invalid for %s - scheduling chat bot restart.",
+                    channel_login,
+                )
+                restart = getattr(self, "request_transport_restart", None)
+                if callable(restart):
+                    try:
+                        await restart(
+                            reason="eventsub websocket transport session does not exist",
+                            failed_channel=normalized_login,
+                        )
+                    except Exception:
+                        log.exception(
+                            "join(): failed to schedule chat bot restart for %s",
+                            channel_login,
+                        )
+                log.error("Failed to join channel %s: %s", channel_login, e)
+                return False
             if "invalid transport and auth combination" in msg:
                 # Token war zum Zeitpunkt des ersten Versuchs noch nicht
                 # gebunden.  Kurz warten, Token nochmal registrieren und

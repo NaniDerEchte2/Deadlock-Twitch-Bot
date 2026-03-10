@@ -171,3 +171,17 @@ h1, h2, h3, h4, .display-font {
   border-color: var(--color-border-hover);
   box-shadow: 0 14px 28px rgba(0, 0, 0, 0.24);
 }
+
+.faq-summary::-webkit-details-marker {
+  display: none;
+}
+
+.faq-details[open] {
+  border-color: var(--color-border-hover);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.24);
+}
+
+.faq-details[open] .faq-summary span:last-child {
+  color: var(--color-accent);
+  border-color: var(--color-border-hover);
+}

@@ -1264,6 +1264,12 @@ class TwitchBaseCog(commands.Cog):
                     log.debug("Konnte Discord-Bot nicht an Chat-Bot binden", exc_info=True)
                 # Bot im Hintergrund laufen lassen
                 start_with_adapter = await self._should_start_chat_adapter()
+                if hasattr(self._twitch_chat_bot, "configure_managed_start"):
+                    self._twitch_chat_bot.configure_managed_start(
+                        with_adapter=start_with_adapter,
+                        load_tokens=False,
+                        save_tokens=False,
+                    )
                 asyncio.create_task(
                     self._twitch_chat_bot.start(
                         with_adapter=start_with_adapter,

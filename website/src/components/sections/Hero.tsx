@@ -2,8 +2,8 @@ import { motion } from "framer-motion";
 import { ExternalLink } from "lucide-react";
 import { BrowserMockup } from "@/components/ui/BrowserMockup";
 import {
-  TWITCH_BOT_AUTH_START_URL,
-  buildTwitchBotAuthUrl,
+  TWITCH_DEMO_DASHBOARD_URL,
+  TWITCH_ONBOARDING_URL,
 } from "@/data/externalLinks";
 
 const HERO_STATS = [
@@ -78,21 +78,11 @@ export function Hero() {
             className="mt-10 flex gap-4 justify-center flex-wrap"
           >
             <a
-              href={TWITCH_BOT_AUTH_START_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(event) => {
-                event.preventDefault();
-                window.open(
-                  buildTwitchBotAuthUrl(),
-                  "_blank",
-                  "noopener,noreferrer",
-                );
-              }}
+              href={TWITCH_ONBOARDING_URL}
               className="gradient-accent rounded-xl px-7 py-3.5 font-semibold text-white inline-flex items-center gap-2 transition-all duration-200 hover:brightness-110 hover:shadow-[0_0_24px_4px_rgba(255,122,24,0.3)]"
             >
               <ExternalLink size={18} />
-              Partner werden
+              Zum Onboarding
             </a>
           </motion.div>
 
@@ -118,7 +108,7 @@ export function Hero() {
             <BrowserMockup>
               <div className="hero-demo-frame relative aspect-video overflow-hidden rounded bg-gradient-to-br from-[var(--color-card)] to-[var(--color-bg)]">
                 <iframe
-                  src="https://demo.earlysalty.com/twitch/demo/"
+                  src={TWITCH_DEMO_DASHBOARD_URL}
                   title="Twitch Analyse Demo Live View"
                   className="hero-demo-frame__iframe border-0"
                   loading="lazy"
@@ -128,7 +118,7 @@ export function Hero() {
                   Live View
                 </span>
                 <a
-                  href="https://demo.earlysalty.com/twitch/demo/"
+                  href={TWITCH_DEMO_DASHBOARD_URL}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="absolute bottom-3 right-3 rounded-md border border-[var(--color-border)] bg-[rgba(7,21,29,0.8)] px-2.5 py-1 text-[11px] font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-border-hover)]"
