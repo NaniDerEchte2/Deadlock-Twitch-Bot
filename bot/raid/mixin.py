@@ -96,46 +96,55 @@ class TwitchRaidMixin:
         target_game_lower = self._raid_bot._get_target_game_lower()
 
         last_game = (previous_state.get("last_game") or "").strip()
-        last_game_lower = last_game.lower()
         had_deadlock_session = bool(int(previous_state.get("had_deadlock_in_session", 0) or 0))
         last_deadlock_seen_at_str = (
             previous_state.get("last_deadlock_seen_at") or ""
         ).strip() or None
-        allow_auto_raid = self._raid_bot._is_deadlock_raid_source_eligible(
-            last_game=last_game,
+        source_evaluation = self._raid_bot._evaluate_deadlock_raid_source(
+            current_game=last_game,
             had_deadlock_session=had_deadlock_session,
             last_deadlock_seen_at=last_deadlock_seen_at_str,
         )
+        allow_auto_raid = bool(source_evaluation.get("eligible"))
 
         if allow_auto_raid and target_game_lower:
-            # Wenn aktuell Deadlock läuft, ist die Recency automatisch erfüllt
-            if last_game_lower == target_game_lower:
-                # Aktiv Deadlock -> kein Recency-Check nötig
+            if str(source_evaluation.get("reason") or "") == "active_deadlock":
                 log.debug(
                     "Auto-Raid erlaubt für %s: Aktiv %s gestreamt (last_game=%s)",
                     login,
                     target_game_lower.title(),
                     last_game,
                 )
-            else:
-                # Just Chatting mit Deadlock-Session -> Recency-Check
-                recent_deadlock = self._raid_bot._is_recent_deadlock(last_deadlock_seen_at_str)
-                if not recent_deadlock:
-                    log.info(
-                        "Auto-Raid ausgelassen für %s: letzter Deadlock > %ds her (last_seen=%s, last_game=%s)",
-                        login,
-                        recency_cap_seconds,
-                        last_deadlock_seen_at_str or "unknown",
-                        last_game or "unbekannt",
-                    )
-                    return
+            elif str(source_evaluation.get("reason") or "") == "recent_deadlock_session":
+                log.debug(
+                    "Auto-Raid erlaubt für %s: Just Chatting mit frischer Deadlock-Session (last_seen=%s)",
+                    login,
+                    last_deadlock_seen_at_str or "unknown",
+                )
 
         if not allow_auto_raid:
+            evaluation_reason = str(source_evaluation.get("reason") or "")
+            if evaluation_reason == "stale_deadlock_session":
+                log.info(
+                    "Auto-Raid ausgelassen für %s: letzter Deadlock > %ds her (last_seen=%s, last_game=%s)",
+                    login,
+                    recency_cap_seconds,
+                    last_deadlock_seen_at_str or "unknown",
+                    last_game or "unbekannt",
+                )
+                return
+            if evaluation_reason == "just_chatting_without_deadlock_session":
+                log.info(
+                    "Auto-Raid ausgelassen für %s: Just Chatting ohne Deadlock-Session-Historie",
+                    login,
+                )
+                return
             log.info(
-                "Auto-Raid ausgelassen für %s: letzte Kategorie '%s' (had_deadlock_session=%s)",
+                "Auto-Raid ausgelassen für %s: letzte Kategorie '%s' (had_deadlock_session=%s, reason=%s)",
                 login,
                 last_game or "unbekannt",
                 had_deadlock_session,
+                evaluation_reason or "unknown",
             )
             return
 

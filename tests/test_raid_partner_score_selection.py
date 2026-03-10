@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 import aiohttp
 
 from bot.raid.bot import RaidBot
+from bot.raid.mixin import TwitchRaidMixin
 from bot.storage import proxy as storage_proxy
 
 
@@ -19,6 +20,16 @@ class _FrozenDateTime(datetime):
         if tz is None:
             return current.replace(tzinfo=None)
         return current.astimezone(tz)
+
+
+class _OfflineAutoRaidHarness(TwitchRaidMixin):
+    def __init__(self, raid_bot: RaidBot) -> None:
+        self._raid_bot = raid_bot
+        self.api = None
+        self._category_id = None
+
+    async def _is_fully_authed(self, twitch_user_id: str) -> bool:
+        return bool(twitch_user_id)
 
 
 class RaidPartnerScoreSelectionTests(unittest.IsolatedAsyncioTestCase):
@@ -475,6 +486,334 @@ class ManualRaidFlowTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result["status"], "source_not_eligible")
+        self.assertEqual(result["reason"], "stale_deadlock_session")
+        start_mock.assert_not_awaited()
+
+    async def test_start_manual_raid_allows_live_deadlock_when_db_snapshot_is_stale(self) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO twitch_live_state (
+                twitch_user_id, streamer_login, is_live, last_started_at,
+                last_game, last_viewer_count, had_deadlock_in_session, last_deadlock_seen_at
+            ) VALUES (?, ?, 0, ?, ?, ?, ?, ?)
+            """,
+            (
+                "1001",
+                "source_login",
+                "2026-03-10T18:30:00+00:00",
+                "Fortnite",
+                13,
+                0,
+                None,
+            ),
+        )
+        self._insert_partner("deadlocker", "2002")
+
+        api = SimpleNamespace(
+            get_streams_by_logins=AsyncMock(
+                return_value=[
+                    {
+                        "user_id": "1001",
+                        "user_login": "source_login",
+                        "game_name": "Deadlock",
+                        "started_at": "2026-03-10T19:57:00+00:00",
+                        "viewer_count": 144,
+                    }
+                ]
+            )
+        )
+
+        with (
+            self._conn_patch(),
+            patch("bot.raid.bot.datetime", _FrozenDateTime),
+            patch.object(
+                self.raid_bot,
+                "_fetch_streams_by_logins_for_raid",
+                new=AsyncMock(
+                    return_value={
+                        "deadlocker": {
+                            "user_id": "2002",
+                            "user_login": "deadlocker",
+                            "game_name": "Deadlock",
+                            "started_at": "2026-03-10T18:00:00+00:00",
+                            "viewer_count": 5,
+                        }
+                    }
+                ),
+            ),
+            patch.object(self.raid_bot, "_create_twitch_api", return_value=api),
+            patch.object(
+                self.raid_bot,
+                "_resolve_target_category_id",
+                new=AsyncMock(return_value=None),
+            ),
+            patch.object(
+                self.raid_bot,
+                "_select_partner_candidate_by_score",
+                new=AsyncMock(side_effect=lambda candidates, _source: candidates[0]),
+            ),
+            patch.object(
+                self.raid_bot.raid_executor,
+                "start_raid",
+                new=AsyncMock(return_value=(True, None)),
+            ) as start_mock,
+            patch.object(self.raid_bot, "_register_pending_raid", new=AsyncMock()),
+            patch.object(self.raid_bot, "mark_manual_raid_started"),
+        ):
+            result = await self.raid_bot.start_manual_raid(
+                broadcaster_id="1001",
+                broadcaster_login="source_login",
+            )
+
+        self.assertEqual(result["status"], "started")
+        api.get_streams_by_logins.assert_awaited_once_with(["source_login"])
+        start_kwargs = start_mock.await_args.kwargs
+        self.assertEqual(start_kwargs["viewer_count"], 144)
+        self.assertEqual(start_kwargs["stream_duration_sec"], 180)
+
+    async def test_start_manual_raid_rejects_live_just_chatting_without_deadlock_session(self) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO twitch_live_state (
+                twitch_user_id, streamer_login, is_live, last_started_at,
+                last_game, last_viewer_count, had_deadlock_in_session, last_deadlock_seen_at
+            ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+            """,
+            (
+                "1001",
+                "source_login",
+                "2026-03-10T19:52:00+00:00",
+                "Deadlock",
+                42,
+                0,
+                None,
+            ),
+        )
+
+        api = SimpleNamespace(
+            get_streams_by_logins=AsyncMock(
+                return_value=[
+                    {
+                        "user_id": "1001",
+                        "user_login": "source_login",
+                        "game_name": "Just Chatting",
+                        "started_at": "2026-03-10T19:59:00+00:00",
+                        "viewer_count": 50,
+                    }
+                ]
+            )
+        )
+
+        with (
+            self._conn_patch(),
+            patch("bot.raid.bot.datetime", _FrozenDateTime),
+            patch.object(self.raid_bot, "_create_twitch_api", return_value=api),
+            patch.object(
+                self.raid_bot.raid_executor,
+                "start_raid",
+                new=AsyncMock(return_value=(True, None)),
+            ) as start_mock,
+        ):
+            result = await self.raid_bot.start_manual_raid(
+                broadcaster_id="1001",
+                broadcaster_login="source_login",
+            )
+
+        self.assertEqual(result["status"], "source_not_eligible")
+        self.assertEqual(result["reason"], "just_chatting_without_deadlock_session")
+        start_mock.assert_not_awaited()
+
+    async def test_start_manual_raid_allows_live_just_chatting_with_recent_deadlock_session(self) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO twitch_live_state (
+                twitch_user_id, streamer_login, is_live, last_started_at,
+                last_game, last_viewer_count, had_deadlock_in_session, last_deadlock_seen_at
+            ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+            """,
+            (
+                "1001",
+                "source_login",
+                "2026-03-10T19:52:00+00:00",
+                "Deadlock",
+                42,
+                1,
+                "2026-03-10T19:58:30+00:00",
+            ),
+        )
+        self._insert_partner("deadlocker", "2002")
+
+        api = SimpleNamespace(
+            get_streams_by_logins=AsyncMock(
+                return_value=[
+                    {
+                        "user_id": "1001",
+                        "user_login": "source_login",
+                        "game_name": "Just Chatting",
+                        "started_at": "2026-03-10T19:56:00+00:00",
+                        "viewer_count": 61,
+                    }
+                ]
+            )
+        )
+
+        with (
+            self._conn_patch(),
+            patch("bot.raid.bot.datetime", _FrozenDateTime),
+            patch.object(
+                self.raid_bot,
+                "_fetch_streams_by_logins_for_raid",
+                new=AsyncMock(
+                    return_value={
+                        "deadlocker": {
+                            "user_id": "2002",
+                            "user_login": "deadlocker",
+                            "game_name": "Deadlock",
+                            "started_at": "2026-03-10T18:00:00+00:00",
+                            "viewer_count": 5,
+                        }
+                    }
+                ),
+            ),
+            patch.object(self.raid_bot, "_create_twitch_api", return_value=api),
+            patch.object(
+                self.raid_bot,
+                "_resolve_target_category_id",
+                new=AsyncMock(return_value=None),
+            ),
+            patch.object(
+                self.raid_bot,
+                "_select_partner_candidate_by_score",
+                new=AsyncMock(side_effect=lambda candidates, _source: candidates[0]),
+            ),
+            patch.object(
+                self.raid_bot.raid_executor,
+                "start_raid",
+                new=AsyncMock(return_value=(True, None)),
+            ) as start_mock,
+            patch.object(self.raid_bot, "_register_pending_raid", new=AsyncMock()),
+            patch.object(self.raid_bot, "mark_manual_raid_started"),
+        ):
+            result = await self.raid_bot.start_manual_raid(
+                broadcaster_id="1001",
+                broadcaster_login="source_login",
+            )
+
+        self.assertEqual(result["status"], "started")
+        start_kwargs = start_mock.await_args.kwargs
+        self.assertEqual(start_kwargs["viewer_count"], 61)
+        self.assertEqual(start_kwargs["stream_duration_sec"], 240)
+
+    async def test_start_manual_raid_falls_back_to_db_when_source_api_refresh_fails(self) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO twitch_live_state (
+                twitch_user_id, streamer_login, is_live, last_started_at,
+                last_game, last_viewer_count, had_deadlock_in_session, last_deadlock_seen_at
+            ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+            """,
+            (
+                "1001",
+                "source_login",
+                "2026-03-10T19:55:00+00:00",
+                "Deadlock",
+                88,
+                1,
+                "2026-03-10T19:58:00+00:00",
+            ),
+        )
+        self._insert_partner("deadlocker", "2002")
+
+        api = SimpleNamespace(
+            get_streams_by_logins=AsyncMock(side_effect=RuntimeError("twitch-api-down"))
+        )
+
+        with (
+            self._conn_patch(),
+            patch("bot.raid.bot.datetime", _FrozenDateTime),
+            patch.object(
+                self.raid_bot,
+                "_fetch_streams_by_logins_for_raid",
+                new=AsyncMock(
+                    return_value={
+                        "deadlocker": {
+                            "user_id": "2002",
+                            "user_login": "deadlocker",
+                            "game_name": "Deadlock",
+                            "started_at": "2026-03-10T18:00:00+00:00",
+                            "viewer_count": 5,
+                        }
+                    }
+                ),
+            ),
+            patch.object(self.raid_bot, "_create_twitch_api", return_value=api),
+            patch.object(
+                self.raid_bot,
+                "_resolve_target_category_id",
+                new=AsyncMock(return_value=None),
+            ),
+            patch.object(
+                self.raid_bot,
+                "_select_partner_candidate_by_score",
+                new=AsyncMock(side_effect=lambda candidates, _source: candidates[0]),
+            ),
+            patch.object(
+                self.raid_bot.raid_executor,
+                "start_raid",
+                new=AsyncMock(return_value=(True, None)),
+            ) as start_mock,
+            patch.object(self.raid_bot, "_register_pending_raid", new=AsyncMock()),
+            patch.object(self.raid_bot, "mark_manual_raid_started"),
+        ):
+            result = await self.raid_bot.start_manual_raid(
+                broadcaster_id="1001",
+                broadcaster_login="source_login",
+            )
+
+        self.assertEqual(result["status"], "started")
+        api.get_streams_by_logins.assert_awaited_once_with(["source_login"])
+        start_kwargs = start_mock.await_args.kwargs
+        self.assertEqual(start_kwargs["viewer_count"], 88)
+        self.assertEqual(start_kwargs["stream_duration_sec"], 300)
+
+    async def test_start_manual_raid_marks_source_not_live_when_api_reports_offline(self) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO twitch_live_state (
+                twitch_user_id, streamer_login, is_live, last_started_at,
+                last_game, last_viewer_count, had_deadlock_in_session, last_deadlock_seen_at
+            ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+            """,
+            (
+                "1001",
+                "source_login",
+                "2026-03-10T19:55:00+00:00",
+                "Deadlock",
+                88,
+                1,
+                "2026-03-10T19:58:00+00:00",
+            ),
+        )
+
+        api = SimpleNamespace(get_streams_by_logins=AsyncMock(return_value=[]))
+
+        with (
+            self._conn_patch(),
+            patch("bot.raid.bot.datetime", _FrozenDateTime),
+            patch.object(self.raid_bot, "_create_twitch_api", return_value=api),
+            patch.object(
+                self.raid_bot.raid_executor,
+                "start_raid",
+                new=AsyncMock(return_value=(True, None)),
+            ) as start_mock,
+        ):
+            result = await self.raid_bot.start_manual_raid(
+                broadcaster_id="1001",
+                broadcaster_login="source_login",
+            )
+
+        self.assertEqual(result["status"], "source_not_live")
+        self.assertEqual(result["reason"], "api_offline")
         start_mock.assert_not_awaited()
 
     async def test_start_manual_raid_uses_deadlock_fallback_when_no_partner_is_eligible(self) -> None:
@@ -570,6 +909,63 @@ class ManualRaidFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(start_kwargs["to_broadcaster_login"], "fallbacker")
         self.assertEqual(start_kwargs["candidates_count"], 1)
         self.assertEqual(start_kwargs["reason"], "manual_chat_command")
+
+
+class OfflineRaidSourceLoggingTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        storage_proxy.ensure_schema(self.conn)
+        self.session = aiohttp.ClientSession()
+        self.raid_bot = RaidBot(
+            client_id="client-id",
+            client_secret="client-secret",
+            redirect_uri="http://localhost/raid/callback",
+            session=self.session,
+        )
+        self.raid_bot.auth_manager.has_enabled_auth = lambda _user_id: True
+        self.harness = _OfflineAutoRaidHarness(self.raid_bot)
+
+    async def asyncTearDown(self) -> None:
+        await self.raid_bot.cleanup()
+        await self.session.close()
+        self.conn.close()
+
+    def _conn_patch(self):
+        return patch(
+            "bot.raid.mixin.get_conn",
+            side_effect=lambda: contextlib.nullcontext(self.conn),
+        )
+
+    async def test_handle_auto_raid_logs_stale_deadlock_recency_reason(self) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO twitch_streamers (twitch_login, twitch_user_id, raid_bot_enabled)
+            VALUES (?, ?, 1)
+            """,
+            ("source_login", "1001"),
+        )
+
+        with (
+            self._conn_patch(),
+            patch("bot.raid.bot.datetime", _FrozenDateTime),
+            self.assertLogs("TwitchStreams.RaidMixin", level="INFO") as captured_logs,
+        ):
+            await self.harness._handle_auto_raid_on_offline(
+                login="source_login",
+                twitch_user_id="1001",
+                previous_state={
+                    "last_game": "Just Chatting",
+                    "had_deadlock_in_session": 1,
+                    "last_deadlock_seen_at": "2026-03-10T19:40:00+00:00",
+                    "last_viewer_count": 12,
+                },
+                streams_by_login={},
+            )
+
+        combined_logs = "\n".join(captured_logs.output)
+        self.assertIn("letzter Deadlock > 360s her", combined_logs)
+        self.assertNotIn("letzte Kategorie", combined_logs)
 
 
 if __name__ == "__main__":

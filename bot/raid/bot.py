@@ -329,6 +329,78 @@ class RaidBot:
         reference = now_utc if now_utc is not None else datetime.now(UTC)
         return (reference - last_deadlock_dt).total_seconds() <= recency_cap_seconds
 
+    def _evaluate_deadlock_raid_source(
+        self,
+        *,
+        current_game: str,
+        had_deadlock_session: bool,
+        last_deadlock_seen_at: str | None,
+    ) -> dict[str, object]:
+        target_game_lower = self._get_target_game_lower()
+        current_game_text = str(current_game or "").strip()
+        current_game_lower = current_game_text.lower()
+
+        recent_deadlock = False
+        if target_game_lower and current_game_lower == target_game_lower:
+            recent_deadlock = True
+        elif current_game_lower == "just chatting" and had_deadlock_session:
+            recent_deadlock = self._is_recent_deadlock(last_deadlock_seen_at)
+
+        if not target_game_lower:
+            return {
+                "eligible": False,
+                "reason": "target_game_unconfigured",
+                "current_game": current_game_text,
+                "recent_deadlock": recent_deadlock,
+                "had_deadlock_session": had_deadlock_session,
+            }
+
+        if current_game_lower == target_game_lower:
+            return {
+                "eligible": True,
+                "reason": "active_deadlock",
+                "current_game": current_game_text,
+                "recent_deadlock": True,
+                "had_deadlock_session": had_deadlock_session,
+            }
+
+        if current_game_lower == "just chatting":
+            if not had_deadlock_session:
+                return {
+                    "eligible": False,
+                    "reason": "just_chatting_without_deadlock_session",
+                    "current_game": current_game_text,
+                    "recent_deadlock": False,
+                    "had_deadlock_session": had_deadlock_session,
+                }
+            if recent_deadlock:
+                return {
+                    "eligible": True,
+                    "reason": "recent_deadlock_session",
+                    "current_game": current_game_text,
+                    "recent_deadlock": True,
+                    "had_deadlock_session": had_deadlock_session,
+                }
+            return {
+                "eligible": False,
+                "reason": "stale_deadlock_session",
+                "current_game": current_game_text,
+                "recent_deadlock": False,
+                "had_deadlock_session": had_deadlock_session,
+            }
+
+        if not current_game_lower:
+            reason = "missing_current_game"
+        else:
+            reason = "source_category_mismatch"
+        return {
+            "eligible": False,
+            "reason": reason,
+            "current_game": current_game_text,
+            "recent_deadlock": False,
+            "had_deadlock_session": had_deadlock_session,
+        }
+
     def _is_deadlock_raid_source_eligible(
         self,
         *,
@@ -336,16 +408,12 @@ class RaidBot:
         had_deadlock_session: bool,
         last_deadlock_seen_at: str | None,
     ) -> bool:
-        target_game_lower = self._get_target_game_lower()
-        if not target_game_lower:
-            return False
-
-        last_game_lower = str(last_game or "").strip().lower()
-        if last_game_lower == target_game_lower:
-            return True
-        if last_game_lower == "just chatting" and had_deadlock_session:
-            return self._is_recent_deadlock(last_deadlock_seen_at)
-        return False
+        evaluation = self._evaluate_deadlock_raid_source(
+            current_game=last_game,
+            had_deadlock_session=had_deadlock_session,
+            last_deadlock_seen_at=last_deadlock_seen_at,
+        )
+        return bool(evaluation.get("eligible"))
 
     def _is_deadlock_partner_candidate_eligible(
         self,
@@ -571,7 +639,12 @@ class RaidBot:
             session=session,
         )
 
-    async def _fetch_streams_by_logins_for_raid(self, logins: list[str]) -> dict[str, dict]:
+    async def _fetch_streams_by_logins_for_raid(
+        self,
+        logins: list[str],
+        *,
+        api=None,
+    ) -> dict[str, dict]:
         normalized_logins = [
             login.lower()
             for login in dict.fromkeys(str(login or "").strip() for login in logins)
@@ -590,14 +663,17 @@ class RaidBot:
             except Exception:
                 log.debug("RaidBot: shared stream fetch failed", exc_info=True)
 
-        api = self._create_twitch_api()
-        if api is None:
+        api_client = api or self._create_twitch_api()
+        if api_client is None:
             return {}
 
         streams_by_login: dict[str, dict] = {}
         for language in self._raid_language_filters():
             try:
-                streams = await api.get_streams_by_logins(normalized_logins, language=language)
+                streams = await api_client.get_streams_by_logins(
+                    normalized_logins,
+                    language=language,
+                )
             except Exception:
                 log.debug(
                     "RaidBot: get_streams_by_logins failed (language=%s)",
@@ -610,6 +686,89 @@ class RaidBot:
                 if login_lower:
                     streams_by_login[login_lower] = stream
         return streams_by_login
+
+    def _overlay_broadcaster_live_state_from_stream(
+        self,
+        live_state: dict[str, object],
+        stream_data: dict[str, object],
+    ) -> dict[str, object]:
+        merged_state = dict(live_state)
+        twitch_user_id = str(
+            stream_data.get("user_id") or merged_state.get("twitch_user_id") or ""
+        ).strip()
+        streamer_login = str(
+            stream_data.get("user_login") or merged_state.get("streamer_login") or ""
+        ).strip().lower()
+        merged_state.update(
+            {
+                "twitch_user_id": twitch_user_id,
+                "streamer_login": streamer_login,
+                "is_live": True,
+                "last_started_at": str(stream_data.get("started_at") or "").strip(),
+                "last_game": str(stream_data.get("game_name") or "").strip(),
+                "last_viewer_count": self._safe_int(stream_data.get("viewer_count"), 0),
+            }
+        )
+        return merged_state
+
+    async def _resolve_manual_raid_source_state(
+        self,
+        *,
+        broadcaster_id: str,
+        broadcaster_login: str,
+        api=None,
+    ) -> dict[str, object]:
+        db_live_state = self._load_broadcaster_live_state(broadcaster_id)
+        resolved_live_state = dict(db_live_state)
+        normalized_login = str(broadcaster_login or "").strip().lower()
+        api_client = api or self._create_twitch_api()
+
+        if api_client is not None and normalized_login:
+            try:
+                streams = await api_client.get_streams_by_logins([normalized_login])
+            except Exception:
+                log.debug(
+                    "Manual raid source refresh failed for %s; falling back to DB snapshot",
+                    broadcaster_login,
+                    exc_info=True,
+                )
+            else:
+                matched_stream = next(
+                    (
+                        stream
+                        for stream in streams
+                        if str(stream.get("user_login") or "").strip().lower() == normalized_login
+                    ),
+                    None,
+                )
+                if matched_stream is None and len(streams) == 1:
+                    matched_stream = streams[0]
+                if matched_stream is not None:
+                    return {
+                        "status": "ok",
+                        "state_source": "api_live",
+                        "live_state": self._overlay_broadcaster_live_state_from_stream(
+                            resolved_live_state,
+                            matched_stream,
+                        ),
+                    }
+                return {
+                    "status": "source_not_live",
+                    "state_source": "api_offline",
+                    "live_state": resolved_live_state,
+                }
+
+        if resolved_live_state and bool(resolved_live_state.get("is_live")):
+            return {
+                "status": "ok",
+                "state_source": "db",
+                "live_state": resolved_live_state,
+            }
+        return {
+            "status": "source_not_live",
+            "state_source": "db",
+            "live_state": resolved_live_state,
+        }
 
     async def _resolve_target_category_id(self, api=None) -> str | None:
         cog = getattr(self, "_cog", None)
@@ -2238,32 +2397,48 @@ class RaidBot:
         broadcaster_id: str,
         broadcaster_login: str,
     ) -> dict[str, object]:
-        live_state = self._load_broadcaster_live_state(broadcaster_id)
-        if not live_state or not bool(live_state.get("is_live")):
+        api = self._create_twitch_api()
+        source_state = await self._resolve_manual_raid_source_state(
+            broadcaster_id=broadcaster_id,
+            broadcaster_login=broadcaster_login,
+            api=api,
+        )
+        live_state = dict(source_state.get("live_state") or {})
+        if str(source_state.get("status") or "") == "source_not_live":
             log.info(
-                "Manual raid skipped for %s: broadcaster is not live",
+                "Manual raid skipped for %s: broadcaster is not live (source=%s)",
                 broadcaster_login,
+                source_state.get("state_source") or "unknown",
             )
-            return {"status": "source_not_live"}
+            return {
+                "status": "source_not_live",
+                "reason": str(source_state.get("state_source") or ""),
+            }
 
         last_game = str(live_state.get("last_game") or "").strip()
         had_deadlock_session = bool(live_state.get("had_deadlock_in_session", False))
         last_deadlock_seen_at = (
             str(live_state.get("last_deadlock_seen_at") or "").strip() or None
         )
-        if not self._is_deadlock_raid_source_eligible(
-            last_game=last_game,
+        source_evaluation = self._evaluate_deadlock_raid_source(
+            current_game=last_game,
             had_deadlock_session=had_deadlock_session,
             last_deadlock_seen_at=last_deadlock_seen_at,
-        ):
+        )
+        if not bool(source_evaluation.get("eligible")):
             log.info(
-                "Manual raid skipped for %s: source not Deadlock-eligible (last_game=%s, had_deadlock_session=%s, last_deadlock_seen_at=%s)",
+                "Manual raid skipped for %s: source not Deadlock-eligible (reason=%s, current_game=%s, had_deadlock_session=%s, last_deadlock_seen_at=%s, source=%s)",
                 broadcaster_login,
+                source_evaluation.get("reason") or "unknown",
                 last_game or "unbekannt",
                 had_deadlock_session,
                 last_deadlock_seen_at or "none",
+                source_state.get("state_source") or "unknown",
             )
-            return {"status": "source_not_eligible"}
+            return {
+                "status": "source_not_eligible",
+                "reason": str(source_evaluation.get("reason") or ""),
+            }
 
         viewer_count = self._safe_int(live_state.get("last_viewer_count"), 0)
         stream_duration_sec = self._calculate_stream_duration_sec(
@@ -2272,7 +2447,8 @@ class RaidBot:
 
         partner_rows = self._load_partner_roster_for_raid(broadcaster_id)
         streams_by_login = await self._fetch_streams_by_logins_for_raid(
-            [str(row.get("twitch_login") or "") for row in partner_rows]
+            [str(row.get("twitch_login") or "") for row in partner_rows],
+            api=api,
         )
         online_partners = self._build_online_partner_candidates(partner_rows, streams_by_login)
         eligible_partners, filtered_out = self._filter_deadlock_eligible_partner_candidates(
@@ -2294,7 +2470,6 @@ class RaidBot:
                 "; ".join(filtered_out),
             )
 
-        api = self._create_twitch_api()
         category_id = await self._resolve_target_category_id(api)
         return await self._execute_raid_pipeline(
             broadcaster_id=broadcaster_id,
