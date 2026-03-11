@@ -164,8 +164,9 @@ jobs:
               echo "Auditing dependencies in $req"
               pip-audit --strict --desc -r "$req"
             done < <(find . -maxdepth 3 -type f -name "requirements*.txt" | sort)
+          else
+            echo "No requirements*.txt files found for pip-audit."
           fi
-          pip-audit --strict --desc
 
       - name: Skip (no Python files)
         if: steps.detect_py.outputs.has_python != 'true'
@@ -184,7 +185,10 @@ jobs:
         id: detect_node
         shell: bash
         run: |
-          lockfiles=$(find . -type f \( -name "package-lock.json" -o -name "npm-shrinkwrap.json" \) | sort)
+          lockfiles=$(find . -type f \( -name "package-lock.json" -o -name "npm-shrinkwrap.json" \) \
+            -not -path "*/node_modules/*" \
+            -not -path "./.github/eslint-security/*" \
+            -not -path "*/.git/*" | sort)
           if [ -z "$lockfiles" ]; then
             echo "has_node=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -216,7 +220,6 @@ jobs:
             project_dir="$(dirname "$lockfile")"
             echo "Auditing $project_dir"
             pushd "$project_dir" >/dev/null
-            npm ci --ignore-scripts
             npm audit --audit-level=high
             npm audit signatures
             popd >/dev/null

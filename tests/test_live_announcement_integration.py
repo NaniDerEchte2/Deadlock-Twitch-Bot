@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import unittest
 
-import discord
-
 from bot.monitoring.embeds_mixin import _EmbedsMixin
 
 
@@ -29,7 +27,9 @@ class _DummyEmbeds(_EmbedsMixin):
 
 
 class LiveAnnouncementIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_mentions_are_sanitized_and_allowed_mentions_are_restricted(self) -> None:
+    async def test_mentions_are_sanitized_and_allowed_mentions_are_restricted(
+        self,
+    ) -> None:
         dummy = _DummyEmbeds()
         dummy._payload_override = {
             "content": "@everyone <@&123456> ist live!",
@@ -38,15 +38,29 @@ class LiveAnnouncementIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "description": "Beschreibung",
                 "color": 0x9146FF,
                 "fields": [],
-                "author": {"name": "LIVE: Tester", "icon_mode": "none", "link_enabled": False},
+                "author": {
+                    "name": "LIVE: Tester",
+                    "icon_mode": "none",
+                    "link_enabled": False,
+                },
                 "footer": {"text": "Footer", "icon_mode": "none"},
                 "thumbnail": {"mode": "none"},
                 "image": {"use_stream_thumbnail": False, "custom_url": ""},
             },
-            "button": {"enabled": True, "label": "Auf Twitch ansehen", "url": "https://evil.example"},
+            "button": {
+                "enabled": True,
+                "label": "Auf Twitch ansehen",
+                "url": "https://evil.example",
+            },
         }
 
-        content, _embed, _view, allowed_mentions, _token = await dummy._build_live_announcement_message(
+        (
+            content,
+            _embed,
+            _view,
+            allowed_mentions,
+            _token,
+        ) = await dummy._build_live_announcement_message(
             login="tester",
             stream={"user_name": "Tester", "title": "Ranked", "viewer_count": 12},
             streamer_entry={},
@@ -62,7 +76,13 @@ class LiveAnnouncementIntegrationTests(unittest.IsolatedAsyncioTestCase):
         dummy = _DummyEmbeds()
         dummy._payload_override = None
 
-        content, _embed, view, _allowed_mentions, _token = await dummy._build_live_announcement_message(
+        (
+            content,
+            _embed,
+            view,
+            _allowed_mentions,
+            _token,
+        ) = await dummy._build_live_announcement_message(
             login="tester",
             stream={"user_name": "Tester", "title": "No Config", "viewer_count": 5},
             streamer_entry={"live_ping_enabled": 0},
@@ -98,10 +118,21 @@ class LiveAnnouncementIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ],
                     "author": {"name_template": "LIVE: {channel}", "icon_mode": "none"},
-                    "footer": {"text_template": "Footer", "icon_mode": "none", "timestamp_mode": "none"},
+                    "footer": {
+                        "text_template": "Footer",
+                        "icon_mode": "none",
+                        "timestamp_mode": "none",
+                    },
                     "images": {"thumbnail_mode": "none", "image_mode": "none"},
-                    "button": {"label_template": "Watch", "url_template": "{url}", "force_stream_url": True},
-                    "mentions": {"use_streamer_ping_role": True, "allowed_editor_role_ids": [123]},
+                    "button": {
+                        "label_template": "Watch",
+                        "url_template": "{url}",
+                        "force_stream_url": True,
+                    },
+                    "mentions": {
+                        "use_streamer_ping_role": True,
+                        "allowed_editor_role_ids": [123],
+                    },
                 }
 
         dummy = _ConfigDummy()
@@ -119,7 +150,9 @@ class LiveAnnouncementIntegrationTests(unittest.IsolatedAsyncioTestCase):
         assert isinstance(payload, dict)
         self.assertIn("Tester", payload.get("content", ""))
         self.assertIn("99", payload.get("content", ""))
-        self.assertEqual(payload.get("embed", {}).get("title"), "Tester ist LIVE in Deadlock!")
+        self.assertEqual(
+            payload.get("embed", {}).get("title"), "Tester ist LIVE in Deadlock!"
+        )
 
     async def test_button_url_is_forced_to_streamer_referral_url(self) -> None:
         dummy = _DummyEmbeds()
@@ -131,15 +164,29 @@ class LiveAnnouncementIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "description": "Beschreibung",
                 "color": 0x9146FF,
                 "fields": [],
-                "author": {"name": "LIVE: Tester", "icon_mode": "none", "link_enabled": False},
+                "author": {
+                    "name": "LIVE: Tester",
+                    "icon_mode": "none",
+                    "link_enabled": False,
+                },
                 "footer": {"text": "Footer", "icon_mode": "none"},
                 "thumbnail": {"mode": "none"},
                 "image": {"use_stream_thumbnail": False, "custom_url": ""},
             },
-            "button": {"enabled": True, "label": "Custom", "url": "https://example.com/not-allowed"},
+            "button": {
+                "enabled": True,
+                "label": "Custom",
+                "url": "https://example.com/not-allowed",
+            },
         }
 
-        _content, _embed, view, _allowed_mentions, _token = await dummy._build_live_announcement_message(
+        (
+            _content,
+            _embed,
+            view,
+            _allowed_mentions,
+            _token,
+        ) = await dummy._build_live_announcement_message(
             login="tester",
             stream={"user_name": "Tester", "title": "Ranked", "viewer_count": 12},
             streamer_entry={},
@@ -157,15 +204,29 @@ class LiveAnnouncementIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "description": "Beschreibung",
                 "color": 0x9146FF,
                 "fields": [],
-                "author": {"name": "LIVE: Tester", "icon_mode": "none", "link_enabled": False},
+                "author": {
+                    "name": "LIVE: Tester",
+                    "icon_mode": "none",
+                    "link_enabled": False,
+                },
                 "footer": {"text": "Footer", "icon_mode": "none"},
                 "thumbnail": {"mode": "none"},
                 "image": {"use_stream_thumbnail": False, "custom_url": ""},
             },
-            "button": {"enabled": False, "label": "Hidden", "url": "https://example.com/not-used"},
+            "button": {
+                "enabled": False,
+                "label": "Hidden",
+                "url": "https://example.com/not-used",
+            },
         }
 
-        _content, _embed, view, _allowed_mentions, _token = await dummy._build_live_announcement_message(
+        (
+            _content,
+            _embed,
+            view,
+            _allowed_mentions,
+            _token,
+        ) = await dummy._build_live_announcement_message(
             login="tester",
             stream={"user_name": "Tester", "title": "Ranked", "viewer_count": 12},
             streamer_entry={},
@@ -173,7 +234,9 @@ class LiveAnnouncementIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(view)
 
-    async def test_role_id_without_local_guild_still_preserves_ping_in_content(self) -> None:
+    async def test_role_id_without_local_guild_still_preserves_ping_in_content(
+        self,
+    ) -> None:
         class _HeadlessRoleDummy(_DummyEmbeds):
             async def _ensure_live_ping_role(self, **kwargs):
                 del kwargs
@@ -182,7 +245,13 @@ class LiveAnnouncementIntegrationTests(unittest.IsolatedAsyncioTestCase):
         dummy = _HeadlessRoleDummy()
         dummy._payload_override = None
 
-        content, _embed, _view, allowed_mentions, _token = await dummy._build_live_announcement_message(
+        (
+            content,
+            _embed,
+            _view,
+            allowed_mentions,
+            _token,
+        ) = await dummy._build_live_announcement_message(
             login="tester",
             stream={"user_name": "Tester", "title": "Ranked", "viewer_count": 12},
             streamer_entry={},

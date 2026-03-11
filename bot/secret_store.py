@@ -21,25 +21,49 @@ def read_keyring_secret(key: str) -> str:
     try:
         value = keyring.get_password(KEYRING_SERVICE_NAME, secret_key)
         if not value:
-            value = keyring.get_password(f"{secret_key}@{KEYRING_SERVICE_NAME}", secret_key)
+            value = keyring.get_password(
+                f"{secret_key}@{KEYRING_SERVICE_NAME}", secret_key
+            )
     except Exception:
         return ""
 
     return str(value or "").strip()
 
 
-def load_secret_value(*keys: str) -> str:
-    """Return the first non-empty secret, preferring keyring over environment."""
+def _read_env_secret(key: str) -> tuple[bool, str]:
+    secret_key = str(key or "").strip()
+    if not secret_key or secret_key not in os.environ:
+        return False, ""
+    return True, str(os.getenv(secret_key) or "").strip()
+
+
+def load_secret_value(
+    *keys: str,
+    prefer_env: bool = False,
+    allow_empty_env_override: bool = False,
+) -> str:
+    """Return the first matching secret from keyring or environment.
+
+    By default keyring wins over environment variables. For runtime toggles that
+    need explicit environment overrides in tests or CI, callers can opt into
+    `prefer_env=True`. When `allow_empty_env_override=True`, an explicitly empty
+    environment variable suppresses any keyring fallback.
+    """
+    if prefer_env:
+        for raw_key in keys:
+            found, value = _read_env_secret(raw_key)
+            if not found:
+                continue
+            if value or allow_empty_env_override:
+                return value
+
     for raw_key in keys:
         value = read_keyring_secret(raw_key)
         if value:
             return value
 
     for raw_key in keys:
-        key = str(raw_key or "").strip()
-        if not key:
-            continue
-        value = str(os.getenv(key) or "").strip()
+        _, value = _read_env_secret(raw_key)
         if value:
             return value
 

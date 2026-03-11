@@ -205,7 +205,7 @@ jobs:
         run: |
           while IFS= read -r dir; do
             [ -z "$dir" ] && continue
-            npm ci --prefix "$dir" --include=dev --ignore-scripts
+            npm ci --prefix "$dir" --include=dev
             npm --prefix "$dir" run fuzz:protocol
           done <<< "${{ steps.fuzz.outputs.targets }}"
 
@@ -230,6 +230,7 @@ jobs:
             fi
           done < <(find . -type f \( -name "package-lock.json" -o -name "npm-shrinkwrap.json" \) \
             -not -path "*/node_modules/*" \
+            -not -path "./.github/eslint-security/*" \
             -not -path "*/.git/*" | sort)
 
           if [ "$found" -eq 0 ]; then

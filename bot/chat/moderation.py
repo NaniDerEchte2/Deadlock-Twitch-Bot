@@ -539,6 +539,21 @@ class ModerationMixin:
         """Backward-compatible wrapper for promo ban blacklisting."""
         self._blacklist_streamer_for_source(channel, status, text, source="promo")
 
+    def _maybe_blacklist_for_drop_reason(
+        self,
+        channel,
+        drop_code: str,
+        drop_message: str,
+        source: str | None,
+    ) -> None:
+        """Blacklist outbound targets when Helix accepts the request but drops the message as banned."""
+        detail_parts = [part.strip() for part in (drop_code, drop_message) if str(part or "").strip()]
+        detail_text = ": ".join(detail_parts)
+        if self._should_blacklist_for_source(source) and self._looks_like_ban_error(
+            None, detail_text
+        ):
+            self._blacklist_streamer_for_source(channel, None, detail_text, source)
+
     async def _send_announcement(
         self, channel, text: str, color: str = "purple", source: str | None = None
     ) -> bool:
@@ -708,6 +723,12 @@ class ModerationMixin:
                                                         drop_reason = {}
                                                     drop_code = str(drop_reason.get("code") or "unknown")
                                                     drop_message = str(drop_reason.get("message") or "").strip()
+                                                    self._maybe_blacklist_for_drop_reason(
+                                                        channel,
+                                                        drop_code,
+                                                        drop_message,
+                                                        source,
+                                                    )
                                                     log.warning(
                                                         "Twitch hat die Bot-Nachricht verworfen "
                                                         "(broadcaster=%s, code=%s, detail=%s)",

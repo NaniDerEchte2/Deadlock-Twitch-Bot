@@ -18,6 +18,13 @@ from bot.dashboard.server_v2 import DashboardV2Server
 from bot.social_media.clip_manager import ClipManager
 from bot.social_media.dashboard import SocialMediaDashboard
 
+_MALICIOUS_NEXT_VARIANTS = (
+    "//evil.example",
+    "%2F%2Fevil.example",
+    "http://evil.example/path",
+    "\\\\evil.example",
+)
+
 
 class _DummyBilling(_DashboardBillingMixin):
     def __init__(self) -> None:
@@ -215,6 +222,35 @@ class _DummyLiveActions(DashboardLiveMixin):
             "effective_plan_id": "raid_free",
             "effective_plan_source": "default_basic",
         }
+
+
+class _AdminPostGate(_DummyLiveActions):
+    _discord_admin_required = True
+    _normalize_discord_admin_next_path = staticmethod(
+        DashboardV2Server._normalize_discord_admin_next_path
+    )
+    _path_matches_prefixes = staticmethod(DashboardV2Server._path_matches_prefixes)
+    _safe_discord_admin_login_redirect = staticmethod(
+        DashboardV2Server._safe_discord_admin_login_redirect
+    )
+
+    def _check_v2_auth(self, request):
+        del request
+        return False
+
+    def _is_discord_admin_request(self, request):
+        del request
+        return False
+
+    def _build_discord_admin_login_url(self, request, *, next_path=None):
+        return DashboardV2Server._build_discord_admin_login_url(
+            self,
+            request,
+            next_path=next_path,
+        )
+
+    def _require_token(self, request):
+        return DashboardV2Server._require_token(self, request)
 
 
 class _DummyRaidAuthRoute(_DashboardRaidMixin):
@@ -713,6 +749,81 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(web.HTTPServiceUnavailable):
             DashboardV2Server._require_token(_Gate(), request)
+
+    def test_safe_internal_redirect_rejects_malicious_next_variants(self) -> None:
+        for raw_next in _MALICIOUS_NEXT_VARIANTS:
+            with self.subTest(next_value=raw_next):
+                self.assertEqual(
+                    _DashboardAuthMixin._safe_internal_redirect(
+                        raw_next,
+                        fallback="/twitch/dashboard",
+                    ),
+                    "/twitch/dashboard",
+                )
+
+    def test_discord_admin_login_url_rejects_malicious_next_variants(self) -> None:
+        handler = DashboardV2Server(
+            app_token=None,
+            noauth=False,
+            partner_token=None,
+            oauth_client_id="client-id",
+            oauth_client_secret="client-secret",
+            oauth_redirect_uri="https://dashboard.example/twitch/auth/callback",
+        )
+        handler._discord_admin_required = True
+        request = SimpleNamespace(rel_url=SimpleNamespace(path_qs="/twitch/admin"))
+
+        for raw_next in _MALICIOUS_NEXT_VARIANTS:
+            with self.subTest(next_value=raw_next):
+                self.assertEqual(
+                    handler._build_discord_admin_login_url(request, next_path=raw_next),
+                    "/twitch/auth/discord/login?next=%2Ftwitch%2Fadmin",
+                )
+
+    async def test_sensitive_admin_post_routes_require_discord_admin_context(self) -> None:
+        handler = _AdminPostGate()
+        cases = (
+            (
+                "/twitch/admin/chat_action",
+                handler.admin_partner_chat_action,
+                "/twitch/auth/discord/login?next=%2Ftwitch%2Fadmin%2Fchat_action",
+            ),
+            (
+                "/twitch/admin/manual-plan",
+                handler.admin_manual_plan_save,
+                "/twitch/auth/discord/login?next=%2Ftwitch%2Fadmin%2Fmanual-plan",
+            ),
+            (
+                "/twitch/admin/manual-plan/clear",
+                handler.admin_manual_plan_clear,
+                "/twitch/auth/discord/login?next=%2Ftwitch%2Fadmin%2Fmanual-plan%2Fclear",
+            ),
+        )
+
+        def _make_post_request(path: str):
+            class _Request:
+                method = "POST"
+                headers = {}
+                rel_url = SimpleNamespace(path_qs=path)
+                query = {}
+
+                def __init__(self) -> None:
+                    self.path = path
+
+                async def post(self):
+                    raise AssertionError("request body should not be read without admin context")
+
+            return _Request()
+
+        for path, route, login_url in cases:
+            with self.subTest(path=path):
+                with self.assertRaises(web.HTTPUnauthorized) as ctx:
+                    await route(_make_post_request(path))
+                self.assertEqual(ctx.exception.text, "Discord admin authentication required")
+                self.assertEqual(ctx.exception.headers.get("X-Auth-Login"), login_url)
+
+        self.assertEqual(handler.manual_plan_set_calls, [])
+        self.assertEqual(handler.manual_plan_clear_calls, [])
 
     def test_live_announcement_is_not_treated_as_admin_context(self) -> None:
         handler = DashboardV2Server.__new__(DashboardV2Server)

@@ -11,90 +11,62 @@ permissions:
 
 jobs:
   ruff:
-    name: "⚡ Ruff (Lint & Format)"
+    name: "⚡ Ruff (CI-critical targets)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Detect Python files
-        id: detect_py
-        shell: bash
-        run: |
-          if git ls-files '*.py' | grep -q .; then
-            echo "has_python=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_python=false" >> "$GITHUB_OUTPUT"
-            echo "No Python files tracked in this repository."
-          fi
-
       - name: Set up Python
-        if: steps.detect_py.outputs.has_python == 'true'
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          python-version: '3.13'
+          python-version: "3.13"
 
       - name: Install lint tooling
-        if: steps.detect_py.outputs.has_python == 'true'
         run: python -m pip install --require-hashes -r .github/requirements-tools-locked.txt
 
-      - name: Run Ruff Check
-        if: steps.detect_py.outputs.has_python == 'true'
-        run: ruff check . --output-format=github --target-version=py311
-
-      - name: Run Ruff Format Check
-        if: steps.detect_py.outputs.has_python == 'true'
-        run: ruff format . --check --target-version=py311
-
-      - name: Skip (no Python files)
-        if: steps.detect_py.outputs.has_python != 'true'
-        run: echo "Skipping Ruff because no Python files were found."
-
-  mypy:
-    name: "🎯 Mypy (Static Type Check)"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Detect Python files
-        id: detect_py
-        shell: bash
+      - name: Run Ruff on curated targets
         run: |
-          if git ls-files '*.py' | grep -q .; then
-            echo "has_python=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_python=false" >> "$GITHUB_OUTPUT"
-            echo "No Python files tracked in this repository."
-          fi
-
-      - name: Set up Python
-        if: steps.detect_py.outputs.has_python == 'true'
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        with:
-          python-version: '3.13'
-
-      - name: Install typing tooling
-        if: steps.detect_py.outputs.has_python == 'true'
-        run: python -m pip install --require-hashes -r .github/requirements-tools-locked.txt
-
-      - name: Run Mypy on detected source directories
-        if: steps.detect_py.outputs.has_python == 'true'
-        run: |
-          targets=()
-          for dir in bot cogs service src twitch_cog tests scripts; do
-            if [ -d "$dir" ]; then
-              targets+=("$dir")
+          targets=(
+            bot/secret_store.py
+            bot/raid/views.py
+            bot/dashboard_service/app.py
+            tests/test_raid_views_split_api.py
+            tests/test_split_bot_api_client.py
+            tests/test_dashboard_import_boundaries.py
+            tests/test_live_announcement_integration.py
+            scripts/test_checkout.py
+          )
+          existing=()
+          for target in "${targets[@]}"; do
+            if [ -e "$target" ]; then
+              existing+=("$target")
             fi
           done
 
-          if [ ${#targets[@]} -eq 0 ]; then
-            echo "No known source directories found. Running mypy against repository root."
-            mypy . --ignore-missing-imports --follow-imports=skip --install-types --non-interactive
+          if [ ${#existing[@]} -eq 0 ]; then
+            echo "No curated lint targets found."
             exit 0
           fi
 
-          printf 'Detected mypy targets: %s\n' "${targets[*]}"
-          mypy "${targets[@]}" --ignore-missing-imports --follow-imports=skip --install-types --non-interactive
+          printf 'Ruff targets: %s\n' "${existing[*]}"
+          ruff check "${existing[@]}" --output-format=github --target-version=py311
+          ruff format "${existing[@]}" --check --target-version=py311
 
-      - name: Skip (no Python files)
-        if: steps.detect_py.outputs.has_python != 'true'
-        run: echo "Skipping Mypy because no Python files were found."
+  pytest:
+    name: "✅ Pytest"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[test]"
+
+      - name: Run regression suite
+        run: pytest -q

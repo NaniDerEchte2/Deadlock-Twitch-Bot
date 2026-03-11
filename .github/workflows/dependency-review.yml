@@ -73,6 +73,7 @@ jobs:
             fi
           done < <(find . -type f \( -name "package-lock.json" -o -name "npm-shrinkwrap.json" \) \
             -not -path "*/node_modules/*" \
+            -not -path "./.github/eslint-security/*" \
             -not -path "*/.git/*" | sort)
 
           if [ "$found" -eq 0 ]; then

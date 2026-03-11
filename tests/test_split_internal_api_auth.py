@@ -1,5 +1,7 @@
 import asyncio
+import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp.test_utils import TestClient, TestServer
@@ -121,6 +123,89 @@ class InternalApiAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 400)
         self.assertEqual(payload.get("error"), "bad_request")
         self.assertEqual(payload.get("message"), "invalid query parameters")
+
+    async def test_safe_bad_request_logs_do_not_leak_sensitive_values(self) -> None:
+        async def _raise_add_cb(login: str, require_link: bool) -> str:
+            del login, require_link
+            raise ValueError("token=streamer-secret-123")
+
+        async def _raise_stats_cb(**kwargs) -> dict[str, object]:
+            del kwargs
+            raise ValueError("dsn=postgres://internal-user:db-secret@example/db")
+
+        async def _raise_live_link_click_cb(**kwargs) -> dict[str, object]:
+            del kwargs
+            raise ValueError("secret=discord-click-secret")
+
+        cases = (
+            {
+                "context": "add streamer",
+                "method": "post",
+                "path": f"{INTERNAL_API_BASE_PATH}/streamers",
+                "app_kwargs": {"add_cb": _raise_add_cb},
+                "request_kwargs": {"json": {"login": "some_streamer"}},
+                "expected_message": "invalid request body",
+                "secret_fragment": "streamer-secret-123",
+            },
+            {
+                "context": "stats query",
+                "method": "get",
+                "path": f"{INTERNAL_API_BASE_PATH}/stats",
+                "app_kwargs": {"stats_cb": _raise_stats_cb},
+                "request_kwargs": {},
+                "expected_message": "invalid query parameters",
+                "secret_fragment": "db-secret",
+            },
+            {
+                "context": "live link click",
+                "method": "post",
+                "path": f"{INTERNAL_API_BASE_PATH}/live/link-click",
+                "app_kwargs": {"live_link_click_cb": _raise_live_link_click_cb},
+                "request_kwargs": {
+                    "json": {
+                        "streamer_login": "partner_one",
+                        "tracking_token": "deadbeef1234",
+                        "discord_user_id": "12345",
+                        "discord_username": "Viewer One",
+                        "guild_id": "111",
+                        "channel_id": "222",
+                        "message_id": "333",
+                        "source_hint": "discord_button",
+                    }
+                },
+                "expected_message": "invalid request body",
+                "secret_fragment": "discord-click-secret",
+            },
+        )
+
+        for case in cases:
+            with self.subTest(context=case["context"]):
+                app = build_internal_api_app(token="secret-token", **case["app_kwargs"])
+                with self.assertLogs("TwitchStreams", level="WARNING") as captured:
+                    async with TestServer(app) as server:
+                        async with TestClient(server) as client:
+                            request = getattr(client, case["method"])
+                            response = await request(
+                                case["path"],
+                                headers={INTERNAL_TOKEN_HEADER: "secret-token"},
+                                **case["request_kwargs"],
+                            )
+                            raw_text = await response.text()
+                            payload = json.loads(raw_text)
+
+                self.assertEqual(response.status, 400)
+                self.assertEqual(payload.get("error"), "bad_request")
+                self.assertEqual(payload.get("message"), case["expected_message"])
+                self.assertNotIn(case["secret_fragment"], raw_text)
+                self.assertTrue(
+                    any(
+                        f"internal api {case['context']} bad request (ValueError)" in line
+                        for line in captured.output
+                    )
+                )
+                self.assertTrue(
+                    all(case["secret_fragment"] not in line for line in captured.output)
+                )
 
     async def test_raid_auth_url_allows_discord_state_target(self) -> None:
         seen_logins: list[str] = []
@@ -298,6 +383,75 @@ class InternalApiAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.headers.get("X-Idempotency-Replayed"), "1")
         self.assertEqual(seen, [("some_streamer", True)])
 
+    async def test_idempotency_key_is_scoped_per_endpoint(self) -> None:
+        add_seen: list[tuple[str, bool]] = []
+        click_seen: list[dict[str, str | None]] = []
+
+        async def _add_cb(login: str, require_link: bool) -> str:
+            add_seen.append((login, require_link))
+            return "added"
+
+        async def _live_link_click_cb(**kwargs) -> dict[str, object]:
+            click_seen.append(kwargs)
+            return {"ok": True}
+
+        app = build_internal_api_app(
+            token="secret-token",
+            add_cb=_add_cb,
+            live_link_click_cb=_live_link_click_cb,
+        )
+        async with TestServer(app) as server:
+            async with TestClient(server) as client:
+                headers = {
+                    INTERNAL_TOKEN_HEADER: "secret-token",
+                    IDEMPOTENCY_KEY_HEADER: "idem-shared-across-endpoints",
+                }
+                add_response = await client.post(
+                    f"{INTERNAL_API_BASE_PATH}/streamers",
+                    headers=headers,
+                    json={"login": "some_streamer"},
+                )
+                add_payload = await add_response.json()
+
+                click_response = await client.post(
+                    f"{INTERNAL_API_BASE_PATH}/live/link-click",
+                    headers=headers,
+                    json={
+                        "streamer_login": "partner_one",
+                        "tracking_token": "deadbeef1234",
+                        "discord_user_id": "12345",
+                        "discord_username": "Viewer One",
+                        "guild_id": "111",
+                        "channel_id": "222",
+                        "message_id": "333",
+                        "source_hint": "discord_button",
+                    },
+                )
+                click_payload = await click_response.json()
+
+        self.assertEqual(add_response.status, 201)
+        self.assertEqual(add_payload.get("ok"), True)
+        self.assertIsNone(add_response.headers.get("X-Idempotency-Replayed"))
+        self.assertEqual(click_response.status, 200)
+        self.assertEqual(click_payload, {"ok": True})
+        self.assertIsNone(click_response.headers.get("X-Idempotency-Replayed"))
+        self.assertEqual(add_seen, [("some_streamer", False)])
+        self.assertEqual(
+            click_seen,
+            [
+                {
+                    "streamer_login": "partner_one",
+                    "tracking_token": "deadbeef1234",
+                    "discord_user_id": "12345",
+                    "discord_username": "Viewer One",
+                    "guild_id": "111",
+                    "channel_id": "222",
+                    "message_id": "333",
+                    "source_hint": "discord_button",
+                }
+            ],
+        )
+
     async def test_streamer_add_rejects_idempotency_key_reuse_with_different_payload(self) -> None:
         seen: list[tuple[str, bool]] = []
 
@@ -329,6 +483,55 @@ class InternalApiAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.status, 409)
         self.assertEqual(second_payload.get("error"), "idempotency_conflict")
         self.assertEqual(seen, [("alpha_streamer", False)])
+
+    async def test_prepare_idempotency_discards_expired_cache_and_inflight_entries(self) -> None:
+        server = InternalApiServer(token="secret-token")
+        server._idempotency_ttl_seconds = 30
+        request = SimpleNamespace(
+            headers={IDEMPOTENCY_KEY_HEADER: "idem-ttl-expired-1"},
+            method="POST",
+            path=f"{INTERNAL_API_BASE_PATH}/streamers",
+            path_qs=f"{INTERNAL_API_BASE_PATH}/streamers",
+        )
+        scope_key = server._idempotency_scope_key(request=request, key="idem-ttl-expired-1")
+        stale_future = asyncio.get_running_loop().create_future()
+        server._idempotency_cache[scope_key] = {
+            "fingerprint": "stale-cache-fingerprint",
+            "status": 201,
+            "payload": {"ok": True, "message": "stale"},
+            "created_at": 100.0,
+        }
+        server._idempotency_inflight[scope_key] = SimpleNamespace(
+            fingerprint="stale-inflight-fingerprint",
+            future=stale_future,
+            created_at=100.0,
+        )
+
+        with patch("bot.internal_api.app.time_module.time", return_value=200.0):
+            key, fingerprint, replay, wait_future, is_owner = server._prepare_idempotency(
+                request=request,
+                payload={"login": "some_streamer"},
+            )
+
+        self.assertEqual(key, scope_key)
+        self.assertIsNone(replay)
+        self.assertIsNone(wait_future)
+        self.assertTrue(is_owner)
+        self.assertTrue(stale_future.done())
+        self.assertEqual(
+            stale_future.result(),
+            (
+                503,
+                {
+                    "error": "upstream_unavailable",
+                    "message": "idempotent request timed out",
+                },
+            ),
+        )
+        self.assertNotIn(scope_key, server._idempotency_cache)
+        self.assertIn(scope_key, server._idempotency_inflight)
+        self.assertEqual(server._idempotency_inflight[scope_key].fingerprint, fingerprint)
+        self.assertIsNot(server._idempotency_inflight[scope_key].future, stale_future)
 
     async def test_live_active_announcements_returns_minimal_entries(self) -> None:
         async def _live_active_announcements_cb() -> list[dict[str, object]]:
@@ -541,18 +744,21 @@ class InternalApiAuthTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError(f"database connection failed for {login}: secret=super-secret")
 
         app = build_internal_api_app(token="secret-token", raid_auth_url_cb=_raid_auth_url_cb)
-        async with TestServer(app) as server:
-            async with TestClient(server) as client:
-                response = await client.get(
-                    f"{INTERNAL_API_BASE_PATH}/raid/auth-url?login=some_streamer",
-                    headers={INTERNAL_TOKEN_HEADER: "secret-token"},
-                )
-                payload = await response.json()
+        with self.assertLogs("TwitchStreams", level="WARNING") as captured:
+            async with TestServer(app) as server:
+                async with TestClient(server) as client:
+                    response = await client.get(
+                        f"{INTERNAL_API_BASE_PATH}/raid/auth-url?login=some_streamer",
+                        headers={INTERNAL_TOKEN_HEADER: "secret-token"},
+                    )
+                    payload = await response.json()
 
         self.assertEqual(response.status, 503)
         self.assertEqual(payload.get("error"), "upstream_unavailable")
         self.assertEqual(payload.get("message"), "upstream unavailable")
         self.assertNotIn("super-secret", payload.get("message", ""))
+        self.assertTrue(any("raid auth url runtime failed (RuntimeError)" in line for line in captured.output))
+        self.assertTrue(all("super-secret" not in line for line in captured.output))
 
     async def test_discord_profile_scope_allowlist_rejects_unlisted_ids(self) -> None:
         seen: list[dict[str, str | bool | None]] = []

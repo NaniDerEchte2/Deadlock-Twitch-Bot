@@ -21,7 +21,9 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    def __init__(self, *, response: _FakeResponse | None = None, exc: Exception | None = None) -> None:
+    def __init__(
+        self, *, response: _FakeResponse | None = None, exc: Exception | None = None
+    ) -> None:
         self._response = response
         self._exc = exc
         self.closed = False
@@ -103,9 +105,7 @@ class BotApiClientErrorMappingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("\n", ctx.exception.message)
 
     async def test_base_url_with_internal_prefix_is_not_duplicated(self) -> None:
-        session = _FakeSession(
-            response=_FakeResponse(status=200, text="[]")
-        )
+        session = _FakeSession(response=_FakeResponse(status=200, text="[]"))
         client = BotApiClient(
             base_url=f"http://127.0.0.1:8766{INTERNAL_API_BASE_PATH}",
             token="secret",
@@ -121,7 +121,9 @@ class BotApiClientErrorMappingTests(unittest.IsolatedAsyncioTestCase):
             "http://127.0.0.1:8766/internal/twitch/v1/streamers",
         )
 
-    async def test_rejects_path_confusing_logins_for_streamer_path_segments(self) -> None:
+    async def test_rejects_path_confusing_logins_for_streamer_path_segments(
+        self,
+    ) -> None:
         session = _FakeSession(
             response=_FakeResponse(status=200, text='{"message":"removed"}')
         )
@@ -215,9 +217,7 @@ class BotApiClientErrorMappingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.code, "bad_request")
 
     async def test_disables_redirect_following_to_protect_internal_token(self) -> None:
-        session = _FakeSession(
-            response=_FakeResponse(status=200, text='{"ok":true}')
-        )
+        session = _FakeSession(response=_FakeResponse(status=200, text='{"ok":true}'))
         client = BotApiClient(
             base_url="http://127.0.0.1:8766",
             token="secret",
@@ -249,7 +249,9 @@ class BotApiClientErrorMappingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client._base_url, "http://10.0.0.20:8766")
 
-    def test_dashboard_service_fails_fast_when_noauth_without_allow_override(self) -> None:
+    def test_dashboard_service_fails_fast_when_noauth_without_allow_override(
+        self,
+    ) -> None:
         with patch.dict(
             "os.environ",
             {
@@ -278,7 +280,9 @@ class BotApiClientErrorMappingTests(unittest.IsolatedAsyncioTestCase):
             app = build_dashboard_service_app()
         self.assertIsNotNone(app)
 
-    def test_dashboard_service_starts_in_degraded_mode_when_internal_token_missing(self) -> None:
+    def test_dashboard_service_starts_in_degraded_mode_when_internal_token_missing(
+        self,
+    ) -> None:
         with patch.dict(
             "os.environ",
             {

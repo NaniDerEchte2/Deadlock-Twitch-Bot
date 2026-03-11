@@ -376,6 +376,16 @@ class InternalApiServer:
             ]
         )
 
+    @staticmethod
+    def _idempotency_scope_key(*, request: web.Request, key: str) -> str:
+        return "|".join(
+            [
+                str(request.method or "").upper().strip(),
+                str(request.path or "").strip(),
+                str(key or "").strip(),
+            ]
+        )
+
     def _cleanup_idempotency_cache(self) -> None:
         now = time_module.time()
         expired = [
@@ -443,7 +453,8 @@ class InternalApiServer:
         self._cleanup_idempotency_cache()
         self._cleanup_idempotency_inflight()
         fingerprint = self._request_fingerprint(request=request, payload=payload)
-        entry = self._idempotency_cache.get(key)
+        scope_key = self._idempotency_scope_key(request=request, key=key)
+        entry = self._idempotency_cache.get(scope_key)
         if entry:
             if str(entry.get("fingerprint") or "") != fingerprint:
                 return (
@@ -464,7 +475,7 @@ class InternalApiServer:
             response.headers["X-Idempotency-Replayed"] = "1"
             return "", "", response, None, False
 
-        inflight = self._idempotency_inflight.get(key)
+        inflight = self._idempotency_inflight.get(scope_key)
         if inflight is not None:
             if inflight.fingerprint != fingerprint:
                 return (
@@ -481,12 +492,12 @@ class InternalApiServer:
             return "", "", None, inflight.future, False
 
         future: asyncio.Future[tuple[int, Any]] = asyncio.get_running_loop().create_future()
-        self._idempotency_inflight[key] = _IdempotencyInFlight(
+        self._idempotency_inflight[scope_key] = _IdempotencyInFlight(
             fingerprint=fingerprint,
             future=future,
             created_at=time_module.time(),
         )
-        return key, fingerprint, None, None, True
+        return scope_key, fingerprint, None, None, True
 
     async def _wait_idempotency_result(
         self,
@@ -616,7 +627,7 @@ class InternalApiServer:
         message: str,
         code: str = "bad_request",
     ) -> web.Response:
-        log.warning("internal api %s bad request: %s", context, exc)
+        log.warning("internal api %s bad request (%s)", context, type(exc).__name__)
         return self._json_error(code, 400, message)
 
     def _safe_exception_error(
@@ -628,7 +639,12 @@ class InternalApiServer:
         status: int,
         message: str,
     ) -> web.Response:
-        log.warning("internal api %s failed: %s", context, exc)
+        if isinstance(exc, RuntimeError):
+            # Callback/runtime exceptions may contain DSNs, tokens, or other secrets.
+            # Keep the log actionable without echoing raw exception text.
+            log.warning("internal api %s failed (%s)", context, type(exc).__name__)
+        else:
+            log.warning("internal api %s failed: %s", context, exc)
         return self._json_error(error, status, message)
 
     @staticmethod

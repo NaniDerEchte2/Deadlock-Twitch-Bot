@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import textwrap
 import unittest
 from pathlib import Path
 
@@ -46,7 +45,9 @@ class DashboardImportBoundaryTests(unittest.TestCase):
         self.assertIn("bot.dashboard.auth", loaded["dashboard"])
         self.assertNotIn("bot.dashboard.affiliate", loaded["dashboard"])
         self.assertNotIn("bot.dashboard.billing.billing_mixin", loaded["dashboard"])
-        self.assertNotIn("bot.dashboard.live.live_announcement_mixin", loaded["dashboard"])
+        self.assertNotIn(
+            "bot.dashboard.live.live_announcement_mixin", loaded["dashboard"]
+        )
         self.assertNotIn("bot.dashboard.raids.raid_mixin", loaded["dashboard"])
 
     def test_live_package_import_stays_lightweight(self) -> None:
@@ -56,7 +57,9 @@ class DashboardImportBoundaryTests(unittest.TestCase):
         self.assertIn("bot.dashboard._compat", loaded["dashboard"])
         self.assertIn("bot.dashboard.live", loaded["dashboard"])
         self.assertNotIn("bot.dashboard.live.live", loaded["dashboard"])
-        self.assertNotIn("bot.dashboard.live.live_announcement_mixin", loaded["dashboard"])
+        self.assertNotIn(
+            "bot.dashboard.live.live_announcement_mixin", loaded["dashboard"]
+        )
         self.assertNotIn("bot.dashboard.billing.billing_mixin", loaded["dashboard"])
 
     def test_live_compat_exports_do_not_pull_announcement_modules(self) -> None:
@@ -70,8 +73,12 @@ class DashboardImportBoundaryTests(unittest.TestCase):
         self.assertIn("bot.dashboard.live.live", loaded["dashboard"])
         self.assertIn("bot.dashboard.billing.billing_plans", loaded["dashboard"])
         self.assertNotIn("bot.dashboard.billing.billing_mixin", loaded["dashboard"])
-        self.assertNotIn("bot.dashboard.live.announcement_mode_mixin", loaded["dashboard"])
-        self.assertNotIn("bot.dashboard.live.live_announcement_mixin", loaded["dashboard"])
+        self.assertNotIn(
+            "bot.dashboard.live.announcement_mode_mixin", loaded["dashboard"]
+        )
+        self.assertNotIn(
+            "bot.dashboard.live.live_announcement_mixin", loaded["dashboard"]
+        )
 
     def test_legacy_auth_shim_loads_only_target_module(self) -> None:
         loaded = self._run_import(
@@ -84,7 +91,9 @@ class DashboardImportBoundaryTests(unittest.TestCase):
         self.assertIn("bot.dashboard.auth.auth_mixin", loaded["dashboard"])
         self.assertNotIn("bot.dashboard.affiliate.affiliate_mixin", loaded["dashboard"])
         self.assertNotIn("bot.dashboard.billing.billing_mixin", loaded["dashboard"])
-        self.assertNotIn("bot.dashboard.live.live_announcement_mixin", loaded["dashboard"])
+        self.assertNotIn(
+            "bot.dashboard.live.live_announcement_mixin", loaded["dashboard"]
+        )
         self.assertNotIn("bot.dashboard.raids.raid_mixin", loaded["dashboard"])
 
 

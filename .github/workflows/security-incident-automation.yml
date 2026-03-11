@@ -40,9 +40,13 @@ jobs:
                 await github.rest.issues.getLabel({ owner, repo, name });
               } catch (err) {
                 if (err.status === 404) {
-                  await github.rest.issues.createLabel({ owner, repo, name, color, description });
+                  try {
+                    await github.rest.issues.createLabel({ owner, repo, name, color, description });
+                  } catch (createErr) {
+                    core.warning(`Could not create label ${name}: ${createErr.message}`);
+                  }
                 } else {
-                  throw err;
+                  core.warning(`Could not load label ${name}: ${err.message}`);
                 }
               }
             }
@@ -51,10 +55,16 @@ jobs:
             await ensureLabel('automated', '1D76DB', 'Created and updated by automation');
             await ensureLabel('security', 'D93F0B', 'Security related issue');
 
-            const codeAlerts = await github.paginate(
-              github.rest.codeScanning.listAlertsForRepo,
-              { owner, repo, state: 'open', per_page: 100 }
-            );
+            let codeAlerts = [];
+            let codeApiError = null;
+            try {
+              codeAlerts = await github.paginate(
+                github.rest.codeScanning.listAlertsForRepo,
+                { owner, repo, state: 'open', per_page: 100 }
+              );
+            } catch (err) {
+              codeApiError = err.message;
+            }
 
             function classifyCodeSeverity(alert) {
               const numeric = Number(alert?.rule?.security_severity_level);
@@ -179,6 +189,8 @@ jobs:
               '',
               settingsObservations.length ? '### Settings Observations (Non-Blocking)\n' + settingsObservations.map((x) => `- ${x}`).join('\n') : '### Settings Observations (Non-Blocking)\n- None',
               '',
+              codeApiError ? `### Code Scanning API\n- Could not query code scanning alerts: \`${codeApiError}\`` : '### Code Scanning API\n- Query successful',
+              '',
               secretApiError ? `### Secret Scanning API\n- Could not query secret scanning alerts: \`${secretApiError}\`` : '### Secret Scanning API\n- Query successful',
               '',
               '## Security Links',
@@ -187,40 +199,44 @@ jobs:
               `- Dependabot: https://github.com/${owner}/${repo}/security/dependabot`,
             ].join('\n');
 
-            if (shouldOpenIncident) {
-              if (existing) {
+            try {
+              if (shouldOpenIncident) {
+                if (existing) {
+                  await github.rest.issues.update({
+                    owner,
+                    repo,
+                    issue_number: existing.number,
+                    body,
+                    labels: INCIDENT_LABELS,
+                  });
+                  core.notice(`Updated existing incident tracker issue #${existing.number}`);
+                } else {
+                  const created = await github.rest.issues.create({
+                    owner,
+                    repo,
+                    title: INCIDENT_TITLE,
+                    body,
+                    labels: INCIDENT_LABELS,
+                  });
+                  core.notice(`Created incident tracker issue #${created.data.number}`);
+                }
+              } else if (existing) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: existing.number,
+                  body: `Resolved automatically at ${new Date().toISOString()} - no open high/critical code scanning alerts, no open secret scanning alerts, and no settings findings.`,
+                });
                 await github.rest.issues.update({
                   owner,
                   repo,
                   issue_number: existing.number,
-                  body,
-                  labels: INCIDENT_LABELS,
+                  state: 'closed',
                 });
-                core.notice(`Updated existing incident tracker issue #${existing.number}`);
+                core.notice(`Closed resolved incident tracker issue #${existing.number}`);
               } else {
-                const created = await github.rest.issues.create({
-                  owner,
-                  repo,
-                  title: INCIDENT_TITLE,
-                  body,
-                  labels: INCIDENT_LABELS,
-                });
-                core.notice(`Created incident tracker issue #${created.data.number}`);
+                core.notice('No security incident to track right now.');
               }
-            } else if (existing) {
-              await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number: existing.number,
-                body: `Resolved automatically at ${new Date().toISOString()} - no open high/critical code scanning alerts, no open secret scanning alerts, and no settings findings.`,
-              });
-              await github.rest.issues.update({
-                owner,
-                repo,
-                issue_number: existing.number,
-                state: 'closed',
-              });
-              core.notice(`Closed resolved incident tracker issue #${existing.number}`);
-            } else {
-              core.notice('No security incident to track right now.');
+            } catch (err) {
+              core.warning(`Security incident automation degraded: ${err.message}`);
             }

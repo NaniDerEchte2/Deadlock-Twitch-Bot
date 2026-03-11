@@ -168,7 +168,14 @@ class TwitchBaseCog(commands.Cog):
         self._internal_api_runner: InternalApiRunner | None = None
 
         # Internal API for split dashboard deployments
-        self._internal_api_token = load_secret_value("TWITCH_INTERNAL_API_TOKEN") or None
+        self._internal_api_token = (
+            load_secret_value(
+                "TWITCH_INTERNAL_API_TOKEN",
+                prefer_env=True,
+                allow_empty_env_override=True,
+            )
+            or None
+        )
         env_internal_host = (os.getenv("TWITCH_INTERNAL_API_HOST") or "").strip()
         default_internal_host = TWITCH_INTERNAL_API_HOST or "127.0.0.1"
         self._internal_api_host = env_internal_host or default_internal_host

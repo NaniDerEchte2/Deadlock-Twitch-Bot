@@ -69,7 +69,7 @@ jobs:
           while IFS= read -r dir; do
             [ -z "$dir" ] && continue
             echo "Running fuzz target in: $dir"
-            npm ci --prefix "$dir" --include=dev --ignore-scripts
+            npm ci --prefix "$dir" --include=dev
             npm --prefix "$dir" run fuzz:protocol
           done <<< "${{ steps.detect.outputs.targets }}"
 

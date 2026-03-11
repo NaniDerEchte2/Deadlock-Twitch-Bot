@@ -72,7 +72,9 @@ def _default_internal_api_base_url() -> str:
     explicit = (os.getenv("TWITCH_INTERNAL_API_BASE_URL") or "").strip()
     if explicit:
         return explicit
-    host = (os.getenv("TWITCH_INTERNAL_API_HOST") or TWITCH_INTERNAL_API_HOST or "127.0.0.1").strip()
+    host = (
+        os.getenv("TWITCH_INTERNAL_API_HOST") or TWITCH_INTERNAL_API_HOST or "127.0.0.1"
+    ).strip()
     port = _parse_env_int(
         "TWITCH_INTERNAL_API_PORT",
         int(TWITCH_INTERNAL_API_PORT or RUNTIME_INTERNAL_API_PORT),
@@ -104,11 +106,18 @@ def build_dashboard_service_app(
     )
     _require_noauth_opt_in_if_enabled(enabled=resolved_noauth)
 
-    resolved_internal_base = (internal_api_base_url or _default_internal_api_base_url()).strip()
+    resolved_internal_base = (
+        internal_api_base_url or _default_internal_api_base_url()
+    ).strip()
     resolved_internal_token = (
         internal_api_token
         if internal_api_token is not None
-        else load_secret_value("TWITCH_INTERNAL_API_TOKEN") or None
+        else load_secret_value(
+            "TWITCH_INTERNAL_API_TOKEN",
+            prefer_env=True,
+            allow_empty_env_override=True,
+        )
+        or None
     )
     timeout_seconds = (
         float(internal_api_timeout_seconds)
@@ -131,7 +140,9 @@ def build_dashboard_service_app(
         else load_secret_value("TWITCH_PARTNER_TOKEN") or None
     )
     resolved_oauth_client_id = (
-        oauth_client_id if oauth_client_id is not None else load_secret_value("TWITCH_CLIENT_ID") or None
+        oauth_client_id
+        if oauth_client_id is not None
+        else load_secret_value("TWITCH_CLIENT_ID") or None
     )
     resolved_oauth_client_secret = (
         oauth_client_secret
@@ -159,7 +170,9 @@ def build_dashboard_service_app(
         degraded_startup_reasons.append(
             "TWITCH_INTERNAL_API_TOKEN missing; dashboard will run in degraded upstream mode."
         )
-    if not resolved_noauth and (not resolved_oauth_client_id or not resolved_oauth_client_secret):
+    if not resolved_noauth and (
+        not resolved_oauth_client_id or not resolved_oauth_client_secret
+    ):
         degraded_startup_reasons.append(
             "TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET missing; Twitch OAuth login will return 503."
         )
@@ -315,7 +328,9 @@ def build_dashboard_service_app(
             _warn_upstream_once("raid_requirements", exc)
             raise _upstream_unavailable_error() from exc
 
-    async def _raid_oauth_callback_cb(*, code: str, state: str, error: str) -> dict[str, Any]:
+    async def _raid_oauth_callback_cb(
+        *, code: str, state: str, error: str
+    ) -> dict[str, Any]:
         if client is None:
             return {
                 "status": 503,
@@ -323,7 +338,9 @@ def build_dashboard_service_app(
                 "body_html": "<p>Der interne Bot-Service ist aktuell nicht verfügbar.</p>",
             }
         try:
-            return await client.process_raid_oauth_callback(code=code, state=state, error=error)
+            return await client.process_raid_oauth_callback(
+                code=code, state=state, error=error
+            )
         except BotApiClientError as exc:
             _warn_upstream_once("raid_oauth_callback", exc)
             return {
@@ -377,7 +394,12 @@ async def run_dashboard_service(
 ) -> None:
     """Run standalone dashboard service until cancelled."""
 
-    resolved_host = (host or os.getenv("TWITCH_DASHBOARD_HOST") or TWITCH_DASHBOARD_HOST or "127.0.0.1").strip()
+    resolved_host = (
+        host
+        or os.getenv("TWITCH_DASHBOARD_HOST")
+        or TWITCH_DASHBOARD_HOST
+        or "127.0.0.1"
+    ).strip()
     resolved_port = int(
         port
         if port is not None
