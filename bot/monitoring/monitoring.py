@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import os
 import time
 from datetime import UTC, datetime, timedelta
+from ipaddress import ip_address
+from urllib.parse import urlsplit, urlunsplit
 
+import aiohttp
 import discord
 from discord.ext import tasks
 
@@ -29,6 +33,241 @@ from .sessions_mixin import _SessionsMixin
 
 class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _EmbedsMixin):
     """Polling loops and helpers used by the Twitch cog."""
+
+    @staticmethod
+    def _env_truthy(value: str | None) -> bool:
+        return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    @staticmethod
+    def _parse_env_int(name: str, default: int) -> int:
+        raw = (os.getenv(name) or "").strip()
+        if not raw:
+            return int(default)
+        try:
+            parsed = int(raw)
+        except ValueError:
+            return int(default)
+        return parsed if parsed > 0 else int(default)
+
+    def _master_broker_token(self) -> str | None:
+        for key in ("MASTER_BROKER_TOKEN", "MAIN_BOT_INTERNAL_TOKEN"):
+            value = (os.getenv(key) or "").strip()
+            if value:
+                return value
+        return None
+
+    @staticmethod
+    def _is_loopback_host(host: str) -> bool:
+        normalized = str(host or "").strip().lower().rstrip(".")
+        if not normalized:
+            return False
+        if normalized == "localhost":
+            return True
+        try:
+            return ip_address(normalized).is_loopback
+        except ValueError:
+            return False
+
+    @classmethod
+    def _normalize_master_broker_base_url(cls, value: str) -> str:
+        raw = (value or "").strip()
+        if not raw:
+            raise ValueError("base_url is required")
+        if "://" not in raw:
+            raw = f"http://{raw}"
+
+        try:
+            parsed = urlsplit(raw)
+        except Exception as exc:
+            raise ValueError("base_url is invalid") from exc
+        if not parsed.netloc:
+            raise ValueError("base_url is invalid")
+        if parsed.username or parsed.password:
+            raise ValueError("base_url must not contain credentials")
+
+        scheme = (parsed.scheme or "http").lower()
+        if scheme not in {"http", "https"}:
+            raise ValueError("base_url must use http or https")
+
+        host = (parsed.hostname or "").strip()
+        if not host or not cls._is_loopback_host(host):
+            raise ValueError("base_url host must resolve to loopback")
+
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("base_url is invalid") from exc
+        host_for_netloc = f"[{host}]" if ":" in host else host
+        normalized_netloc = f"{host_for_netloc}:{port}" if port is not None else host_for_netloc
+        normalized_path = (parsed.path or "").rstrip("/")
+        return urlunsplit((scheme, normalized_netloc, normalized_path, "", ""))
+
+    def _master_broker_base_url(self) -> str:
+        explicit_base = (os.getenv("MASTER_BROKER_BASE_URL") or "").strip()
+        if explicit_base:
+            return self._normalize_master_broker_base_url(explicit_base)
+        host = (os.getenv("MASTER_BROKER_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+        port = self._parse_env_int("MASTER_BROKER_PORT", 8770)
+        return self._normalize_master_broker_base_url(f"http://{host}:{port}")
+
+    def _announcement_transport_prefers_master_broker(self) -> bool:
+        return self._master_broker_token() is not None
+
+    def _announcement_transport_can_use_direct_discord(self) -> bool:
+        if self._announcement_transport_prefers_master_broker():
+            return False
+
+        try:
+            from ..runtime_mode import ROLE_TWITCH_WORKER, resolve_runtime_role
+
+            if resolve_runtime_role() == ROLE_TWITCH_WORKER:
+                return False
+        except Exception:
+            log.debug("Could not resolve Twitch runtime role for announcement transport", exc_info=True)
+
+        return self.bot.__class__.__name__ != "HeadlessBot"
+
+    def _announcement_transport_ready(
+        self,
+        *,
+        channel_id: int | None,
+        notify_channel: discord.TextChannel | None,
+    ) -> bool:
+        if not channel_id:
+            return False
+        if self._announcement_transport_prefers_master_broker():
+            return True
+        return self._announcement_transport_can_use_direct_discord() and notify_channel is not None
+
+    @staticmethod
+    def _build_announcement_idempotency_key(
+        *,
+        action: str,
+        login: str,
+        discriminator: str,
+    ) -> str:
+        raw = f"{action}|{str(login or '').strip().lower()}|{str(discriminator or '').strip()}"
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:48]
+        return f"twitch-{action}-{digest}"
+
+    async def _post_master_broker_json(
+        self,
+        *,
+        path: str,
+        payload: dict[str, object],
+        idempotency_key: str,
+    ) -> dict[str, object] | None:
+        token = self._master_broker_token()
+        if not token:
+            return None
+
+        base_url = self._master_broker_base_url()
+        url = f"{base_url}{path}"
+        headers = {
+            "X-Internal-Token": token,
+            "X-Idempotency-Key": idempotency_key,
+        }
+        timeout = aiohttp.ClientTimeout(total=10)
+
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    allow_redirects=False,
+                ) as response:
+                    raw_text = await response.text()
+                    try:
+                        parsed = json.loads(raw_text) if raw_text.strip() else {}
+                    except Exception:
+                        parsed = {}
+                    if response.status >= 400:
+                        log.warning(
+                            "Master broker request failed (%s %s): status=%s body=%s",
+                            path,
+                            idempotency_key,
+                            response.status,
+                            raw_text[:500],
+                        )
+                        return None
+        except asyncio.TimeoutError:
+            log.warning("Master broker request timed out for %s", path)
+            return None
+        except Exception:
+            log.exception("Master broker request failed for %s", path)
+            return None
+
+        if not isinstance(parsed, dict) or not parsed.get("ok"):
+            log.warning(
+                "Master broker returned invalid response for %s: %r",
+                path,
+                parsed,
+            )
+            return None
+
+        result = parsed.get("result")
+        return result if isinstance(result, dict) else {}
+
+    async def _send_live_announcement_via_broker(
+        self,
+        *,
+        channel_id: int,
+        login: str,
+        stream_id: str | None,
+        content: str,
+        embed: discord.Embed,
+        allowed_role_ids: list[int],
+        view_spec: dict[str, str] | None,
+    ) -> str | None:
+        result = await self._post_master_broker_json(
+            path="/internal/master/v1/discord/send-rich-message",
+            payload={
+                "channel_id": int(channel_id),
+                "content": content or None,
+                "embed": embed.to_dict(),
+                "allowed_role_ids": allowed_role_ids,
+                "view_spec": view_spec,
+            },
+            idempotency_key=self._build_announcement_idempotency_key(
+                action="live-send",
+                login=login,
+                discriminator=str(stream_id or content or ""),
+            ),
+        )
+        if not result:
+            return None
+
+        message_id = result.get("message_id")
+        normalized_message_id = str(message_id or "").strip()
+        return normalized_message_id if normalized_message_id else None
+
+    async def _edit_live_announcement_via_broker(
+        self,
+        *,
+        channel_id: int,
+        login: str,
+        message_id: str,
+        content: str,
+        embed: discord.Embed,
+        view_spec: dict[str, str] | None,
+    ) -> bool:
+        result = await self._post_master_broker_json(
+            path="/internal/master/v1/discord/edit-rich-message",
+            payload={
+                "channel_id": int(channel_id),
+                "message_id": str(message_id),
+                "content": content or None,
+                "embed": embed.to_dict(),
+                "view_spec": view_spec,
+            },
+            idempotency_key=self._build_announcement_idempotency_key(
+                action="live-edit",
+                login=login,
+                discriminator=str(message_id),
+            ),
+        )
+        return result is not None
 
     def _partner_raid_score_refresh_interval_seconds(self) -> float:
         return 300.0
@@ -752,9 +991,10 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
         tracked: list[dict[str, object]],
         streams_by_login: dict[str, dict],
     ):
+        notify_channel_id = int(getattr(self, "_notify_channel_id", 0) or 0) or None
         notify_ch: discord.TextChannel | None = None
-        if self._notify_channel_id:
-            notify_ch = self.bot.get_channel(self._notify_channel_id) or None  # type: ignore[assignment]
+        if notify_channel_id:
+            notify_ch = self.bot.get_channel(notify_channel_id) or None  # type: ignore[assignment]
 
         now_utc = datetime.now(tz=UTC)
         now_iso = now_utc.isoformat(timespec="seconds")
@@ -946,7 +1186,10 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                 last_deadlock_seen_at_value = previous_last_deadlock_seen
 
             should_post = (
-                notify_ch is not None
+                self._announcement_transport_ready(
+                    channel_id=notify_channel_id,
+                    notify_channel=notify_ch,
+                )
                 and is_deadlock
                 and (not was_live or not was_deadlock or not message_id_previous)
                 and is_verified
@@ -986,45 +1229,89 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                                 replied_user=False,
                             )
 
-                try:
-                    message = await notify_ch.send(
-                        content=content or None,
-                        embed=embed,
-                        view=view,
-                        allowed_mentions=allowed_mentions,
+                allowed_role_ids = self._allowed_role_ids_from_allowed_mentions(allowed_mentions)
+                referral_url = self._build_referral_url(login)
+                live_view_spec = (
+                    self._build_twitch_live_tracking_view_spec(
+                        login=login,
+                        referral_url=referral_url,
+                        tracking_token=new_tracking_token,
+                        button_label=getattr(view, "button_label", ""),
                     )
-                except Exception:
-                    log.exception("Konnte Go-Live-Posting nicht senden: %s", login)
-                else:
-                    message_id_to_store = str(message.id)
-                    tracking_token_to_store = new_tracking_token if view is not None else None
-                    if view is not None:
-                        view.bind_to_message(
-                            channel_id=getattr(notify_ch, "id", None),
-                            message_id=message.id,
+                    if view is not None
+                    else None
+                )
+
+                if self._announcement_transport_prefers_master_broker():
+                    if notify_channel_id:
+                        message_id_result = await self._send_live_announcement_via_broker(
+                            channel_id=notify_channel_id,
+                            login=login_lower,
+                            stream_id=stream_id_value,
+                            content=content,
+                            embed=embed,
+                            allowed_role_ids=allowed_role_ids,
+                            view_spec=live_view_spec,
                         )
-                        self._register_live_view(
-                            tracking_token=new_tracking_token,
+                    else:
+                        message_id_result = None
+                    if message_id_result is None:
+                        log.warning("Konnte Go-Live-Posting nicht via Master-Broker senden: %s", login)
+                    else:
+                        message_id_to_store = message_id_result
+                        tracking_token_to_store = (
+                            new_tracking_token if live_view_spec is not None else None
+                        )
+                elif notify_ch is not None and self._announcement_transport_can_use_direct_discord():
+                    try:
+                        message = await notify_ch.send(
+                            content=content or None,
+                            embed=embed,
                             view=view,
-                            message_id=message.id,
+                            allowed_mentions=allowed_mentions,
                         )
-                    # Store notification text if we have an active session
-                    if active_session_id:
-                        try:
-                            with storage.get_conn() as c:
-                                c.execute(
-                                    "UPDATE twitch_stream_sessions SET notification_text = ? WHERE id = ?",
-                                    (content or "", active_session_id),
-                                )
-                        except Exception:
-                            log.debug(
-                                "Could not save notification text for %s",
-                                login,
-                                exc_info=True,
+                    except Exception:
+                        log.exception("Konnte Go-Live-Posting nicht senden: %s", login)
+                    else:
+                        message_id_to_store = str(message.id)
+                        tracking_token_to_store = new_tracking_token if view is not None else None
+                        if view is not None:
+                            view.bind_to_message(
+                                channel_id=getattr(notify_ch, "id", None),
+                                message_id=message.id,
                             )
+                            self._register_live_view(
+                                tracking_token=new_tracking_token,
+                                view=view,
+                                message_id=message.id,
+                            )
+                else:
+                    log.warning(
+                        "Kein Announcement-Transport für Go-Live-Posting verfügbar: %s",
+                        login,
+                    )
+
+                if message_id_to_store and active_session_id:
+                    try:
+                        with storage.get_conn() as c:
+                            c.execute(
+                                "UPDATE twitch_stream_sessions SET notification_text = ? WHERE id = ?",
+                                (content or "", active_session_id),
+                            )
+                    except Exception:
+                        log.debug(
+                            "Could not save notification text for %s",
+                            login,
+                            exc_info=True,
+                        )
 
             ended_deadlock_posting = (
-                notify_ch is not None and message_id_previous and (not is_live or not is_deadlock)
+                self._announcement_transport_ready(
+                    channel_id=notify_channel_id,
+                    notify_channel=notify_ch,
+                )
+                and message_id_previous
+                and (not is_live or not is_deadlock)
             )
             # Auto-Raid per Polling für Partner deaktiviert – EventSub ist Primärpfad
             should_auto_raid = False
@@ -1045,51 +1332,74 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                         message_id_previous,
                     )
                 else:
-                    try:
-                        fetched_message = await notify_ch.fetch_message(message_id_int)
-                    except discord.NotFound:
-                        log.warning(
-                            "Deadlock-Ende-Posting nicht mehr vorhanden für %s (ID %s)",
-                            login,
-                            message_id_previous,
-                        )
-                        message_id_to_store = None
-                        tracking_token_to_store = None
-                        self._drop_live_view(tracking_token_previous)
-                    except Exception:
-                        log.exception("Konnte Deadlock-Ende-Posting nicht laden: %s", login)
-                    else:
-                        preview_image_url = await self._get_latest_vod_preview_url(
-                            login=login,
-                            twitch_user_id=twitch_user_id or previous_state.get("twitch_user_id"),
-                        )
+                    preview_image_url = await self._get_latest_vod_preview_url(
+                        login=login,
+                        twitch_user_id=twitch_user_id or previous_state.get("twitch_user_id"),
+                    )
 
-                        ended_content = f"**{display_name}** ist OFFLINE - VOD per Button."
-                        offline_embed = self._build_offline_embed(
-                            login=login,
-                            display_name=display_name,
-                            last_title=last_title_value,
-                            last_game=last_game_value,
-                            preview_image_url=preview_image_url,
+                    ended_content = f"**{display_name}** ist OFFLINE - VOD per Button."
+                    offline_embed = self._build_offline_embed(
+                        login=login,
+                        display_name=display_name,
+                        last_title=last_title_value,
+                        last_game=last_game_value,
+                        preview_image_url=preview_image_url,
+                    )
+                    offline_view_spec = self._build_link_button_view_spec(
+                        referral_url,
+                        label=TWITCH_VOD_BUTTON_LABEL,
+                    )
+                    if self._announcement_transport_prefers_master_broker():
+                        updated = await self._edit_live_announcement_via_broker(
+                            channel_id=int(notify_channel_id or 0),
+                            login=login_lower,
+                            message_id=message_id_previous,
+                            content=ended_content,
+                            embed=offline_embed,
+                            view_spec=offline_view_spec,
                         )
-                        offline_view = self._build_offline_link_view(
-                            referral_url, label=TWITCH_VOD_BUTTON_LABEL
-                        )
+                    elif notify_ch is not None:
                         try:
-                            await fetched_message.edit(
-                                content=ended_content,
-                                embed=offline_embed,
-                                view=offline_view,
-                            )
-                        except Exception:
-                            log.exception(
-                                "Konnte Deadlock-Ende-Posting nicht aktualisieren: %s",
+                            fetched_message = await notify_ch.fetch_message(message_id_int)
+                        except discord.NotFound:
+                            log.warning(
+                                "Deadlock-Ende-Posting nicht mehr vorhanden für %s (ID %s)",
                                 login,
+                                message_id_previous,
                             )
-                        else:
                             message_id_to_store = None
                             tracking_token_to_store = None
                             self._drop_live_view(tracking_token_previous)
+                            updated = False
+                        except Exception:
+                            log.exception("Konnte Deadlock-Ende-Posting nicht laden: %s", login)
+                            updated = False
+                        else:
+                            offline_view = self._build_offline_link_view(
+                                referral_url,
+                                label=TWITCH_VOD_BUTTON_LABEL,
+                            )
+                            try:
+                                await fetched_message.edit(
+                                    content=ended_content,
+                                    embed=offline_embed,
+                                    view=offline_view,
+                                )
+                            except Exception:
+                                log.exception(
+                                    "Konnte Deadlock-Ende-Posting nicht aktualisieren: %s",
+                                    login,
+                                )
+                                updated = False
+                            else:
+                                updated = True
+                    else:
+                        updated = False
+
+                    if updated:
+                        message_id_to_store = None
+                        tracking_token_to_store = None
+                        self._drop_live_view(tracking_token_previous)
 
             db_user_id = twitch_user_id or previous_state.get("twitch_user_id") or login_lower
             db_user_id = str(db_user_id)

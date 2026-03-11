@@ -11,7 +11,7 @@ from urllib.parse import unquote, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 
-from .app import INTERNAL_API_BASE_PATH, INTERNAL_TOKEN_HEADER
+from .app import IDEMPOTENCY_KEY_HEADER, INTERNAL_API_BASE_PATH, INTERNAL_TOKEN_HEADER
 
 _LOGIN_SEGMENT_RE = re.compile(r"^[a-z0-9_]{3,25}$")
 
@@ -203,6 +203,7 @@ class InternalApiClient:
         method: str,
         path: str,
         *,
+        headers: dict[str, str] | None = None,
         query: dict[str, Any] | None = None,
         payload: dict[str, Any] | None = None,
     ) -> Any:
@@ -213,14 +214,19 @@ class InternalApiClient:
             if compact:
                 query_suffix = f"?{urlencode(compact)}"
         url = f"{self._base_url}{normalized_path}{query_suffix}"
-        headers = {INTERNAL_TOKEN_HEADER: self._token}
+        request_headers = {INTERNAL_TOKEN_HEADER: self._token}
+        if headers:
+            for key, value in headers.items():
+                text_value = str(value or "").strip()
+                if text_value:
+                    request_headers[str(key)] = text_value
         session = await self._get_session()
 
         try:
             response = await session.request(
                 method=method,
                 url=url,
-                headers=headers,
+                headers=request_headers,
                 json=payload,
                 allow_redirects=False,
             )
@@ -287,6 +293,58 @@ class InternalApiClient:
         return normalized
 
     @staticmethod
+    def _normalize_positive_id_value(value: str | int, *, field_name: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized.isdigit() or int(normalized) <= 0:
+            raise InternalApiClientError(
+                status=400,
+                code="bad_request",
+                message=f"{field_name} is invalid.",
+            )
+        return normalized
+
+    @staticmethod
+    def _normalize_optional_positive_id_value(
+        value: str | int | None,
+        *,
+        field_name: str,
+    ) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            return None
+        if not normalized.isdigit() or int(normalized) <= 0:
+            raise InternalApiClientError(
+                status=400,
+                code="bad_request",
+                message=f"{field_name} is invalid.",
+            )
+        return normalized
+
+    @staticmethod
+    def _normalize_required_text(value: str, *, field_name: str, max_length: int) -> str:
+        normalized = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+        if not normalized or len(normalized) > max_length:
+            raise InternalApiClientError(
+                status=400,
+                code="bad_request",
+                message=f"{field_name} is invalid.",
+            )
+        return normalized
+
+    @staticmethod
+    def _normalize_tracking_token_value(value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized or len(normalized) > 128:
+            raise InternalApiClientError(
+                status=400,
+                code="bad_request",
+                message="tracking_token is invalid.",
+            )
+        return normalized
+
+    @staticmethod
     def _validate_raid_state_payload(payload: Any, *, context: str) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise InternalApiClientError(
@@ -295,6 +353,39 @@ class InternalApiClient:
                 message=f"Bot internal API returned an invalid {context} payload.",
             )
         return payload
+
+    @staticmethod
+    def _validate_live_announcements_payload(payload: Any) -> list[dict[str, Any]]:
+        if not isinstance(payload, list):
+            raise InternalApiClientError(
+                status=502,
+                code="upstream_invalid_shape",
+                message="Bot internal API returned an invalid live announcements payload.",
+            )
+        normalized: list[dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                raise InternalApiClientError(
+                    status=502,
+                    code="upstream_invalid_shape",
+                    message="Bot internal API returned an invalid live announcement entry.",
+                )
+            required_keys = {
+                "streamer_login",
+                "message_id",
+                "tracking_token",
+                "referral_url",
+                "button_label",
+                "channel_id",
+            }
+            if not required_keys.issubset(item.keys()):
+                raise InternalApiClientError(
+                    status=502,
+                    code="upstream_invalid_shape",
+                    message="Bot internal API returned an incomplete live announcement entry.",
+                )
+            normalized.append(dict(item))
+        return normalized
 
     async def healthz(self) -> dict[str, Any]:
         payload = await self._request_json("GET", f"{INTERNAL_API_BASE_PATH}/healthz")
@@ -444,6 +535,84 @@ class InternalApiClient:
                 status=502,
                 code="upstream_invalid_shape",
                 message="Bot internal API returned an invalid session payload.",
+            )
+        return payload
+
+    async def get_active_live_announcements(self) -> list[dict[str, Any]]:
+        payload = await self._request_json(
+            "GET",
+            f"{INTERNAL_API_BASE_PATH}/live/active-announcements",
+        )
+        return self._validate_live_announcements_payload(payload)
+
+    async def record_live_link_click(
+        self,
+        *,
+        streamer_login: str,
+        tracking_token: str,
+        discord_user_id: str | int,
+        discord_username: str,
+        guild_id: str | int | None,
+        channel_id: str | int,
+        message_id: str | int,
+        source_hint: str,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_login = self._normalize_login_path_segment(streamer_login)
+        normalized_tracking_token = self._normalize_tracking_token_value(tracking_token)
+        normalized_discord_user_id = self._normalize_discord_user_id_value(discord_user_id)
+        normalized_discord_username = self._normalize_required_text(
+            discord_username,
+            field_name="discord_username",
+            max_length=200,
+        )
+        normalized_guild_id = self._normalize_optional_positive_id_value(
+            guild_id,
+            field_name="guild_id",
+        )
+        normalized_channel_id = self._normalize_positive_id_value(
+            channel_id,
+            field_name="channel_id",
+        )
+        normalized_message_id = self._normalize_positive_id_value(
+            message_id,
+            field_name="message_id",
+        )
+        normalized_source_hint = self._normalize_required_text(
+            source_hint,
+            field_name="source_hint",
+            max_length=100,
+        )
+
+        extra_headers: dict[str, str] | None = None
+        if idempotency_key is not None:
+            normalized_idempotency_key = self._normalize_required_text(
+                idempotency_key,
+                field_name="idempotency_key",
+                max_length=128,
+            )
+            extra_headers = {IDEMPOTENCY_KEY_HEADER: normalized_idempotency_key}
+
+        payload = await self._request_json(
+            "POST",
+            f"{INTERNAL_API_BASE_PATH}/live/link-click",
+            headers=extra_headers,
+            payload={
+                "streamer_login": normalized_login,
+                "tracking_token": normalized_tracking_token,
+                "discord_user_id": normalized_discord_user_id,
+                "discord_username": normalized_discord_username,
+                "guild_id": normalized_guild_id,
+                "channel_id": normalized_channel_id,
+                "message_id": normalized_message_id,
+                "source_hint": normalized_source_hint,
+            },
+        )
+        if not isinstance(payload, dict):
+            raise InternalApiClientError(
+                status=502,
+                code="upstream_invalid_shape",
+                message="Bot internal API returned an invalid live link click payload.",
             )
         return payload
 

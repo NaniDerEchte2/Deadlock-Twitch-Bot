@@ -71,6 +71,8 @@ class InternalApiServer:
         raid_go_url_cb: Callable[[str], Awaitable[str | None]] | None = None,
         raid_requirements_cb: Callable[[str], Awaitable[str]] | None = None,
         raid_oauth_callback_cb: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+        live_active_announcements_cb: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None,
+        live_link_click_cb: Callable[..., Awaitable[dict[str, Any] | None]] | None = None,
     ) -> None:
         self._token = (token or "").strip()
         base = (base_path or INTERNAL_API_BASE_PATH).strip()
@@ -122,6 +124,14 @@ class InternalApiServer:
             raid_oauth_callback_cb
             if callable(raid_oauth_callback_cb)
             else self._empty_raid_oauth_callback
+        )
+        self._live_active_announcements = (
+            live_active_announcements_cb
+            if callable(live_active_announcements_cb)
+            else self._empty_live_active_announcements
+        )
+        self._live_link_click = (
+            live_link_click_cb if callable(live_link_click_cb) else self._empty_live_link_click
         )
         self._idempotency_cache: dict[str, dict[str, Any]] = {}
         self._idempotency_inflight: dict[str, _IdempotencyInFlight] = {}
@@ -230,6 +240,12 @@ class InternalApiServer:
             "title": "Raid-Bot nicht verfügbar",
             "body_html": "<p>Raid OAuth callback operation unavailable.</p>",
         }
+
+    async def _empty_live_active_announcements(self) -> list[dict[str, Any]]:
+        return []
+
+    async def _empty_live_link_click(self, **_: Any) -> dict[str, Any] | None:
+        return {"ok": True}
 
     @property
     def base_path(self) -> str:
@@ -773,6 +789,80 @@ class InternalApiServer:
             raise ValueError("invalid discord_user_id")
         return raw
 
+    @staticmethod
+    def _normalize_tracking_token(value: Any, *, required: bool) -> str | None:
+        text = str(value or "").strip()
+        if not text:
+            if required:
+                raise ValueError("invalid tracking_token")
+            return None
+        if len(text) > 128:
+            raise ValueError("invalid tracking_token")
+        return text
+
+    @staticmethod
+    def _normalize_text_field(
+        value: Any,
+        *,
+        field_name: str,
+        required: bool,
+        max_length: int,
+    ) -> str | None:
+        text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+        if not text:
+            if required:
+                raise ValueError(f"invalid {field_name}")
+            return None
+        if len(text) > max_length:
+            raise ValueError(f"invalid {field_name}")
+        return text
+
+    def _normalize_live_announcement_item(self, item: Any) -> dict[str, Any]:
+        if not isinstance(item, dict):
+            raise ValueError("active announcement item must be an object")
+
+        streamer_login = self._normalize_login(str(item.get("streamer_login") or ""))
+        if not streamer_login:
+            raise ValueError("active announcement streamer_login is invalid")
+
+        message_id = self._coerce_optional_positive_int(item.get("message_id"), key="message_id")
+        if message_id is None:
+            raise ValueError("active announcement message_id is invalid")
+
+        channel_id = self._coerce_optional_positive_int(item.get("channel_id"), key="channel_id")
+        if channel_id is None:
+            raise ValueError("active announcement channel_id is invalid")
+
+        tracking_token = self._normalize_tracking_token(
+            item.get("tracking_token"),
+            required=True,
+        )
+        referral_url = self._normalize_text_field(
+            item.get("referral_url"),
+            field_name="referral_url",
+            required=True,
+            max_length=2000,
+        )
+        parsed_url = urlsplit(str(referral_url))
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            raise ValueError("active announcement referral_url is invalid")
+
+        button_label = self._normalize_text_field(
+            item.get("button_label"),
+            field_name="button_label",
+            required=True,
+            max_length=80,
+        )
+
+        return {
+            "streamer_login": streamer_login,
+            "message_id": int(message_id),
+            "tracking_token": str(tracking_token),
+            "referral_url": str(referral_url),
+            "button_label": str(button_label),
+            "channel_id": int(channel_id),
+        }
+
     def _normalize_raid_state_payload(
         self,
         payload: Any,
@@ -823,6 +913,30 @@ class InternalApiServer:
                 "service": "twitch-internal-api",
             }
         )
+
+    async def live_active_announcements(self, request: web.Request) -> web.Response:
+        del request
+        try:
+            items = await self._live_active_announcements()
+            if not isinstance(items, list):
+                items = list(items) if items else []
+            normalized = [self._normalize_live_announcement_item(item) for item in items]
+            return self._json_response(normalized)
+        except ValueError as exc:
+            return self._safe_exception_error(
+                context="live active announcements",
+                exc=exc,
+                error="internal_error",
+                status=500,
+                message="failed to list active live announcements",
+            )
+        except Exception:
+            log.exception("internal api live active announcements failed")
+            return self._json_error(
+                "internal_error",
+                500,
+                "failed to list active live announcements",
+            )
 
     async def streamers(self, request: web.Request) -> web.Response:
         del request
@@ -1559,11 +1673,121 @@ class InternalApiServer:
                 cacheable=owner_cacheable,
             )
 
+    async def live_link_click(self, request: web.Request) -> web.Response:
+        owner_key = ""
+        owner_fingerprint = ""
+        owner_response: web.Response | None = None
+        owner_cacheable = False
+        try:
+            body = await self._json_body(request)
+            (
+                idempotency_key,
+                idempotency_fingerprint,
+                replay,
+                wait_future,
+                is_owner,
+            ) = self._prepare_idempotency(
+                request=request,
+                payload=body,
+            )
+            if replay is not None:
+                return replay
+            if wait_future is not None:
+                return await self._wait_idempotency_result(future=wait_future)
+            if is_owner:
+                owner_key = idempotency_key
+                owner_fingerprint = idempotency_fingerprint
+
+            self._enforce_discord_action_scope(body)
+
+            streamer_login = self._normalize_login(str(body.get("streamer_login") or ""))
+            if not streamer_login:
+                raise ValueError("invalid streamer_login")
+
+            tracking_token = self._normalize_tracking_token(
+                body.get("tracking_token"),
+                required=True,
+            )
+            discord_user_id = self._normalize_discord_user_id_param(
+                body.get("discord_user_id"),
+                required=True,
+            )
+            discord_username = self._normalize_text_field(
+                body.get("discord_username"),
+                field_name="discord_username",
+                required=True,
+                max_length=200,
+            )
+            guild_id = self._coerce_optional_positive_int(body.get("guild_id"), key="guild_id")
+            channel_id = self._coerce_optional_positive_int(body.get("channel_id"), key="channel_id")
+            if channel_id is None:
+                raise ValueError("invalid channel_id")
+            message_id = self._coerce_optional_positive_int(body.get("message_id"), key="message_id")
+            if message_id is None:
+                raise ValueError("invalid message_id")
+            source_hint = self._normalize_text_field(
+                body.get("source_hint"),
+                field_name="source_hint",
+                required=True,
+                max_length=100,
+            )
+
+            await self._live_link_click(
+                streamer_login=streamer_login,
+                tracking_token=tracking_token,
+                discord_user_id=discord_user_id,
+                discord_username=discord_username,
+                guild_id=str(guild_id) if guild_id is not None else None,
+                channel_id=str(channel_id),
+                message_id=str(message_id),
+                source_hint=source_hint,
+            )
+
+            owner_cacheable = True
+            owner_response = self._json_response({"ok": True})
+            return owner_response
+        except ValueError as exc:
+            owner_response = self._safe_bad_request(
+                context="live link click",
+                exc=exc,
+                message="invalid request body",
+            )
+            return owner_response
+        except PermissionError as exc:
+            owner_response = self._safe_exception_error(
+                context="live link click forbidden",
+                exc=exc,
+                error="forbidden",
+                status=403,
+                message="action outside configured scope",
+            )
+            return owner_response
+        except Exception:
+            log.exception("internal api live link click failed")
+            owner_response = self._json_error(
+                "internal_error",
+                500,
+                "failed to persist live link click",
+            )
+            return owner_response
+        finally:
+            self._release_idempotency_owner(
+                key=owner_key,
+                fingerprint=owner_fingerprint,
+                response=owner_response,
+                cacheable=owner_cacheable,
+            )
+
     def attach(self, app: web.Application) -> None:
         base = self._base_path
         app.add_routes(
             [
                 web.get(f"{base}/healthz", self.healthz),
+                web.get(
+                    f"{base}/live/active-announcements",
+                    self.live_active_announcements,
+                ),
+                web.post(f"{base}/live/link-click", self.live_link_click),
                 web.get(f"{base}/streamers", self.streamers),
                 web.post(f"{base}/streamers", self.streamer_add),
                 web.delete(f"{base}/streamers/{{login}}", self.streamer_remove),
@@ -1612,6 +1836,8 @@ def build_internal_api_app(
     raid_go_url_cb: Callable[[str], Awaitable[str | None]] | None = None,
     raid_requirements_cb: Callable[[str], Awaitable[str]] | None = None,
     raid_oauth_callback_cb: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+    live_active_announcements_cb: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None,
+    live_link_click_cb: Callable[..., Awaitable[dict[str, Any] | None]] | None = None,
 ) -> web.Application:
     server = InternalApiServer(
         token=token,
@@ -1633,6 +1859,8 @@ def build_internal_api_app(
         raid_go_url_cb=raid_go_url_cb,
         raid_requirements_cb=raid_requirements_cb,
         raid_oauth_callback_cb=raid_oauth_callback_cb,
+        live_active_announcements_cb=live_active_announcements_cb,
+        live_link_click_cb=live_link_click_cb,
     )
 
     @web.middleware

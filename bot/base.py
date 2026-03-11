@@ -207,6 +207,12 @@ class TwitchBaseCog(commands.Cog):
             raid_go_url_cb=getattr(self, "_dashboard_raid_go_url", None),
             raid_requirements_cb=getattr(self, "_dashboard_raid_requirements", None),
             raid_oauth_callback_cb=getattr(self, "_dashboard_raid_oauth_callback", None),
+            live_active_announcements_cb=getattr(
+                self,
+                "_dashboard_live_active_announcements",
+                None,
+            ),
+            live_link_click_cb=getattr(self, "_dashboard_live_link_click", None),
         )
 
         # EventSub Webhook Handler – früh initialisieren damit er sowohl im Dashboard

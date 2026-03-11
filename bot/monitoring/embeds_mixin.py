@@ -96,6 +96,66 @@ class _EmbedsMixin:
             return None
         return role_id if role_id > 0 else None
 
+    @staticmethod
+    def _allowed_role_ids_from_allowed_mentions(
+        allowed_mentions: discord.AllowedMentions | None,
+    ) -> list[int]:
+        if allowed_mentions is None:
+            return []
+        resolved = getattr(allowed_mentions, "roles", False)
+        if resolved is False or resolved is None:
+            return []
+
+        role_ids: list[int] = []
+        if isinstance(resolved, (list, tuple, set)):
+            for role_obj in resolved:
+                role_id = getattr(role_obj, "id", None)
+                if role_id is None:
+                    try:
+                        role_id = int(role_obj)
+                    except (TypeError, ValueError):
+                        role_id = None
+                if role_id is None:
+                    continue
+                parsed = int(role_id)
+                if parsed > 0 and parsed not in role_ids:
+                    role_ids.append(parsed)
+        return role_ids
+
+    def _build_twitch_live_tracking_view_spec(
+        self,
+        *,
+        login: str,
+        referral_url: str,
+        tracking_token: str,
+        button_label: str,
+    ) -> dict[str, str] | None:
+        normalized_login = str(login or "").strip().lower()
+        normalized_referral_url = str(referral_url or "").strip()
+        normalized_tracking_token = str(tracking_token or "").strip()
+        if not normalized_login or not normalized_referral_url or not normalized_tracking_token:
+            return None
+        normalized_label = str(button_label or TWITCH_BUTTON_LABEL).strip() or TWITCH_BUTTON_LABEL
+        return {
+            "type": "twitch_live_tracking",
+            "streamer_login": normalized_login,
+            "tracking_token": normalized_tracking_token,
+            "referral_url": normalized_referral_url,
+            "button_label": normalized_label[:80],
+        }
+
+    @staticmethod
+    def _build_link_button_view_spec(url: str, *, label: str) -> dict[str, str] | None:
+        normalized_url = str(url or "").strip()
+        if not normalized_url:
+            return None
+        normalized_label = str(label or TWITCH_VOD_BUTTON_LABEL).strip() or TWITCH_VOD_BUTTON_LABEL
+        return {
+            "type": "link_button",
+            "label": normalized_label[:80],
+            "url": normalized_url,
+        }
+
     def _load_live_announcement_config(self, login: str) -> dict:
         defaults = self._default_live_announcement_config()
         normalized_login = str(login or "").strip().lower()
@@ -786,6 +846,8 @@ class _EmbedsMixin:
                     allowed_role_ids.append(role_id)
         if use_streamer_ping and streamer_role_id and streamer_role_id not in allowed_role_ids:
             allowed_role_ids.append(streamer_role_id)
+        if use_streamer_ping and streamer_role_id and not mention_text:
+            mention_text = f"<@&{streamer_role_id}>"
 
         display_name = stream.get("user_name") or login
         stream_title = (stream.get("title") or "").strip()
@@ -836,6 +898,23 @@ class _EmbedsMixin:
 
     async def _register_persistent_live_views(self) -> None:
         """Re-register live announcement views after a restart."""
+        prefers_master_broker = getattr(
+            self,
+            "_announcement_transport_prefers_master_broker",
+            None,
+        )
+        if callable(prefers_master_broker):
+            try:
+                if prefers_master_broker():
+                    log.debug(
+                        "Skipping local Twitch live view rehydration because master broker owns announcement views."
+                    )
+                    return
+            except Exception:
+                log.debug(
+                    "Could not determine live-view ownership before rehydration",
+                    exc_info=True,
+                )
         if not self._notify_channel_id:
             return
         try:

@@ -41,6 +41,8 @@ class InternalApiRunner:
         raid_go_url_cb: Callable[[str], Awaitable[str | None]] | None = None,
         raid_requirements_cb: Callable[[str], Awaitable[str]] | None = None,
         raid_oauth_callback_cb: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+        live_active_announcements_cb: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None,
+        live_link_click_cb: Callable[..., Awaitable[dict[str, Any] | None]] | None = None,
     ) -> None:
         self.host = host
         self.port = int(port)
@@ -64,6 +66,8 @@ class InternalApiRunner:
         self._raid_go_url_cb = raid_go_url_cb
         self._raid_requirements_cb = raid_requirements_cb
         self._raid_oauth_callback_cb = raid_oauth_callback_cb
+        self._live_active_announcements_cb = live_active_announcements_cb
+        self._live_link_click_cb = live_link_click_cb
 
         self._runner: web.AppRunner | None = None
         self._app: web.Application | None = None
@@ -116,6 +120,8 @@ class InternalApiRunner:
                     raid_go_url_cb=self._raid_go_url_cb,
                     raid_requirements_cb=self._raid_requirements_cb,
                     raid_oauth_callback_cb=self._raid_oauth_callback_cb,
+                    live_active_announcements_cb=self._live_active_announcements_cb,
+                    live_link_click_cb=self._live_link_click_cb,
                 )
                 runner = web.AppRunner(app)
                 await runner.setup()

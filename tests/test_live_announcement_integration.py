@@ -173,6 +173,47 @@ class LiveAnnouncementIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(view)
 
+    async def test_role_id_without_local_guild_still_preserves_ping_in_content(self) -> None:
+        class _HeadlessRoleDummy(_DummyEmbeds):
+            async def _ensure_live_ping_role(self, **kwargs):
+                del kwargs
+                return "", 987654
+
+        dummy = _HeadlessRoleDummy()
+        dummy._payload_override = None
+
+        content, _embed, _view, allowed_mentions, _token = await dummy._build_live_announcement_message(
+            login="tester",
+            stream={"user_name": "Tester", "title": "Ranked", "viewer_count": 12},
+            streamer_entry={},
+            notify_channel=None,
+        )
+
+        self.assertIn("<@&987654>", content)
+        role_ids = dummy._allowed_role_ids_from_allowed_mentions(allowed_mentions)
+        self.assertEqual(role_ids, [987654])
+
+    def test_live_tracking_view_spec_contains_required_fields(self) -> None:
+        dummy = _DummyEmbeds()
+
+        view_spec = dummy._build_twitch_live_tracking_view_spec(
+            login="Tester",
+            referral_url="https://www.twitch.tv/tester?ref=deadlock",
+            tracking_token="abc123",
+            button_label="Jetzt ansehen",
+        )
+
+        self.assertEqual(
+            view_spec,
+            {
+                "type": "twitch_live_tracking",
+                "streamer_login": "tester",
+                "tracking_token": "abc123",
+                "referral_url": "https://www.twitch.tv/tester?ref=deadlock",
+                "button_label": "Jetzt ansehen",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

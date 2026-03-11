@@ -330,6 +330,128 @@ class InternalApiAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_payload.get("error"), "idempotency_conflict")
         self.assertEqual(seen, [("alpha_streamer", False)])
 
+    async def test_live_active_announcements_returns_minimal_entries(self) -> None:
+        async def _live_active_announcements_cb() -> list[dict[str, object]]:
+            return [
+                {
+                    "streamer_login": "partner_one",
+                    "message_id": 123456789,
+                    "tracking_token": "deadbeef1234",
+                    "referral_url": "https://www.twitch.tv/partner_one?ref=DE-Deadlock-Discord",
+                    "button_label": "Auf Twitch ansehen",
+                    "channel_id": 987654321,
+                }
+            ]
+
+        app = build_internal_api_app(
+            token="secret-token",
+            live_active_announcements_cb=_live_active_announcements_cb,
+        )
+        async with TestServer(app) as server:
+            async with TestClient(server) as client:
+                response = await client.get(
+                    f"{INTERNAL_API_BASE_PATH}/live/active-announcements",
+                    headers={INTERNAL_TOKEN_HEADER: "secret-token"},
+                )
+                payload = await response.json()
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            payload,
+            [
+                {
+                    "streamer_login": "partner_one",
+                    "message_id": 123456789,
+                    "tracking_token": "deadbeef1234",
+                    "referral_url": "https://www.twitch.tv/partner_one?ref=DE-Deadlock-Discord",
+                    "button_label": "Auf Twitch ansehen",
+                    "channel_id": 987654321,
+                }
+            ],
+        )
+
+    async def test_live_link_click_replays_idempotent_request(self) -> None:
+        seen: list[dict[str, str | None]] = []
+
+        async def _live_link_click_cb(**kwargs) -> dict[str, object]:
+            seen.append(kwargs)
+            return {"ok": True}
+
+        app = build_internal_api_app(token="secret-token", live_link_click_cb=_live_link_click_cb)
+        async with TestServer(app) as server:
+            async with TestClient(server) as client:
+                headers = {
+                    INTERNAL_TOKEN_HEADER: "secret-token",
+                    IDEMPOTENCY_KEY_HEADER: "idem-live-click-1",
+                }
+                body = {
+                    "streamer_login": "partner_one",
+                    "tracking_token": "deadbeef1234",
+                    "discord_user_id": "12345",
+                    "discord_username": "Viewer One",
+                    "guild_id": "111",
+                    "channel_id": "222",
+                    "message_id": "333",
+                    "source_hint": "discord_button",
+                }
+                first = await client.post(
+                    f"{INTERNAL_API_BASE_PATH}/live/link-click",
+                    headers=headers,
+                    json=body,
+                )
+                first_payload = await first.json()
+
+                second = await client.post(
+                    f"{INTERNAL_API_BASE_PATH}/live/link-click",
+                    headers=headers,
+                    json=body,
+                )
+                second_payload = await second.json()
+
+        self.assertEqual(first.status, 200)
+        self.assertEqual(second.status, 200)
+        self.assertEqual(first_payload, {"ok": True})
+        self.assertEqual(second_payload, {"ok": True})
+        self.assertEqual(second.headers.get("X-Idempotency-Replayed"), "1")
+        self.assertEqual(
+            seen,
+            [
+                {
+                    "streamer_login": "partner_one",
+                    "tracking_token": "deadbeef1234",
+                    "discord_user_id": "12345",
+                    "discord_username": "Viewer One",
+                    "guild_id": "111",
+                    "channel_id": "222",
+                    "message_id": "333",
+                    "source_hint": "discord_button",
+                }
+            ],
+        )
+
+    async def test_live_link_click_rejects_missing_required_fields(self) -> None:
+        app = build_internal_api_app(token="secret-token")
+        async with TestServer(app) as server:
+            async with TestClient(server) as client:
+                response = await client.post(
+                    f"{INTERNAL_API_BASE_PATH}/live/link-click",
+                    headers={INTERNAL_TOKEN_HEADER: "secret-token"},
+                    json={
+                        "streamer_login": "partner_one",
+                        "discord_user_id": "12345",
+                        "discord_username": "Viewer One",
+                        "guild_id": "111",
+                        "channel_id": "222",
+                        "message_id": "333",
+                        "source_hint": "discord_button",
+                    },
+                )
+                payload = await response.json()
+
+        self.assertEqual(response.status, 400)
+        self.assertEqual(payload.get("error"), "bad_request")
+        self.assertEqual(payload.get("message"), "invalid request body")
+
     def test_loopback_host_parser_accepts_ipv6_literals(self) -> None:
         self.assertEqual(InternalApiServer._host_without_port("::1"), "::1")
         self.assertEqual(InternalApiServer._host_without_port("0:0:0:0:0:0:0:1"), "0:0:0:0:0:0:0:1")

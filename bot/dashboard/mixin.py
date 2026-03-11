@@ -6,13 +6,19 @@ import asyncio
 import json
 import os
 from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import aiohttp
 import discord
 from aiohttp import web
 
 from ..analytics.backend_extended import AnalyticsBackendExtended
-from ..core.constants import TWITCH_TARGET_GAME_NAME, log
+from ..core.constants import (
+    TWITCH_BUTTON_LABEL,
+    TWITCH_DISCORD_REF_CODE,
+    TWITCH_TARGET_GAME_NAME,
+    log,
+)
 from ..discord_role_sync import normalize_discord_user_id, sync_streamer_role
 from ..raid.integration_state import RaidIntegrationStateResolver
 from ..storage import pg as storage
@@ -43,11 +49,183 @@ def _row_to_dict(row) -> dict:
 class TwitchDashboardMixin:
     """Expose the aiohttp dashboard endpoints."""
 
+    @staticmethod
+    def _dashboard_build_referral_url(login: str) -> str:
+        normalized_login = str(login or "").strip()
+        base_url = (
+            f"https://www.twitch.tv/{normalized_login}"
+            if normalized_login
+            else "https://www.twitch.tv/"
+        )
+        ref_code = (TWITCH_DISCORD_REF_CODE or "").strip()
+        if not ref_code:
+            return base_url
+        parsed = urlparse(base_url)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        query["ref"] = ref_code
+        return urlunparse(parsed._replace(query=urlencode(query)))
+
+    def _dashboard_live_button_label(self, login: str) -> str:
+        normalized_login = self._normalize_login(login)
+        if not normalized_login:
+            return TWITCH_BUTTON_LABEL
+        try:
+            with storage.get_conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT config_json
+                    FROM twitch_live_announcement_configs
+                    WHERE LOWER(streamer_login) = LOWER(?)
+                    LIMIT 1
+                    """,
+                    (normalized_login,),
+                ).fetchone()
+        except Exception:
+            log.debug(
+                "Could not load live announcement label config for %s",
+                normalized_login,
+                exc_info=True,
+            )
+            return TWITCH_BUTTON_LABEL
+
+        if not row:
+            return TWITCH_BUTTON_LABEL
+
+        raw_json = row[0] if not hasattr(row, "keys") else row["config_json"]
+        text = str(raw_json or "").strip()
+        if not text:
+            return TWITCH_BUTTON_LABEL
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return TWITCH_BUTTON_LABEL
+        if not isinstance(parsed, dict):
+            return TWITCH_BUTTON_LABEL
+
+        button_cfg = parsed.get("button") if isinstance(parsed.get("button"), dict) else {}
+        label = str(button_cfg.get("label") or button_cfg.get("label_template") or "").strip()
+        return label[:80] if label else TWITCH_BUTTON_LABEL
+
     async def _dashboard_add(self, login: str, require_link: bool) -> str:
         return await self._cmd_add(login, require_link)
 
     async def _dashboard_remove(self, login: str) -> str:
         return await self._cmd_remove(login)
+
+    async def _dashboard_live_active_announcements(self) -> list[dict[str, object]]:
+        channel_id = int(getattr(self, "_notify_channel_id", 0) or 0)
+        if channel_id <= 0:
+            return []
+
+        with storage.get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT streamer_login, last_discord_message_id, last_tracking_token
+                FROM twitch_live_state
+                WHERE last_discord_message_id IS NOT NULL
+                  AND last_tracking_token IS NOT NULL
+                ORDER BY LOWER(streamer_login)
+                """
+            ).fetchall()
+
+        announcements: list[dict[str, object]] = []
+        for row in rows:
+            streamer_login = self._normalize_login(
+                row["streamer_login"] if hasattr(row, "keys") else row[0]
+            )
+            message_id_raw = row["last_discord_message_id"] if hasattr(row, "keys") else row[1]
+            tracking_token_raw = row["last_tracking_token"] if hasattr(row, "keys") else row[2]
+            if not streamer_login:
+                continue
+            tracking_token = str(tracking_token_raw or "").strip()
+            if not tracking_token:
+                continue
+            try:
+                message_id = int(str(message_id_raw or "").strip())
+            except (TypeError, ValueError):
+                continue
+            if message_id <= 0:
+                continue
+            announcements.append(
+                {
+                    "streamer_login": streamer_login,
+                    "message_id": message_id,
+                    "tracking_token": tracking_token,
+                    "referral_url": self._dashboard_build_referral_url(streamer_login),
+                    "button_label": self._dashboard_live_button_label(streamer_login),
+                    "channel_id": channel_id,
+                }
+            )
+        return announcements
+
+    async def _dashboard_live_link_click(
+        self,
+        *,
+        streamer_login: str,
+        tracking_token: str,
+        discord_user_id: str,
+        discord_username: str,
+        guild_id: str | None,
+        channel_id: str,
+        message_id: str,
+        source_hint: str,
+    ) -> dict[str, object]:
+        normalized_login = self._normalize_login(streamer_login)
+        if not normalized_login:
+            raise ValueError("invalid streamer_login")
+
+        tracking_token_value = str(tracking_token or "").strip()
+        if not tracking_token_value:
+            raise ValueError("invalid tracking_token")
+
+        discord_user_id_value = str(discord_user_id or "").strip()
+        if not discord_user_id_value.isdigit():
+            raise ValueError("invalid discord_user_id")
+
+        channel_id_value = str(channel_id or "").strip()
+        message_id_value = str(message_id or "").strip()
+        guild_id_value = str(guild_id or "").strip() or None
+        if not channel_id_value.isdigit():
+            raise ValueError("invalid channel_id")
+        if not message_id_value.isdigit():
+            raise ValueError("invalid message_id")
+        if guild_id_value is not None and not guild_id_value.isdigit():
+            raise ValueError("invalid guild_id")
+
+        clicked_at = datetime.now(tz=UTC).isoformat(timespec="seconds")
+        ref_code = (TWITCH_DISCORD_REF_CODE or "").strip() or None
+
+        with storage.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO twitch_link_clicks (
+                    clicked_at,
+                    streamer_login,
+                    tracking_token,
+                    discord_user_id,
+                    discord_username,
+                    guild_id,
+                    channel_id,
+                    message_id,
+                    ref_code,
+                    source_hint
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    clicked_at,
+                    normalized_login,
+                    tracking_token_value,
+                    discord_user_id_value,
+                    str(discord_username or "").strip(),
+                    guild_id_value,
+                    channel_id_value,
+                    message_id_value,
+                    ref_code,
+                    str(source_hint or "").strip(),
+                ),
+            )
+
+        return {"ok": True}
 
     async def _dashboard_list(self):
         # kleine Retry-Logik gegen gelegentliche "database is locked" Antworten
