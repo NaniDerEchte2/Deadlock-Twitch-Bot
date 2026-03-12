@@ -33,8 +33,9 @@ TWITCH_ALERT_MENTION = ""  # z. B. "<@123>" oder "<@&456>"
 # Öffentlicher Statistik-Kanal (nur dort reagiert !twl)
 TWITCH_STATS_CHANNEL_IDS = [1428062025145385111, 1374364800817303632]
 
-# Stats/Sampling: alle N Ticks (Tick=60s) in DB loggen
-TWITCH_LOG_EVERY_N_TICKS = 5
+# Stats/Sampling: alle N Poll-Ticks in DB loggen.
+# Default: 1 Tick bei 15s Polling = 15s Stats-Intervall.
+TWITCH_LOG_EVERY_N_TICKS = 1
 
 # Zusätzliche Streams aus der Deadlock-Kategorie für Statistiken loggen (Maximalanzahl je Tick)
 TWITCH_CATEGORY_SAMPLE_LIMIT = 400

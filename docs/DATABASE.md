@@ -63,7 +63,7 @@ Aktueller Live-Status pro Streamer (1 Zeile pro Streamer).
 ---
 
 ### twitch_stats_tracked
-Viewer-Snapshots der ueberwachten Partner (~41K Zeilen, alle 75s).
+Viewer-Snapshots der ueberwachten Partner (Default: jeder Poll-Tick, also 15s).
 
 | Spalte | Typ | Beschreibung |
 |--------|-----|--------------|
@@ -82,7 +82,7 @@ Viewer-Snapshots der ueberwachten Partner (~41K Zeilen, alle 75s).
 ---
 
 ### twitch_stats_category
-Alle Deadlock-Kategorie-Streamer-Snapshots (~139K Zeilen, ~280 Streamer).
+Alle Deadlock-Kategorie-Streamer-Snapshots (Default: jeder Poll-Tick, also 15s).
 
 | Spalte | Typ | Beschreibung |
 |--------|-----|--------------|

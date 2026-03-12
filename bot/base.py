@@ -112,7 +112,7 @@ class TwitchBaseCog(commands.Cog):
         self._category_id: str | None = None
         self._language_filters = self._parse_language_filters(TWITCH_LANGUAGE)
         self._tick_count = 0
-        self._log_every_n = max(1, int(TWITCH_LOG_EVERY_N_TICKS or 5))
+        self._log_every_n = max(1, int(TWITCH_LOG_EVERY_N_TICKS or 1))
         self._category_sample_limit = max(50, int(TWITCH_CATEGORY_SAMPLE_LIMIT or 400))
         self._poll_interval_seconds = max(5, min(3600, int(POLL_INTERVAL_SECONDS or 15)))
         self._poll_interval_resync_interval_seconds = 60.0

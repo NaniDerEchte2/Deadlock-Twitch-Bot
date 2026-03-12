@@ -59,8 +59,8 @@ bot/dashboard_service/__main__.py
 | Loop | Intervall | Datei | Zweck |
 |------|-----------|-------|-------|
 | Haupt-Tick | 15s (`POLL_INTERVAL_SECONDS`) | bot/monitoring/monitoring.py | Live-Status, Viewer, Stats |
-| Stats-Log | alle 5 Ticks (75s) | bot/monitoring/monitoring.py | Schreibt in twitch_stats_tracked |
-| Kategorie-Sample | alle 5 Ticks | bot/monitoring/monitoring.py | Schreibt in twitch_stats_category |
+| Stats-Log | jeder Tick (Default 15s) | bot/monitoring/monitoring.py | Schreibt in twitch_stats_tracked |
+| Kategorie-Sample | jeder Tick (Default 15s) | bot/monitoring/monitoring.py | Schreibt in twitch_stats_category |
 | EventSub WS | persistent | bot/monitoring/eventsub_ws.py | Bits, Follows, Raids, Subs, etc. |
 | EventSub Webhook | pro Event | bot/monitoring/eventsub_webhook.py | Empfaengt Twitch-Events |
 | Analytics-Hintergrund | varies | bot/analytics/mixin.py | Engagement-Metriken aufbauen |

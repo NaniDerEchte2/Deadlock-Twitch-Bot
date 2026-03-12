@@ -141,4 +141,4 @@ Alle wichtigen Konstanten in `bot/core/constants.py`:
 | `TWITCH_STATS_CHANNEL_IDS` | [1428...] | !twl-Command reagiert hier |
 | `TWITCH_TARGET_GAME_NAME` | "Deadlock" | Ueberwachtes Spiel |
 | `TWITCH_CATEGORY_SAMPLE_LIMIT` | 400 | Max Streamer pro Kategorie-Tick |
-| `TWITCH_LOG_EVERY_N_TICKS` | 5 | Stats alle N Ticks (=75s) loggen |
+| `TWITCH_LOG_EVERY_N_TICKS` | 1 | Stats jeden Tick loggen (=15s bei Default-Polling) |
