@@ -70,6 +70,7 @@ Alle HTTP-Routes des Systems. Zugriffslevel: **A** = Admin only, **S** = Streame
 | GET | `/twitch/abbo/rechnung` | S | routes_mixin.py |
 | GET | `/twitch/abbo/stripe-settings` | S | routes_mixin.py |
 | POST | `/twitch/abbo/promo-settings` | S | routes_mixin.py |
+| POST | `/twitch/abbo/lurker-tax-settings` | S | routes_mixin.py |
 | POST | `/twitch/abbo/promo-message` | S | routes_mixin.py |
 
 ### Legal (Public)

@@ -19,9 +19,181 @@ from .constants import (
 )
 
 log = logging.getLogger("TwitchStreams.ChatBot")
+_RAW_CHAT_HEALTH_UNSET = object()
 
 
 class ModerationMixin:
+    @staticmethod
+    def _chat_health_message_shape(
+        *,
+        author_present: bool,
+        chatter_login: str,
+        content: str,
+        message_id: str | None,
+    ) -> str:
+        content_state = "text" if str(content or "").strip() else "empty"
+        return (
+            f"author:{'present' if author_present else 'missing'},"
+            f"login:{'present' if chatter_login else 'missing'},"
+            f"content:{content_state},"
+            f"message_id:{'present' if message_id else 'missing'}"
+        )
+
+    def _log_chat_health_event(
+        self,
+        *,
+        reason: str,
+        channel: str,
+        resolved_session_id: int | None,
+        partner_gate: str,
+        target_game_gate: str,
+        message_shape: str,
+        exception: Exception | None = None,
+    ) -> None:
+        cache = getattr(self, "_chat_health_log_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._chat_health_log_cache = cache
+
+        now = time.monotonic()
+        exception_type = exception.__class__.__name__ if exception is not None else "-"
+        cache_key = (
+            str(reason),
+            str(channel or "-"),
+            str(resolved_session_id or "-"),
+            str(partner_gate),
+            str(target_game_gate),
+            str(message_shape),
+            exception_type,
+        )
+        last_logged = float(cache.get(cache_key, 0.0) or 0.0)
+        if now - last_logged < 60.0:
+            return
+        cache[cache_key] = now
+        if len(cache) > 4096:
+            stale_before = now - 3600.0
+            stale_keys = [key for key, ts in cache.items() if float(ts or 0.0) < stale_before]
+            for key in stale_keys:
+                cache.pop(key, None)
+
+        # Expected skips (non-partner, wrong game, known bot) are normal
+        # filtering — no log output needed.
+        if reason in {"skip_partner_gate", "skip_target_game_gate", "skip_known_chat_bot"} and exception is None:
+            return
+
+        log.warning(
+            "Chat health %s channel=%s resolved_session_id=%s partner_gate=%s "
+            "target_game_gate=%s message_shape=%s exception_type=%s",
+            reason,
+            channel or "-",
+            resolved_session_id,
+            partner_gate,
+            target_game_gate,
+            message_shape,
+            exception_type,
+            exc_info=exception,
+        )
+
+    @staticmethod
+    def _truncate_raw_chat_error(value: str | None, *, limit: int = 300) -> str | None:
+        text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+        if not text:
+            return None
+        return text[:limit]
+
+    def _upsert_raw_chat_ingest_health_row(
+        self,
+        conn,
+        streamer_login: str,
+        *,
+        last_raw_chat_message_at: str | None = None,
+        last_raw_chat_insert_ok_at: str | None = None,
+        last_raw_chat_insert_error_at: str | None = None,
+        last_raw_chat_error: object = _RAW_CHAT_HEALTH_UNSET,
+    ) -> None:
+        updated_at = datetime.now(UTC).isoformat(timespec="seconds")
+        should_update_error = last_raw_chat_error is not _RAW_CHAT_HEALTH_UNSET
+        error_value = (
+            self._truncate_raw_chat_error(str(last_raw_chat_error))
+            if should_update_error and last_raw_chat_error is not None
+            else None
+        )
+        lag_seconds = 0 if any(
+            (last_raw_chat_message_at, last_raw_chat_insert_ok_at, last_raw_chat_insert_error_at)
+        ) else None
+        conn.execute(
+            """
+            INSERT INTO twitch_raw_chat_ingest_health (
+                streamer_login,
+                last_raw_chat_message_at,
+                last_raw_chat_insert_ok_at,
+                last_raw_chat_insert_error_at,
+                last_raw_chat_error,
+                raw_chat_lag_seconds,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (streamer_login) DO UPDATE SET
+                last_raw_chat_message_at = COALESCE(
+                    EXCLUDED.last_raw_chat_message_at,
+                    twitch_raw_chat_ingest_health.last_raw_chat_message_at
+                ),
+                last_raw_chat_insert_ok_at = COALESCE(
+                    EXCLUDED.last_raw_chat_insert_ok_at,
+                    twitch_raw_chat_ingest_health.last_raw_chat_insert_ok_at
+                ),
+                last_raw_chat_insert_error_at = COALESCE(
+                    EXCLUDED.last_raw_chat_insert_error_at,
+                    twitch_raw_chat_ingest_health.last_raw_chat_insert_error_at
+                ),
+                last_raw_chat_error = CASE
+                    WHEN ? THEN ?
+                    ELSE twitch_raw_chat_ingest_health.last_raw_chat_error
+                END,
+                raw_chat_lag_seconds = COALESCE(
+                    EXCLUDED.raw_chat_lag_seconds,
+                    twitch_raw_chat_ingest_health.raw_chat_lag_seconds
+                ),
+                updated_at = EXCLUDED.updated_at
+            """,
+            (
+                streamer_login,
+                last_raw_chat_message_at,
+                last_raw_chat_insert_ok_at,
+                last_raw_chat_insert_error_at,
+                error_value if should_update_error else None,
+                lag_seconds,
+                updated_at,
+                should_update_error,
+                error_value,
+            ),
+        )
+
+    def _persist_raw_chat_ingest_health(
+        self,
+        streamer_login: str,
+        *,
+        last_raw_chat_message_at: str | None = None,
+        last_raw_chat_insert_ok_at: str | None = None,
+        last_raw_chat_insert_error_at: str | None = None,
+        last_raw_chat_error: object = _RAW_CHAT_HEALTH_UNSET,
+    ) -> None:
+        try:
+            with get_conn() as conn:
+                self._upsert_raw_chat_ingest_health_row(
+                    conn,
+                    streamer_login,
+                    last_raw_chat_message_at=last_raw_chat_message_at,
+                    last_raw_chat_insert_ok_at=last_raw_chat_insert_ok_at,
+                    last_raw_chat_insert_error_at=last_raw_chat_insert_error_at,
+                    last_raw_chat_error=last_raw_chat_error,
+                )
+        except Exception:
+            log.debug(
+                "Konnte Raw-Chat-Ingest-Health nicht persistieren fuer %s",
+                streamer_login,
+                exc_info=True,
+            )
+
     @staticmethod
     def _resolve_message_channel(message):
         """Best-effort channel resolution for TwitchIO 2.x and 3.x messages."""
@@ -1227,154 +1399,261 @@ class ModerationMixin:
         channel = self._resolve_message_channel(message)
         channel_name = getattr(channel, "name", "") or getattr(channel, "login", "") or ""
         login = channel_name.lstrip("#").lower()
-        if not login:
-            return
-        if not self._is_partner_channel_for_chat_tracking(login):
-            return
-
+        resolved_session_id: int | None = None
+        partner_gate = "unknown"
+        target_game_gate = "unknown"
         author = getattr(message, "author", None)
         chatter_login = (getattr(author, "name", "") or "").lower()
+        raw_content = message.content or ""
+        if not isinstance(raw_content, str):
+            raw_content = str(raw_content)
+        message_id = self._extract_message_id(message)
+        message_shape = self._chat_health_message_shape(
+            author_present=author is not None,
+            chatter_login=chatter_login,
+            content=raw_content,
+            message_id=message_id,
+        )
+
+        if not login:
+            self._log_chat_health_event(
+                reason="skip_missing_channel",
+                channel=login,
+                resolved_session_id=resolved_session_id,
+                partner_gate=partner_gate,
+                target_game_gate=target_game_gate,
+                message_shape=message_shape,
+            )
+            return
+
+        if not self._is_partner_channel_for_chat_tracking(login):
+            partner_gate = "blocked"
+            self._log_chat_health_event(
+                reason="skip_partner_gate",
+                channel=login,
+                resolved_session_id=resolved_session_id,
+                partner_gate=partner_gate,
+                target_game_gate=target_game_gate,
+                message_shape=message_shape,
+            )
+            return
+
+        partner_gate = "allowed"
+        ts_iso = datetime.now(UTC).isoformat(timespec="seconds")
         if not chatter_login:
+            self._persist_raw_chat_ingest_health(login, last_raw_chat_message_at=ts_iso)
+            self._log_chat_health_event(
+                reason="skip_missing_chatter_login",
+                channel=login,
+                resolved_session_id=resolved_session_id,
+                partner_gate=partner_gate,
+                target_game_gate=target_game_gate,
+                message_shape=message_shape,
+            )
             return
         if is_known_chat_bot(chatter_login):
+            self._persist_raw_chat_ingest_health(login, last_raw_chat_message_at=ts_iso)
+            self._log_chat_health_event(
+                reason="skip_known_chat_bot",
+                channel=login,
+                resolved_session_id=resolved_session_id,
+                partner_gate=partner_gate,
+                target_game_gate=target_game_gate,
+                message_shape=message_shape,
+            )
             return
         chatter_id = str(getattr(author, "id", "") or "") or None
-        content = message.content or ""
-        if not isinstance(content, str):
-            content = str(content)
+        content = raw_content
         if "\x00" in content:
             content = content.replace("\x00", "")
-        message_id = self._extract_message_id(message)
         is_command = content.strip().startswith(self.prefix or "!")
 
+        try:
+            self._record_raw_chat_message(login)
+        except Exception:
+            log.debug("Raw-Chat-Activity konnte nicht erfasst werden", exc_info=True)
+
         session_id = self._resolve_session_id(login)
-        if session_id is None:
-            return
-        if not self._is_target_game_live_for_chat(login, session_id):
-            return
-
-        ts_iso = datetime.now(UTC).isoformat(timespec="seconds")
-
-        with get_conn() as conn:
-            # Rohes Chat-Event inkl. Klartext-Nachricht
-            conn.execute(
-                """
-                INSERT INTO twitch_chat_messages (
-                    session_id,
-                    streamer_login,
-                    chatter_login,
-                    chatter_id,
-                    message_id,
-                    message_ts,
-                    is_command,
-                    content
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    session_id,
-                    login,
-                    chatter_login,
-                    chatter_id,
-                    message_id,
-                    ts_iso,
-                    1 if is_command else 0,
-                    content,
-                ),
+        resolved_session_id = session_id
+        if resolved_session_id is None:
+            target_game_gate = "missing_session"
+            self._persist_raw_chat_ingest_health(login, last_raw_chat_message_at=ts_iso)
+            self._log_chat_health_event(
+                reason="skip_missing_session",
+                channel=login,
+                resolved_session_id=resolved_session_id,
+                partner_gate=partner_gate,
+                target_game_gate=target_game_gate,
+                message_shape=message_shape,
             )
+            return
+        if not self._is_target_game_live_for_chat(login, resolved_session_id):
+            target_game_gate = "blocked"
+            self._persist_raw_chat_ingest_health(login, last_raw_chat_message_at=ts_iso)
+            self._log_chat_health_event(
+                reason="skip_target_game_gate",
+                channel=login,
+                resolved_session_id=resolved_session_id,
+                partner_gate=partner_gate,
+                target_game_gate=target_game_gate,
+                message_shape=message_shape,
+            )
+            return
+        target_game_gate = "allowed"
 
-            # Rollup pro Session
-            existing = conn.execute(
-                """
-                SELECT messages, is_first_time_streamer, seen_via_chatters_api
-                  FROM twitch_session_chatters
-                 WHERE session_id = ? AND chatter_login = ?
-                """,
-                (session_id, chatter_login),
-            ).fetchone()
-
-            rollup = conn.execute(
-                """
-                SELECT total_messages, total_sessions
-                  FROM twitch_chatter_rollup
-                 WHERE streamer_login = ? AND chatter_login = ?
-                """,
-                (login, chatter_login),
-            ).fetchone()
-
-            is_first_global = 0 if rollup else 1
-            if rollup:
-                total_sessions_inc = 1 if existing is None else 0
-                conn.execute(
-                    """
-                    UPDATE twitch_chatter_rollup
-                       SET total_messages = total_messages + 1,
-                           total_sessions = total_sessions + ?,
-                           last_seen_at = ?,
-                           chatter_id = COALESCE(chatter_id, ?)
-                     WHERE streamer_login = ? AND chatter_login = ?
-                    """,
-                    (total_sessions_inc, ts_iso, chatter_id, login, chatter_login),
-                )
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO twitch_chatter_rollup (
-                        streamer_login, chatter_login, chatter_id, first_seen_at, last_seen_at,
-                        total_messages, total_sessions
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (login, chatter_login, chatter_id, ts_iso, ts_iso, 1, 1),
+        try:
+            with get_conn() as conn:
+                self._upsert_raw_chat_ingest_health_row(
+                    conn,
+                    login,
+                    last_raw_chat_message_at=ts_iso,
                 )
 
-            if existing:
-                existing_messages = int(existing[0] or 0)
-                existing_first_global = existing[1]
-                existing_seen_via_api = int(existing[2] or 0)
-
-                # Lurker rows created by chatters-api placeholders must be re-labeled
-                # when the first real chat message arrives.
-                if existing_seen_via_api and existing_messages == 0:
-                    resolved_first_global = is_first_global
-                elif existing_first_global is None:
-                    resolved_first_global = is_first_global
-                else:
-                    resolved_first_global = int(existing_first_global)
-
+                # Rohes Chat-Event inkl. Klartext-Nachricht
                 conn.execute(
                     """
-                    UPDATE twitch_session_chatters
-                       SET messages = messages + 1,
-                           last_seen_at = ?,
-                           seen_via_chatters_api = 0,
-                           is_first_time_streamer = ?,
-                           chatter_id = COALESCE(chatter_id, ?)
-                     WHERE session_id = ? AND chatter_login = ?
-                    """,
-                    (
-                        ts_iso,
-                        int(resolved_first_global),
-                        chatter_id,
+                    INSERT INTO twitch_chat_messages (
                         session_id,
+                        streamer_login,
                         chatter_login,
-                    ),
-                )
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO twitch_session_chatters (
-                        session_id, streamer_login, chatter_login, chatter_id, first_message_at,
-                        messages, is_first_time_streamer, seen_via_chatters_api, last_seen_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+                        chatter_id,
+                        message_id,
+                        message_ts,
+                        is_command,
+                        content
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        session_id,
+                        resolved_session_id,
                         login,
                         chatter_login,
                         chatter_id,
+                        message_id,
                         ts_iso,
-                        1,
-                        is_first_global,
-                        ts_iso,
+                        is_command,
+                        content,
                     ),
                 )
+
+                # Rollup pro Session
+                existing = conn.execute(
+                    """
+                    SELECT messages, is_first_time_streamer, seen_via_chatters_api
+                      FROM twitch_session_chatters
+                     WHERE session_id = ? AND chatter_login = ?
+                    """,
+                    (resolved_session_id, chatter_login),
+                ).fetchone()
+
+                rollup = conn.execute(
+                    """
+                    SELECT total_messages, total_sessions
+                      FROM twitch_chatter_rollup
+                     WHERE streamer_login = ? AND chatter_login = ?
+                    """,
+                    (login, chatter_login),
+                ).fetchone()
+
+                is_first_global = 0 if rollup else 1
+                if rollup:
+                    total_sessions_inc = 1 if existing is None else 0
+                    conn.execute(
+                        """
+                        UPDATE twitch_chatter_rollup
+                           SET total_messages = total_messages + 1,
+                               total_sessions = total_sessions + ?,
+                               last_seen_at = ?,
+                               chatter_id = COALESCE(chatter_id, ?)
+                         WHERE streamer_login = ? AND chatter_login = ?
+                        """,
+                        (total_sessions_inc, ts_iso, chatter_id, login, chatter_login),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO twitch_chatter_rollup (
+                            streamer_login, chatter_login, chatter_id, first_seen_at, last_seen_at,
+                            total_messages, total_sessions
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (login, chatter_login, chatter_id, ts_iso, ts_iso, 1, 1),
+                    )
+
+                if existing:
+                    existing_messages = int(existing[0] or 0)
+                    existing_first_global = existing[1]
+                    existing_seen_via_api = int(existing[2] or 0)
+
+                    # Lurker rows created by chatters-api placeholders must be re-labeled
+                    # when the first real chat message arrives.
+                    if existing_seen_via_api and existing_messages == 0:
+                        resolved_first_global = is_first_global
+                    elif existing_first_global is None:
+                        resolved_first_global = is_first_global
+                    else:
+                        resolved_first_global = int(existing_first_global)
+
+                    conn.execute(
+                        """
+                        UPDATE twitch_session_chatters
+                           SET messages = messages + 1,
+                               last_seen_at = ?,
+                               seen_via_chatters_api = ?,
+                               is_first_time_streamer = ?,
+                               chatter_id = COALESCE(chatter_id, ?)
+                         WHERE session_id = ? AND chatter_login = ?
+                        """,
+                        (
+                            ts_iso,
+                            False,
+                            bool(resolved_first_global),
+                            chatter_id,
+                            resolved_session_id,
+                            chatter_login,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO twitch_session_chatters (
+                            session_id, streamer_login, chatter_login, chatter_id, first_message_at,
+                            messages, is_first_time_streamer, seen_via_chatters_api, last_seen_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            resolved_session_id,
+                            login,
+                            chatter_login,
+                            chatter_id,
+                            ts_iso,
+                            1,
+                            bool(is_first_global),
+                            False,
+                            ts_iso,
+                        ),
+                    )
+
+                self._upsert_raw_chat_ingest_health_row(
+                    conn,
+                    login,
+                    last_raw_chat_insert_ok_at=ts_iso,
+                    last_raw_chat_error=None,
+                )
+        except Exception as exc:
+            self._persist_raw_chat_ingest_health(
+                login,
+                last_raw_chat_message_at=ts_iso,
+                last_raw_chat_insert_error_at=ts_iso,
+                last_raw_chat_error=str(exc),
+            )
+            self._log_chat_health_event(
+                reason="insert_failed",
+                channel=login,
+                resolved_session_id=resolved_session_id,
+                partner_gate=partner_gate,
+                target_game_gate=target_game_gate,
+                message_shape=message_shape,
+                exception=exc,
+            )
+            raise

@@ -421,7 +421,7 @@ ALTER TABLE twitch_channel_updates SET (timescaledb.compress, timescaledb.compre
 SELECT add_compression_policy('twitch_channel_updates', INTERVAL '7 days', if_not_exists => TRUE);
 
 CREATE TABLE IF NOT EXISTS twitch_raid_history (
-    id                       BIGSERIAL PRIMARY KEY,
+    id                       BIGSERIAL NOT NULL,
     from_broadcaster_id      TEXT NOT NULL,
     from_broadcaster_login   TEXT NOT NULL,
     to_broadcaster_id        TEXT NOT NULL,
@@ -429,13 +429,15 @@ CREATE TABLE IF NOT EXISTS twitch_raid_history (
     viewer_count             INTEGER DEFAULT 0,
     stream_duration_sec      INTEGER,
     reason                   TEXT,
-    executed_at              TIMESTAMPTZ DEFAULT NOW(),
+    executed_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     success                  BOOLEAN DEFAULT TRUE,
     error_message            TEXT,
     target_stream_started_at TIMESTAMPTZ,
     candidates_count         INTEGER DEFAULT 0
 );
 SELECT create_hypertable('twitch_raid_history', 'executed_at', if_not_exists => TRUE, migrate_data => TRUE, chunk_time_interval => INTERVAL '7 days');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_raid_history_id_executed_at
+    ON twitch_raid_history(id, executed_at);
 ALTER TABLE twitch_raid_history SET (timescaledb.compress, timescaledb.compress_segmentby = 'from_broadcaster_login', timescaledb.compress_orderby = 'executed_at DESC');
 SELECT add_compression_policy('twitch_raid_history', INTERVAL '7 days', if_not_exists => TRUE);
 
@@ -657,7 +659,7 @@ CREATE INDEX IF NOT EXISTS idx_twitch_global_promo_modes_updated_at
 
 -- ========= Raid Retention Rollup (computed, not a hypertable) =========
 CREATE TABLE IF NOT EXISTS twitch_raid_retention (
-    raid_id                BIGINT PRIMARY KEY REFERENCES twitch_raid_history(id) ON DELETE CASCADE,
+    raid_id                BIGINT NOT NULL,
     from_broadcaster_login TEXT NOT NULL,
     to_broadcaster_login   TEXT NOT NULL,
     viewer_count_sent      INTEGER NOT NULL,
@@ -669,8 +671,15 @@ CREATE TABLE IF NOT EXISTS twitch_raid_retention (
     known_from_raider      INTEGER,
     new_to_target          INTEGER,
     new_chatters           INTEGER,
-    computed_at            TIMESTAMPTZ DEFAULT NOW()
+    computed_at            TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (raid_id, executed_at),
+    CONSTRAINT twitch_raid_retention_raid_history_ref_fkey
+        FOREIGN KEY (raid_id, executed_at)
+        REFERENCES twitch_raid_history(id, executed_at)
+        ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_twitch_raid_retention_raid_id
+    ON twitch_raid_retention(raid_id);
 
 -- ========= Housekeeping =========
 ANALYZE;

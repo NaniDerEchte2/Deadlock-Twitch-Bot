@@ -1,5 +1,15 @@
 # Streamer-Dokumentation
 
+> Hinweis: Die aktuelle, gegen den Code gepruefte Streamer-Doku liegt unter [docs/streamer/README.md](streamer/README.md).
+>
+> Empfohlene Einstiege:
+> - [Streamer Guide](streamer/README.md)
+> - [Dashboard und Seiten](streamer/DASHBOARD.md)
+> - [Commands](streamer/COMMANDS.md)
+> - [Features und Workflows](streamer/FEATURES.md)
+>
+> Der restliche Inhalt dieser Datei ist eine aeltere Uebersicht und kann in Details hinter dem aktuellen Stand zurueckliegen.
+
 Alle Features fuer verifizierte Streamer-Partner. Zugang nach Discord-Link + Admin-Verifikation.
 
 ## Dashboard
@@ -126,8 +136,10 @@ Konfiguriert wann und wie Go-Live-Posts im Discord erscheinen.
 
 ### Promo-Mode (Streamer)
 - POST `/twitch/abbo/promo-settings` — Promo-Einstellungen
+- POST `/twitch/abbo/lurker-tax-settings` — Lurker Steuer aktivieren/deaktivieren
 - POST `/twitch/abbo/promo-message` — Promo-Nachricht konfigurieren
 - Validiert per `bot/promo_mode.py` → `validate_streamer_promo_message()`
+- Siehe auch `docs/LURKER_TAX.md`
 
 ---
 

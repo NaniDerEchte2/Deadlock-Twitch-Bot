@@ -17,6 +17,7 @@ from urllib.parse import urlencode, urlsplit
 from aiohttp import web
 
 from ..core.chat_bots import build_known_chat_bot_not_in_clause
+from ..core.constants import TWITCH_DISCORD_REF_CODE
 from ..logging_setup import log_path
 from .api_ai import _AnalyticsAIMixin
 from .api_admin import _AnalyticsAdminMixin
@@ -44,6 +45,54 @@ _KNOWN_BILLING_PLAN_IDS = {
     "analysis_dashboard",
     "bundle_analysis_raid_boost",
 }
+_AFFILIATE_REVENUE_STATUSES: tuple[str, ...] = ("pending", "transferred")
+_AFFILIATE_REVENUE_STATUS_PLACEHOLDERS = ", ".join(
+    ["?"] * len(_AFFILIATE_REVENUE_STATUSES)
+)
+
+# ---------------------------------------------------------------------------
+# Plan-tier mapping (Phase 3B)
+# ---------------------------------------------------------------------------
+PLAN_TIER_MAP = {
+    "raid_free": "free",
+    "raid_boost": "basic",
+    "analysis_dashboard": "extended",
+    "bundle_analysis_raid_boost": "extended",
+}
+
+_PLAN_NAME_MAP = {
+    "raid_free": "Free",
+    "raid_boost": "Basic",
+    "analysis_dashboard": "Erweitert",
+    "bundle_analysis_raid_boost": "Erweitert (Bundle)",
+}
+
+
+def _get_plan_tier(plan_id: str | None) -> str:
+    """Map plan_id to tier: free, basic, or extended."""
+    if not plan_id:
+        return "free"
+    return PLAN_TIER_MAP.get(plan_id, "free")
+
+
+def _get_plan_name(plan_id: str | None) -> str:
+    """Map plan_id to a human-readable name."""
+    if not plan_id:
+        return "Free"
+    return _PLAN_NAME_MAP.get(plan_id, "Free")
+
+
+def _build_affiliate_referral_url(login: str) -> str:
+    normalized_login = str(login or "").strip()
+    base_url = (
+        f"https://www.twitch.tv/{normalized_login}"
+        if normalized_login
+        else "https://www.twitch.tv/"
+    )
+    ref_code = str(TWITCH_DISCORD_REF_CODE or "").strip()
+    if not ref_code:
+        return base_url
+    return f"{base_url}?{urlencode({'ref': ref_code})}"
 
 
 def _row_get_value(row: Any, key: str, index: int, default: Any = None) -> Any:
@@ -118,6 +167,217 @@ def _get_plan_for_login(login: str) -> str:
             (login,),
         ).fetchone()
     return str(_row_get_value(row, "plan_id", 0, "raid_free") or "raid_free")
+
+
+def _get_plan_details_for_login(login: str) -> dict[str, Any]:
+    """Return detailed plan info for *login* (plan_id, expires_at, source)."""
+    plan_id = "raid_free"
+    expires_at: str | None = None
+    source = "default"
+
+    with storage.get_conn() as conn:
+        # 1. Check manual override
+        try:
+            manual_row = conn.execute(
+                """
+                SELECT manual_plan_id, manual_plan_expires_at
+                FROM streamer_plans
+                WHERE LOWER(twitch_login) = LOWER(?)
+                LIMIT 1
+                """,
+                (login,),
+            ).fetchone()
+            if manual_row:
+                mid = str(_row_get_value(manual_row, "manual_plan_id", 0, "") or "").strip()
+                raw_exp = _row_get_value(manual_row, "manual_plan_expires_at", 1, None)
+                exp_dt = _parse_plan_override_datetime(raw_exp)
+                if mid in _KNOWN_BILLING_PLAN_IDS and (not exp_dt or exp_dt >= datetime.now(UTC)):
+                    plan_id = mid
+                    expires_at = exp_dt.isoformat() if exp_dt else None
+                    source = "manual_override"
+        except Exception:
+            pass
+
+        # 2. Check billing subscription if no manual override matched
+        if source == "default":
+            try:
+                sub_row = conn.execute(
+                    """
+                    SELECT plan_id, current_period_end
+                    FROM twitch_billing_subscriptions
+                    WHERE LOWER(customer_reference) = LOWER(?)
+                      AND status IN ('active', 'trialing', 'past_due')
+                    ORDER BY updated_at DESC LIMIT 1
+                    """,
+                    (login,),
+                ).fetchone()
+                if sub_row:
+                    sid = str(_row_get_value(sub_row, "plan_id", 0, "") or "").strip()
+                    if sid:
+                        plan_id = sid
+                        source = "billing"
+                        raw_end = _row_get_value(sub_row, "current_period_end", 1, None)
+                        end_dt = _parse_plan_override_datetime(raw_end)
+                        expires_at = end_dt.isoformat() if end_dt else None
+            except Exception:
+                pass
+
+    return {
+        "planId": plan_id,
+        "planName": _get_plan_name(plan_id),
+        "tier": _get_plan_tier(plan_id),
+        "isExtended": plan_id in EXTENDED_PLANS,
+        "expiresAt": expires_at,
+        "source": source,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Health-score & week-comparison helpers (Phase 3B – internal-home enrichment)
+# ---------------------------------------------------------------------------
+
+
+def _compute_health_score(login: str, conn: Any) -> dict[str, Any] | None:
+    """Compute channel health score 0-100 with sub-scores."""
+    try:
+        now = datetime.now(UTC)
+        week_ago = now - timedelta(days=7)
+        two_weeks_ago = now - timedelta(days=14)
+
+        # Current week stats
+        cur = conn.execute(
+            """
+            SELECT AVG(viewer_count) AS avg_viewers,
+                   COUNT(DISTINCT strftime('%Y-%m-%d', timestamp)) AS stream_days
+            FROM twitch_stats_tracked
+            WHERE LOWER(streamer_login) = LOWER(?)
+              AND timestamp >= ?
+            """,
+            (login, week_ago.isoformat()),
+        ).fetchone()
+
+        # Previous week stats
+        prev = conn.execute(
+            """
+            SELECT AVG(viewer_count) AS avg_viewers,
+                   COUNT(DISTINCT strftime('%Y-%m-%d', timestamp)) AS stream_days
+            FROM twitch_stats_tracked
+            WHERE LOWER(streamer_login) = LOWER(?)
+              AND timestamp >= ? AND timestamp < ?
+            """,
+            (login, two_weeks_ago.isoformat(), week_ago.isoformat()),
+        ).fetchone()
+
+        cur_avg = float(cur[0] or 0) if cur and cur[0] else 0
+        prev_avg = float(prev[0] or 0) if prev and prev[0] else 0
+
+        # Growth score (0-100): based on viewer trend
+        if prev_avg > 0:
+            growth_ratio = cur_avg / prev_avg
+            growth = min(100, max(0, int(50 + (growth_ratio - 1) * 100)))
+        else:
+            growth = 50 if cur_avg > 0 else 0
+
+        # Retention score: based on stream consistency
+        cur_days = int(cur[1] or 0) if cur else 0
+        retention = min(100, max(0, cur_days * 15))  # ~7 days = 100
+
+        # Engagement placeholder (need chat data)
+        engagement = 50  # default
+        try:
+            chat_row = conn.execute(
+                """
+                SELECT COUNT(*) FROM twitch_chat_messages
+                WHERE LOWER(channel) = LOWER(?)
+                  AND timestamp >= ?
+                """,
+                (login, week_ago.isoformat()),
+            ).fetchone()
+            if chat_row and chat_row[0]:
+                msg_count = int(chat_row[0])
+                engagement = min(100, max(0, int(msg_count / max(1, cur_avg) * 2)))
+        except Exception:
+            pass
+
+        # Community: returning viewers
+        community = 50  # default
+
+        # Overall weighted
+        overall = int(growth * 0.30 + retention * 0.25 + engagement * 0.25 + community * 0.20)
+
+        # Trend vs previous week
+        if prev_avg > 0:
+            trend = round(((cur_avg - prev_avg) / prev_avg) * 100, 1)
+        else:
+            trend = 0.0
+
+        return {
+            "overall": overall,
+            "trend": trend,
+            "sub_scores": {
+                "growth": growth,
+                "retention": retention,
+                "engagement": engagement,
+                "community": community,
+            },
+        }
+    except Exception:
+        return None
+
+
+def _compute_week_comparison(login: str, conn: Any) -> dict[str, Any]:
+    """Compare this week vs last week KPIs."""
+    now = datetime.now(UTC)
+    week_ago = now - timedelta(days=7)
+    two_weeks_ago = now - timedelta(days=14)
+
+    def _week_stats(start: datetime, end: datetime) -> dict[str, Any]:
+        row = conn.execute(
+            """
+            SELECT AVG(viewer_count), COUNT(*) * 15.0 / 3600
+            FROM twitch_stats_tracked
+            WHERE LOWER(streamer_login) = LOWER(?)
+              AND timestamp >= ? AND timestamp < ?
+            """,
+            (login, start.isoformat(), end.isoformat()),
+        ).fetchone()
+        avg_v = round(float(row[0]), 1) if row and row[0] else None
+        hours = round(float(row[1]), 1) if row and row[1] else None
+
+        frow = conn.execute(
+            """
+            SELECT SUM(follower_delta)
+            FROM twitch_stream_sessions
+            WHERE LOWER(streamer_login) = LOWER(?)
+              AND started_at >= ? AND started_at < ?
+            """,
+            (login, start.isoformat(), end.isoformat()),
+        ).fetchone()
+        followers = int(frow[0]) if frow and frow[0] else None
+
+        return {
+            "avg_viewers": avg_v,
+            "total_followers": followers,
+            "chat_activity": None,
+            "stream_hours": hours,
+        }
+
+    current = _week_stats(week_ago, now)
+    previous = _week_stats(two_weeks_ago, week_ago)
+
+    def _pct(cur_val: float | int | None, prev_val: float | int | None) -> float | None:
+        if cur_val is None or prev_val is None or prev_val == 0:
+            return None
+        return round(((cur_val - prev_val) / prev_val) * 100, 1)
+
+    changes = {
+        "avg_viewers_pct": _pct(current["avg_viewers"], previous["avg_viewers"]),
+        "followers_pct": _pct(current["total_followers"], previous["total_followers"]),
+        "chat_activity_pct": None,
+        "stream_hours_pct": _pct(current["stream_hours"], previous["stream_hours"]),
+    }
+
+    return {"current_week": current, "previous_week": previous, "changes": changes}
 
 
 INTERNAL_HOME_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard"
@@ -1340,6 +1600,9 @@ class AnalyticsV2Mixin(
         autoban_events: list[dict[str, Any]] = []
         service_warning_events: list[dict[str, Any]] = []
         bot_events: list[dict[str, Any]] = []
+        health_score: dict[str, Any] | None = None
+        last_stream: dict[str, Any] | None = None
+        week_comparison: dict[str, Any] | None = None
 
         with storage.get_conn() as conn:
             identity_row = conn.execute(
@@ -1558,6 +1821,41 @@ class AnalyticsV2Mixin(
                     raid_events.append(raid_event)
                     bot_events.append(raid_event)
 
+            # --- Health score (Task 2) ---
+            if resolved_login:
+                health_score = _compute_health_score(resolved_login, conn)
+            else:
+                health_score = None
+
+            # --- Last stream summary with chat count (Task 3) ---
+            last_stream = None
+            if recent_streams:
+                ls = recent_streams[0]
+                chat_count = None
+                try:
+                    chat_row = conn.execute(
+                        """
+                        SELECT COUNT(*) FROM twitch_chat_messages
+                        WHERE LOWER(channel) = LOWER(?)
+                          AND timestamp >= ? AND timestamp <= ?
+                        """,
+                        (resolved_login, ls.get("started_at", ""), ls.get("ended_at", "")),
+                    ).fetchone()
+                    if chat_row:
+                        chat_count = int(chat_row[0])
+                except Exception:
+                    pass
+                last_stream = {**ls, "chat_messages": chat_count}
+
+            # --- Week comparison (Task 4) ---
+            if resolved_login:
+                try:
+                    week_comparison = _compute_week_comparison(resolved_login, conn)
+                except Exception:
+                    week_comparison = None
+            else:
+                week_comparison = None
+
         if resolved_login:
             autoban_events = self._load_internal_home_autoban_events(
                 streamer_login=resolved_login,
@@ -1617,6 +1915,9 @@ class AnalyticsV2Mixin(
                 "bot_bans_keyword_count": bot_bans_keyword_count,
             },
             "recent_streams": recent_streams,
+            "last_stream_summary": last_stream,
+            "health_score": health_score,
+            "week_comparison": week_comparison,
             "bot_impact": {
                 "events": bot_events,
                 "summary": {
@@ -2005,6 +2306,288 @@ class AnalyticsV2Mixin(
             log.exception("Error in session detail API")
             return web.json_response({"error": str(exc)}, status=500)
 
+    async def _api_v2_billing_catalog(self, request: web.Request) -> web.Response:
+        """GET /twitch/api/v2/billing/catalog — plan catalog with tier info."""
+        auth_level = self._get_auth_level(request)
+        if auth_level not in ("localhost", "admin", "partner"):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        session = self._get_dashboard_session(request) or {}
+        twitch_login = str(session.get("twitch_login") or "").strip().lower()
+        try:
+            current_plan = _get_plan_for_login(twitch_login) if twitch_login else "raid_free"
+        except Exception:
+            current_plan = "raid_free"
+
+        plans = [
+            {
+                "id": "raid_free",
+                "name": "Free",
+                "tier": "free",
+                "price_monthly": 0,
+                "features": [
+                    "4 Analytics Tabs",
+                    "Kern-KPIs",
+                    "Stream-Übersicht",
+                    "Schedule Heatmap",
+                ],
+                "is_current": current_plan == "raid_free",
+            },
+            {
+                "id": "raid_boost",
+                "name": "Basic",
+                "tier": "basic",
+                "price_monthly": 7.99,
+                "features": [
+                    "8 Analytics Tabs",
+                    "Chat-Analytics",
+                    "Growth-Tracking",
+                    "Audience-Insights",
+                    "Kategorie-Vergleich",
+                ],
+                "is_current": current_plan == "raid_boost",
+            },
+            {
+                "id": "analysis_dashboard",
+                "name": "Erweitert",
+                "tier": "extended",
+                "price_monthly": 16.99,
+                "features": [
+                    "Alle 13 Tabs",
+                    "AI-Analyse",
+                    "Viewer-Profile",
+                    "Coaching",
+                    "Monetization-Insights",
+                ],
+                "is_current": current_plan in ("analysis_dashboard", "bundle_analysis_raid_boost"),
+            },
+        ]
+
+        return web.json_response({"plans": plans})
+
+    async def _api_v2_affiliate_portal(self, request: web.Request) -> web.Response:
+        """GET /twitch/api/v2/affiliate/portal — affiliate summary for the logged-in user."""
+        auth_level = self._get_auth_level(request)
+        if auth_level not in ("localhost", "admin", "partner"):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        session = self._get_dashboard_session(request) or {}
+        twitch_login = str(session.get("twitch_login") or "").strip().lower()
+        if not twitch_login:
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        month_start_iso = (
+            datetime.now(UTC)
+            .replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            .isoformat()
+        )
+
+        def _lookup_customer_display_name(conn: Any, login: str) -> str:
+            try:
+                row = conn.execute(
+                    """
+                    SELECT display_name
+                    FROM twitch_streamers
+                    WHERE LOWER(twitch_login) = LOWER(?)
+                    LIMIT 1
+                    """,
+                    (login,),
+                ).fetchone()
+            except Exception:
+                return login
+            value = str(_row_get_value(row, "display_name", 0, "") or "").strip()
+            return value or login
+
+        def _lookup_plan_name(conn: Any, login: str) -> str | None:
+            try:
+                manual_row = conn.execute(
+                    """
+                    SELECT manual_plan_id, manual_plan_expires_at
+                    FROM streamer_plans
+                    WHERE LOWER(twitch_login) = LOWER(?)
+                    LIMIT 1
+                    """,
+                    (login,),
+                ).fetchone()
+            except Exception:
+                manual_row = None
+
+            manual_plan_id = str(_row_get_value(manual_row, "manual_plan_id", 0, "") or "").strip()
+            manual_expires_at = _parse_plan_override_datetime(
+                _row_get_value(manual_row, "manual_plan_expires_at", 1, None)
+            )
+            if manual_plan_id in _KNOWN_BILLING_PLAN_IDS and (
+                manual_expires_at is None or manual_expires_at >= datetime.now(UTC)
+            ):
+                return _get_plan_name(manual_plan_id)
+
+            try:
+                billing_row = conn.execute(
+                    """
+                    SELECT plan_id
+                    FROM twitch_billing_subscriptions
+                    WHERE LOWER(customer_reference) = LOWER(?)
+                      AND status IN ('active', 'trialing', 'past_due')
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (login,),
+                ).fetchone()
+            except Exception:
+                billing_row = None
+
+            billing_plan_id = str(_row_get_value(billing_row, "plan_id", 0, "") or "").strip()
+            if billing_plan_id in _KNOWN_BILLING_PLAN_IDS:
+                return _get_plan_name(billing_plan_id)
+            return None
+
+        try:
+            with storage.get_conn() as conn:
+                acct_row = conn.execute(
+                    """
+                    SELECT twitch_login, display_name, is_active
+                    FROM affiliate_accounts
+                    WHERE LOWER(twitch_login) = LOWER(?)
+                    LIMIT 1
+                    """,
+                    (twitch_login,),
+                ).fetchone()
+                if not acct_row:
+                    return web.json_response({"error": "not_found"}, status=404)
+
+                claim_stats_row = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total_claims,
+                        COALESCE(SUM(CASE WHEN claimed_at >= ? THEN 1 ELSE 0 END), 0)
+                            AS this_month_claims
+                    FROM affiliate_streamer_claims
+                    WHERE LOWER(affiliate_twitch_login) = LOWER(?)
+                    """,
+                    (month_start_iso, twitch_login),
+                ).fetchone()
+                commission_stats_row = conn.execute(
+                    f"""
+                    SELECT
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN status IN ({_AFFILIATE_REVENUE_STATUS_PLACEHOLDERS})
+                                    THEN commission_cents
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        ) AS total_provision_cents,
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN created_at >= ?
+                                     AND status IN ({_AFFILIATE_REVENUE_STATUS_PLACEHOLDERS})
+                                    THEN commission_cents
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        ) AS this_month_provision_cents,
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN status = 'pending'
+                                    THEN commission_cents
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        ) AS pending_payout_cents
+                    FROM affiliate_commissions
+                    WHERE LOWER(affiliate_twitch_login) = LOWER(?)
+                    """,
+                    (
+                        *_AFFILIATE_REVENUE_STATUSES,
+                        month_start_iso,
+                        *_AFFILIATE_REVENUE_STATUSES,
+                        twitch_login,
+                    ),
+                ).fetchone()
+                recent_claim_rows = conn.execute(
+                    f"""
+                    SELECT
+                        c.claimed_streamer_login,
+                        c.claimed_at,
+                        COALESCE(SUM(co.commission_cents), 0) AS commission_cents
+                    FROM affiliate_streamer_claims c
+                    LEFT JOIN affiliate_commissions co
+                      ON LOWER(co.affiliate_twitch_login) = LOWER(c.affiliate_twitch_login)
+                     AND LOWER(co.streamer_login) = LOWER(c.claimed_streamer_login)
+                     AND co.status IN ({_AFFILIATE_REVENUE_STATUS_PLACEHOLDERS})
+                    WHERE LOWER(c.affiliate_twitch_login) = LOWER(?)
+                    GROUP BY c.claimed_streamer_login, c.claimed_at
+                    ORDER BY c.claimed_at DESC
+                    LIMIT 10
+                    """,
+                    (*_AFFILIATE_REVENUE_STATUSES, twitch_login),
+                ).fetchall()
+
+                recent_claims = []
+                for row in recent_claim_rows:
+                    customer_login = str(
+                        _row_get_value(row, "claimed_streamer_login", 0, "") or ""
+                    ).strip().lower()
+                    if not customer_login:
+                        continue
+                    commission_cents = _row_get_value(row, "commission_cents", 2, 0)
+                    recent_claims.append(
+                        {
+                            "customer_display_name": _lookup_customer_display_name(
+                                conn, customer_login
+                            ),
+                            "plan_name": _lookup_plan_name(conn, customer_login),
+                            "amount": round((float(commission_cents or 0) / 100.0), 2),
+                            "created_at": _row_get_value(row, "claimed_at", 1, None),
+                        }
+                    )
+        except Exception as exc:
+            normalized = str(exc).strip().lower()
+            if any(m in normalized for m in ("does not exist", "no such table", "undefined table")):
+                return web.json_response({"error": "not_found"}, status=404)
+            return web.json_response({"error": str(exc)}, status=500)
+
+        ref_code = str(TWITCH_DISCORD_REF_CODE or "").strip()
+        total_claims = int(_row_get_value(claim_stats_row, "total_claims", 0, 0) or 0)
+        this_month_claims = int(
+            _row_get_value(claim_stats_row, "this_month_claims", 1, 0) or 0
+        )
+        total_provision_cents = int(
+            _row_get_value(commission_stats_row, "total_provision_cents", 0, 0) or 0
+        )
+        this_month_provision_cents = int(
+            _row_get_value(commission_stats_row, "this_month_provision_cents", 1, 0) or 0
+        )
+        pending_payout_cents = int(
+            _row_get_value(commission_stats_row, "pending_payout_cents", 2, 0) or 0
+        )
+
+        return web.json_response(
+            {
+                "affiliate": {
+                    "login": str(_row_get_value(acct_row, "twitch_login", 0, "") or "").strip(),
+                    "display_name": _row_get_value(acct_row, "display_name", 1, None),
+                    "active": bool(int(_row_get_value(acct_row, "is_active", 2, 0) or 0)),
+                    "referral_code": ref_code,
+                    "referral_url": _build_affiliate_referral_url(twitch_login),
+                },
+                "stats": {
+                    "total_claims": total_claims,
+                    "total_provision": round(total_provision_cents / 100.0, 2),
+                    "this_month_claims": this_month_claims,
+                    "this_month_provision": round(this_month_provision_cents / 100.0, 2),
+                    "pending_payout": round(pending_payout_cents / 100.0, 2),
+                },
+                "recent_claims": recent_claims,
+            }
+        )
+
     async def _api_v2_auth_status(self, request: web.Request) -> web.Response:
         """Get current authentication status and permissions."""
         auth_level = self._get_auth_level(request)
@@ -2025,6 +2608,24 @@ class AnalyticsV2Mixin(
             except Exception:
                 csrf_token = ""
 
+        # Resolve plan info for the authenticated user
+        twitch_login = session.get("twitch_login")
+        plan_info = None
+        if twitch_login:
+            try:
+                plan_info = _get_plan_details_for_login(twitch_login)
+            except Exception:
+                plan_info = None
+        elif auth_level in ("localhost", "admin"):
+            plan_info = {
+                "planId": "analysis_dashboard",
+                "planName": "Erweitert (Admin)",
+                "tier": "extended",
+                "isExtended": True,
+                "expiresAt": None,
+                "source": "admin",
+            }
+
         return web.json_response(
             {
                 "authenticated": is_authenticated,
@@ -2037,6 +2638,7 @@ class AnalyticsV2Mixin(
                 "displayName": session.get("display_name"),
                 "csrfToken": csrf_token or None,
                 "csrf_token": csrf_token or None,
+                "plan": plan_info,
                 "permissions": {
                     "viewAllStreamers": can_view_all_streamers,
                     "viewComparison": is_authenticated,

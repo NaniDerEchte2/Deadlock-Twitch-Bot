@@ -15,6 +15,14 @@ from ..core.chat_bots import build_known_chat_bot_not_in_clause
 DEFAULT_RECALC_BATCH_SIZE = 500
 
 
+def raid_identity_key(raid_id: Any, executed_at: Any) -> tuple[int, str] | None:
+    try:
+        normalized_raid_id = int(raid_id)
+    except Exception:
+        return None
+    return normalized_raid_id, str(_to_iso(executed_at) or "")
+
+
 def _row_get(row: Any, key: str, index: int) -> Any:
     try:
         return row[key]
@@ -39,7 +47,7 @@ def _to_iso(value: Any) -> str | None:
 def _recalculate_raid_chat_metrics_batch(
     conn,
     normalized_raids: list[dict[str, Any]],
-) -> dict[int, dict[str, int]]:
+) -> dict[tuple[int, str], dict[str, int]]:
     payload = json.dumps(normalized_raids)
     session_bot_clause, session_bot_params = build_known_chat_bot_not_in_clause(
         column_expr="sc.chatter_login"
@@ -48,8 +56,8 @@ def _recalculate_raid_chat_metrics_batch(
         column_expr="cr.chatter_login"
     )
 
-    metrics: dict[int, dict[str, int]] = {
-        int(raid["raid_id"]): {
+    metrics: dict[tuple[int, str], dict[str, int]] = {
+        key: {
             "plus5m": 0,
             "plus15m": 0,
             "plus30m": 0,
@@ -57,6 +65,7 @@ def _recalculate_raid_chat_metrics_batch(
             "new_chatters": 0,
         }
         for raid in normalized_raids
+        if (key := raid_identity_key(raid.get("raid_id"), raid.get("executed_at_key"))) is not None
     }
 
     retention_rows = conn.execute(
@@ -64,10 +73,12 @@ def _recalculate_raid_chat_metrics_batch(
         WITH raid_inputs AS (
             SELECT
                 CAST(r.raid_id AS BIGINT) AS raid_id,
+                COALESCE(r.executed_at_key, '') AS executed_at_key,
                 CAST(r.target_session_id AS BIGINT) AS target_session_id,
                 CAST(r.executed_at AS TIMESTAMPTZ) AS executed_at
             FROM json_to_recordset(?::json) AS r(
                 raid_id TEXT,
+                executed_at_key TEXT,
                 target_session_id TEXT,
                 executed_at TEXT,
                 from_login TEXT,
@@ -76,6 +87,7 @@ def _recalculate_raid_chat_metrics_batch(
         )
         SELECT
             ri.raid_id,
+            ri.executed_at_key,
             COUNT(
                 DISTINCT CASE
                     WHEN sc.last_seen_at <= ri.executed_at + INTERVAL '5 minutes'
@@ -98,29 +110,31 @@ def _recalculate_raid_chat_metrics_batch(
            AND sc.last_seen_at >= ri.executed_at
            AND sc.last_seen_at <= ri.executed_at + INTERVAL '30 minutes'
            AND {session_bot_clause}
-        GROUP BY ri.raid_id
+        GROUP BY ri.raid_id, ri.executed_at_key
         """,
         [payload, *session_bot_params],
     ).fetchall()
 
     for row in retention_rows:
-        raid_id = int(_row_get(row, "raid_id", 0) or 0)
-        if raid_id not in metrics:
+        key = raid_identity_key(_row_get(row, "raid_id", 0), _row_get(row, "executed_at_key", 1))
+        if key is None or key not in metrics:
             continue
-        metrics[raid_id]["plus5m"] = int(_row_get(row, "plus5m", 1) or 0)
-        metrics[raid_id]["plus15m"] = int(_row_get(row, "plus15m", 2) or 0)
-        metrics[raid_id]["plus30m"] = int(_row_get(row, "plus30m", 3) or 0)
+        metrics[key]["plus5m"] = int(_row_get(row, "plus5m", 2) or 0)
+        metrics[key]["plus15m"] = int(_row_get(row, "plus15m", 3) or 0)
+        metrics[key]["plus30m"] = int(_row_get(row, "plus30m", 4) or 0)
 
     known_rows = conn.execute(
         f"""
         WITH raid_inputs AS (
             SELECT
                 CAST(r.raid_id AS BIGINT) AS raid_id,
+                COALESCE(r.executed_at_key, '') AS executed_at_key,
                 CAST(r.target_session_id AS BIGINT) AS target_session_id,
                 CAST(r.executed_at AS TIMESTAMPTZ) AS executed_at,
                 LOWER(COALESCE(r.from_login, '')) AS from_login
             FROM json_to_recordset(?::json) AS r(
                 raid_id TEXT,
+                executed_at_key TEXT,
                 target_session_id TEXT,
                 executed_at TEXT,
                 from_login TEXT,
@@ -129,6 +143,7 @@ def _recalculate_raid_chat_metrics_batch(
         )
         SELECT
             ri.raid_id,
+            ri.executed_at_key,
             COUNT(DISTINCT LOWER(sc.chatter_login)) AS known
         FROM raid_inputs ri
         JOIN twitch_session_chatters sc
@@ -143,27 +158,29 @@ def _recalculate_raid_chat_metrics_batch(
            AND LOWER(cr.streamer_login) = ri.from_login
            AND cr.first_seen_at < ri.executed_at
            AND {rollup_bot_clause}
-        GROUP BY ri.raid_id
+        GROUP BY ri.raid_id, ri.executed_at_key
         """,
         [payload, *session_bot_params, *rollup_bot_params],
     ).fetchall()
 
     for row in known_rows:
-        raid_id = int(_row_get(row, "raid_id", 0) or 0)
-        if raid_id not in metrics:
+        key = raid_identity_key(_row_get(row, "raid_id", 0), _row_get(row, "executed_at_key", 1))
+        if key is None or key not in metrics:
             continue
-        metrics[raid_id]["known_from_raider"] = int(_row_get(row, "known", 1) or 0)
+        metrics[key]["known_from_raider"] = int(_row_get(row, "known", 2) or 0)
 
     new_rows = conn.execute(
         f"""
         WITH raid_inputs AS (
             SELECT
                 CAST(r.raid_id AS BIGINT) AS raid_id,
+                COALESCE(r.executed_at_key, '') AS executed_at_key,
                 CAST(r.target_session_id AS BIGINT) AS target_session_id,
                 CAST(r.executed_at AS TIMESTAMPTZ) AS executed_at,
                 LOWER(COALESCE(r.to_login, '')) AS to_login
             FROM json_to_recordset(?::json) AS r(
                 raid_id TEXT,
+                executed_at_key TEXT,
                 target_session_id TEXT,
                 executed_at TEXT,
                 from_login TEXT,
@@ -172,6 +189,7 @@ def _recalculate_raid_chat_metrics_batch(
         )
         SELECT
             ri.raid_id,
+            ri.executed_at_key,
             COUNT(DISTINCT COALESCE(NULLIF(sc.chatter_login, ''), sc.chatter_id)) AS new_chatters
         FROM raid_inputs ri
         JOIN twitch_session_chatters sc
@@ -188,16 +206,16 @@ def _recalculate_raid_chat_metrics_batch(
         WHERE sc.chatter_login IS NULL
            OR sc.chatter_login = ''
            OR cr.chatter_login IS NULL
-        GROUP BY ri.raid_id
+        GROUP BY ri.raid_id, ri.executed_at_key
         """,
         [payload, *session_bot_params, *rollup_bot_params],
     ).fetchall()
 
     for row in new_rows:
-        raid_id = int(_row_get(row, "raid_id", 0) or 0)
-        if raid_id not in metrics:
+        key = raid_identity_key(_row_get(row, "raid_id", 0), _row_get(row, "executed_at_key", 1))
+        if key is None or key not in metrics:
             continue
-        metrics[raid_id]["new_chatters"] = int(_row_get(row, "new_chatters", 1) or 0)
+        metrics[key]["new_chatters"] = int(_row_get(row, "new_chatters", 2) or 0)
 
     return metrics
 
@@ -207,7 +225,7 @@ def recalculate_raid_chat_metrics(
     raids: list[dict[str, Any]],
     *,
     batch_size: int = DEFAULT_RECALC_BATCH_SIZE,
-) -> dict[int, dict[str, int]]:
+) -> dict[tuple[int, str], dict[str, int]]:
     """
     Recalculate retention/new/known metrics for many raids.
 
@@ -228,6 +246,7 @@ def recalculate_raid_chat_metrics(
         normalized.append(
             {
                 "raid_id": raid_id,
+                "executed_at_key": str(_to_iso(raid.get("executed_at")) or ""),
                 "target_session_id": target_session_id,
                 "executed_at": _to_iso(raid.get("executed_at")),
                 "from_login": str(raid.get("from_login") or "").lower(),
@@ -242,7 +261,7 @@ def recalculate_raid_chat_metrics(
     if len(normalized) <= safe_batch_size:
         return _recalculate_raid_chat_metrics_batch(conn, normalized)
 
-    merged: dict[int, dict[str, int]] = {}
+    merged: dict[tuple[int, str], dict[str, int]] = {}
     for start in range(0, len(normalized), safe_batch_size):
         chunk = normalized[start : start + safe_batch_size]
         merged.update(_recalculate_raid_chat_metrics_batch(conn, chunk))

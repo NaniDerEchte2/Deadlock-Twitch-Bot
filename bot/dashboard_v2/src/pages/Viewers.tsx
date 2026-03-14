@@ -29,7 +29,14 @@ import {
   Cell,
 } from 'recharts';
 import { useViewerDirectory, useViewerDetail, useViewerSegments } from '@/hooks/useAnalytics';
-import type { TimeRange, ViewerSortField, ViewerFilterType, ViewerEntry, SegmentData } from '@/types/analytics';
+import type {
+  RawChatStatus,
+  TimeRange,
+  ViewerSortField,
+  ViewerFilterType,
+  ViewerEntry,
+  SegmentData,
+} from '@/types/analytics';
 
 interface ViewersProps {
   streamer: string | null;
@@ -79,6 +86,41 @@ function CategoryBadge({ category }: { category: string }) {
   );
 }
 
+function RawChatGapNotice({
+  status,
+  note,
+  compact = false,
+}: {
+  status?: RawChatStatus;
+  note?: string | null;
+  compact?: boolean;
+}) {
+  const message = note || status?.note || null;
+  if (!message && !status?.suspectedIngestionIssue && status?.available !== false) {
+    return null;
+  }
+
+  return (
+    <div
+      className={`rounded-xl border ${
+        status?.suspectedIngestionIssue
+          ? 'border-warning/30 bg-warning/10 text-warning'
+          : 'border-white/10 bg-white/[0.04] text-text-secondary'
+      } ${compact ? 'px-3 py-2 text-xs' : 'px-4 py-3 text-sm'}`}
+    >
+      <div className="flex items-start gap-2">
+        <AlertTriangle className={`${compact ? 'mt-0.5 h-3.5 w-3.5' : 'mt-0.5 h-4 w-4'} shrink-0`} />
+        <div>
+          <p className="font-medium text-white">
+            {status?.suspectedIngestionIssue ? 'Roh-Chat-Lücke im Zeitraum' : 'Keine Roh-Chat-Nachrichten im Zeitraum'}
+          </p>
+          <p className="mt-1 leading-5">{message || 'Viewer-Daten bleiben sichtbar, message-basierte Details sind eingeschränkt.'}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SegmentCard({ name, data }: { name: string; data: SegmentData }) {
   const config = SEGMENT_CONFIG[name] || SEGMENT_CONFIG.casual;
   return (
@@ -114,11 +156,13 @@ function ViewerRow({
   isExpanded,
   onToggle,
   streamer,
+  days,
 }: {
   viewer: ViewerEntry;
   isExpanded: boolean;
   onToggle: () => void;
   streamer: string;
+  days: TimeRange;
 }) {
   return (
     <>
@@ -130,6 +174,12 @@ function ViewerRow({
           <div className="flex items-center gap-2">
             <span className="text-white font-medium">{viewer.login}</span>
           </div>
+          {viewer.presenceOnlyInWindow && (
+            <div className="mt-1 flex items-center gap-1 text-xs text-warning">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              <span>Nur Presence-Daten im gewählten Zeitraum</span>
+            </div>
+          )}
         </td>
         <td className="py-3 px-4 text-text-secondary">{formatNumber(viewer.totalSessions)}</td>
         <td className="py-3 px-4 text-text-secondary">{formatNumber(viewer.totalMessages)}</td>
@@ -168,7 +218,7 @@ function ViewerRow({
         {isExpanded && (
           <tr>
             <td colSpan={7} className="p-0">
-              <ViewerExpandedRow login={viewer.login} streamer={streamer} />
+              <ViewerExpandedRow login={viewer.login} streamer={streamer} days={days} />
             </td>
           </tr>
         )}
@@ -177,8 +227,16 @@ function ViewerRow({
   );
 }
 
-function ViewerExpandedRow({ login, streamer }: { login: string; streamer: string }) {
-  const { data, isLoading } = useViewerDetail(streamer, login);
+function ViewerExpandedRow({
+  login,
+  streamer,
+  days,
+}: {
+  login: string;
+  streamer: string;
+  days: TimeRange;
+}) {
+  const { data, isLoading } = useViewerDetail(streamer, login, days);
 
   if (isLoading) {
     return (
@@ -211,6 +269,15 @@ function ViewerExpandedRow({ login, streamer }: { login: string; streamer: strin
       exit={{ opacity: 0, height: 0 }}
       className="bg-background/30 border-t border-border/30 px-6 py-4"
     >
+      {(data.overview.presenceOnlyInWindow || data.overview.messageGapNote) && (
+        <div className="mb-4">
+          <RawChatGapNotice
+            status={data.rawChatStatus}
+            note={data.overview.messageGapNote}
+            compact
+          />
+        </div>
+      )}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Activity Timeline */}
         <div className="bg-card rounded-lg border border-border p-4">
@@ -353,7 +420,7 @@ function ViewerExpandedRow({ login, streamer }: { login: string; streamer: strin
   );
 }
 
-export function Viewers({ streamer }: ViewersProps) {
+export function Viewers({ streamer, days }: ViewersProps) {
   const [sort, setSort] = useState<ViewerSortField>('sessions');
   const [order, setOrder] = useState<'asc' | 'desc'>('desc');
   const [filter, setFilter] = useState<ViewerFilterType>('all');
@@ -375,12 +442,12 @@ export function Viewers({ streamer }: ViewersProps) {
     isLoading: loadingDirectory,
     isError: directoryError,
     refetch: refetchDirectory,
-  } = useViewerDirectory(streamer, sort, order, filter, debouncedSearch, page);
+  } = useViewerDirectory(streamer, days, sort, order, filter, debouncedSearch, page);
 
   const {
     data: segments,
     isLoading: loadingSegments,
-  } = useViewerSegments(streamer);
+  } = useViewerSegments(streamer, days);
 
   const isLoading = loadingDirectory || loadingSegments;
 
@@ -446,6 +513,10 @@ export function Viewers({ streamer }: ViewersProps) {
 
   return (
     <div className="space-y-6">
+      {directory?.rawChatStatus && (
+        <RawChatGapNotice status={directory.rawChatStatus} />
+      )}
+
       {/* ── Segment Cards ── */}
       {segments && (
         <motion.div
@@ -602,6 +673,7 @@ export function Viewers({ streamer }: ViewersProps) {
               <p className="text-sm text-text-secondary">
                 {formatNumber(directory?.total || 0)} Viewer
                 {directory?.summary ? ` · ${formatNumber(directory.summary.totalViewers)} gesamt` : ''}
+                {` · Fenster ${days} Tage`}
               </p>
             </div>
           </div>
@@ -660,6 +732,7 @@ export function Viewers({ streamer }: ViewersProps) {
                     setExpandedViewer(prev => (prev === viewer.login ? null : viewer.login))
                   }
                   streamer={streamer}
+                  days={days}
                 />
               ))}
               {directory?.viewers.length === 0 && (

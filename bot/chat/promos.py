@@ -3,7 +3,10 @@ import logging
 import secrets
 import time
 from collections import deque
+from datetime import UTC, datetime, timedelta
 
+from ..core.chat_bots import build_known_chat_bot_not_in_clause
+from ..dashboard.billing.billing_plans import billing_is_paid_plan_id
 from ..promo_mode import (
     evaluate_global_promo_mode,
     load_global_promo_mode,
@@ -42,6 +45,12 @@ from .constants import (
 
 log = logging.getLogger("TwitchStreams.ChatBot")
 
+_LURKER_TAX_SCOPE = "moderator:read:chatters"
+_LURKER_TAX_FRESHNESS_MINUTES = 5
+_LURKER_TAX_MIN_PRIOR_SESSIONS = 3
+_LURKER_TAX_MIN_WATCHTIME_MINUTES = 240
+_LURKER_TAX_MAX_MENTIONS = 2
+
 
 class PromoMixin:
     def _promo_channel_allowed(self, login: str) -> bool:
@@ -68,6 +77,460 @@ class PromoMixin:
         if PROMO_DISCORD_INVITE:
             return PROMO_DISCORD_INVITE, False
         return None, False
+
+    @staticmethod
+    def _parse_lurker_tax_datetime(raw_value) -> datetime | None:
+        if raw_value is None:
+            return None
+        if isinstance(raw_value, datetime):
+            parsed = raw_value
+        else:
+            text = str(raw_value or "").strip()
+            if not text:
+                return None
+            if len(text) == 10 and text[4] == "-" and text[7] == "-":
+                text = f"{text}T23:59:59+00:00"
+            normalized = text.replace("Z", "+00:00")
+            try:
+                parsed = datetime.fromisoformat(normalized)
+            except ValueError:
+                return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+    def _ensure_lurker_tax_streamer_plan_columns(self, conn) -> None:
+        state = getattr(self, "_lurker_tax_storage_ready", False)
+        if state:
+            return
+        try:
+            conn.execute(
+                "ALTER TABLE streamer_plans "
+                "ADD COLUMN IF NOT EXISTS lurker_tax_enabled INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            try:
+                conn.execute(
+                    "ALTER TABLE streamer_plans "
+                    "ADD COLUMN lurker_tax_enabled INTEGER NOT NULL DEFAULT 0"
+                )
+            except Exception:
+                pass
+        self._lurker_tax_storage_ready = True
+
+    def _load_lurker_tax_settings(self, login: str) -> dict[str, object]:
+        normalized_login = str(login or "").strip().lower()
+        default_payload = {
+            "login": normalized_login,
+            "twitch_user_id": "",
+            "plan_id": "raid_free",
+            "is_paid_plan": False,
+            "enabled": False,
+            "has_moderator_read_chatters": False,
+            "active_session_id": None,
+            "is_live": False,
+        }
+        if not normalized_login or not SUBSCRIPTION_PLANS_ENABLED:
+            return default_payload
+
+        try:
+            with get_conn() as conn:
+                self._ensure_lurker_tax_streamer_plan_columns(conn)
+
+                streamer_row = conn.execute(
+                    """
+                    SELECT twitch_user_id, twitch_login
+                      FROM twitch_streamers
+                     WHERE LOWER(twitch_login) = LOWER(?)
+                     LIMIT 1
+                    """,
+                    (normalized_login,),
+                ).fetchone()
+                twitch_user_id = str(
+                    ((streamer_row["twitch_user_id"] if hasattr(streamer_row, "keys") else streamer_row[0])
+                    if streamer_row else "")
+                    or ""
+                ).strip()
+                canonical_login = str(
+                    ((streamer_row["twitch_login"] if hasattr(streamer_row, "keys") else streamer_row[1])
+                    if streamer_row else normalized_login)
+                    or normalized_login
+                ).strip() or normalized_login
+
+                if twitch_user_id:
+                    settings_row = conn.execute(
+                        """
+                        SELECT twitch_user_id, twitch_login, lurker_tax_enabled, manual_plan_id, manual_plan_expires_at
+                          FROM streamer_plans
+                         WHERE TRIM(COALESCE(twitch_user_id, '')) = ?
+                            OR LOWER(COALESCE(twitch_login, '')) = LOWER(?)
+                         ORDER BY
+                            CASE WHEN TRIM(COALESCE(twitch_user_id, '')) = ? THEN 0 ELSE 1 END
+                         LIMIT 1
+                        """,
+                        (twitch_user_id, canonical_login, twitch_user_id),
+                    ).fetchone()
+                else:
+                    settings_row = conn.execute(
+                        """
+                        SELECT twitch_user_id, twitch_login, lurker_tax_enabled, manual_plan_id, manual_plan_expires_at
+                          FROM streamer_plans
+                         WHERE LOWER(COALESCE(twitch_login, '')) = LOWER(?)
+                         LIMIT 1
+                        """,
+                        (canonical_login,),
+                    ).fetchone()
+
+                plan_id = "raid_free"
+                has_active_manual_override = False
+                enabled = False
+                if settings_row:
+                    enabled = bool(
+                        (
+                            settings_row["lurker_tax_enabled"]
+                            if hasattr(settings_row, "keys")
+                            else settings_row[2]
+                        )
+                        or 0
+                    )
+                    manual_plan_id = str(
+                        (
+                            settings_row["manual_plan_id"]
+                            if hasattr(settings_row, "keys")
+                            else settings_row[3]
+                        )
+                        or ""
+                    ).strip()
+                    if manual_plan_id == "free":
+                        manual_plan_id = "raid_free"
+                    manual_expires_at = self._parse_lurker_tax_datetime(
+                        settings_row["manual_plan_expires_at"]
+                        if hasattr(settings_row, "keys")
+                        else settings_row[4]
+                    )
+                    if manual_plan_id:
+                        if not manual_expires_at or manual_expires_at >= datetime.now(UTC):
+                            plan_id = manual_plan_id
+                            has_active_manual_override = True
+
+                if plan_id == "raid_free" and not has_active_manual_override:
+                    refs = [value for value in (twitch_user_id, canonical_login, normalized_login) if value]
+                    for ref in refs:
+                        sub_row = conn.execute(
+                            """
+                            SELECT plan_id
+                              FROM twitch_billing_subscriptions
+                             WHERE LOWER(customer_reference) = LOWER(?)
+                               AND status IN ('active', 'trialing', 'past_due')
+                             ORDER BY updated_at DESC
+                             LIMIT 1
+                            """,
+                            (ref,),
+                        ).fetchone()
+                        if not sub_row:
+                            continue
+                        candidate_plan_id = str(
+                            (
+                                sub_row["plan_id"]
+                                if hasattr(sub_row, "keys")
+                                else sub_row[0]
+                            )
+                            or ""
+                        ).strip()
+                        if candidate_plan_id:
+                            plan_id = candidate_plan_id
+                            break
+
+                if twitch_user_id:
+                    auth_row = conn.execute(
+                        """
+                        SELECT scopes
+                          FROM twitch_raid_auth
+                         WHERE TRIM(COALESCE(twitch_user_id, '')) = ?
+                            OR LOWER(COALESCE(twitch_login, '')) = LOWER(?)
+                         ORDER BY
+                            CASE WHEN TRIM(COALESCE(twitch_user_id, '')) = ? THEN 0 ELSE 1 END
+                         LIMIT 1
+                        """,
+                        (twitch_user_id, canonical_login, twitch_user_id),
+                    ).fetchone()
+                else:
+                    auth_row = conn.execute(
+                        """
+                        SELECT scopes
+                          FROM twitch_raid_auth
+                         WHERE LOWER(COALESCE(twitch_login, '')) = LOWER(?)
+                         LIMIT 1
+                        """,
+                        (canonical_login,),
+                    ).fetchone()
+                scopes_raw = str(
+                    ((auth_row["scopes"] if hasattr(auth_row, "keys") else auth_row[0]) if auth_row else "")
+                    or ""
+                ).strip()
+                scopes = {scope.strip().lower() for scope in scopes_raw.split() if scope.strip()}
+
+                live_row = conn.execute(
+                    """
+                    SELECT active_session_id, is_live
+                      FROM twitch_live_state
+                     WHERE LOWER(streamer_login) = LOWER(?)
+                     LIMIT 1
+                    """,
+                    (canonical_login,),
+                ).fetchone()
+                active_session_id = (
+                    (live_row["active_session_id"] if hasattr(live_row, "keys") else live_row[0])
+                    if live_row
+                    else None
+                )
+                is_live = bool(
+                    (
+                        live_row["is_live"] if hasattr(live_row, "keys") else live_row[1]
+                    )
+                    if live_row
+                    else False
+                )
+        except Exception:
+            log.debug("Lurker-Tax settings lookup failed for %s", normalized_login, exc_info=True)
+            return default_payload
+
+        return {
+            "login": canonical_login.lower(),
+            "twitch_user_id": twitch_user_id,
+            "plan_id": plan_id,
+            "is_paid_plan": billing_is_paid_plan_id(plan_id),
+            "enabled": enabled,
+            "has_moderator_read_chatters": _LURKER_TAX_SCOPE in scopes,
+            "active_session_id": int(active_session_id) if active_session_id else None,
+            "is_live": is_live,
+        }
+
+    def _set_lurker_tax_enabled(
+        self,
+        *,
+        twitch_login: str,
+        twitch_user_id: str = "",
+        plan_id: str = "",
+        enabled: bool,
+    ) -> bool:
+        login_value = str(twitch_login or "").strip().lower()
+        user_id_value = str(twitch_user_id or "").strip()
+        plan_name = {
+            "raid_boost": "raid_boost",
+            "analysis_dashboard": "analysis",
+            "bundle_analysis_raid_boost": "bundle",
+        }.get(str(plan_id or "").strip(), "free")
+        if not login_value:
+            return False
+
+        try:
+            with get_conn() as conn:
+                self._ensure_lurker_tax_streamer_plan_columns(conn)
+                if user_id_value:
+                    conn.execute(
+                        """
+                        INSERT INTO streamer_plans (
+                            twitch_user_id,
+                            twitch_login,
+                            plan_name,
+                            lurker_tax_enabled
+                        )
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT (twitch_user_id) DO UPDATE SET
+                            twitch_login = COALESCE(NULLIF(EXCLUDED.twitch_login, ''), streamer_plans.twitch_login),
+                            plan_name = COALESCE(NULLIF(EXCLUDED.plan_name, ''), streamer_plans.plan_name),
+                            lurker_tax_enabled = EXCLUDED.lurker_tax_enabled
+                        """,
+                        (user_id_value, login_value, plan_name, 1 if enabled else 0),
+                    )
+                else:
+                    existing_row = conn.execute(
+                        """
+                        SELECT 1
+                          FROM streamer_plans
+                         WHERE LOWER(COALESCE(twitch_login, '')) = LOWER(?)
+                         LIMIT 1
+                        """,
+                        (login_value,),
+                    ).fetchone()
+                    if not existing_row:
+                        return False
+                    conn.execute(
+                        """
+                        UPDATE streamer_plans
+                           SET lurker_tax_enabled = ?
+                         WHERE LOWER(COALESCE(twitch_login, '')) = LOWER(?)
+                        """,
+                        (1 if enabled else 0, login_value),
+                    )
+                commit = getattr(conn, "commit", None)
+                if callable(commit):
+                    commit()
+        except Exception:
+            log.debug("Lurker-Tax setting update failed for %s", login_value, exc_info=True)
+            return False
+        return True
+
+    def _lurker_tax_mentions_for_session(self, session_id: int) -> set[str]:
+        state = getattr(self, "_lurker_tax_mentions", None)
+        if not isinstance(state, dict):
+            state = {}
+            self._lurker_tax_mentions = state
+        mentioned = state.get(session_id)
+        if not isinstance(mentioned, set):
+            mentioned = set()
+            state[session_id] = mentioned
+        return mentioned
+
+    def _build_lurker_tax_text(self, chatter_logins: list[str]) -> str:
+        mentions = " ".join(f"@{login}" for login in chatter_logins if login)
+        return (
+            f"Lurker Steuer: {mentions} "
+            "falls ihr gerade entspannt mitlest, denkt gern an eure Channel-Points."
+        ).strip()
+
+    def _get_lurker_tax_candidates(
+        self,
+        *,
+        login: str,
+        session_id: int,
+        now_utc: datetime | None = None,
+    ) -> list[dict[str, object]]:
+        current_bot_clause, current_bot_params = build_known_chat_bot_not_in_clause(
+            column_expr="live_candidates.chatter_login",
+            placeholder="?",
+        )
+        historical_bot_clause, historical_bot_params = build_known_chat_bot_not_in_clause(
+            column_expr="sc.chatter_login",
+            placeholder="?",
+        )
+        freshness_cutoff = (
+            (now_utc or datetime.now(UTC)) - timedelta(minutes=_LURKER_TAX_FRESHNESS_MINUTES)
+        ).isoformat(timespec="seconds")
+        rows = []
+        try:
+            with get_conn() as conn:
+                rows = conn.execute(
+                    f"""
+                    WITH historical_lurks AS (
+                        SELECT
+                            CASE
+                                WHEN TRIM(COALESCE(sc.chatter_id, '')) <> '' THEN 'id:' || TRIM(sc.chatter_id)
+                                ELSE 'login:' || LOWER(sc.chatter_login)
+                            END AS chatter_identity_key,
+                            COUNT(DISTINCT sc.session_id) AS prior_lurk_sessions,
+                            COALESCE(
+                                SUM(
+                                    CASE
+                                        WHEN sc.first_message_at IS NULL OR sc.last_seen_at IS NULL THEN 0
+                                        WHEN julianday(sc.last_seen_at) <= julianday(sc.first_message_at) THEN 0
+                                        ELSE (julianday(sc.last_seen_at) - julianday(sc.first_message_at)) * 24.0 * 60.0
+                                    END
+                                ),
+                                0
+                            ) AS estimated_lurk_minutes
+                        FROM twitch_session_chatters sc
+                        JOIN twitch_stream_sessions s ON s.id = sc.session_id
+                        WHERE LOWER(sc.streamer_login) = LOWER(?)
+                          AND s.ended_at IS NOT NULL
+                          AND COALESCE(sc.messages, 0) = 0
+                          AND LOWER(COALESCE(CAST(sc.seen_via_chatters_api AS TEXT), '0')) IN ('1', 't', 'true')
+                          AND {historical_bot_clause}
+                        GROUP BY
+                            CASE
+                                WHEN TRIM(COALESCE(sc.chatter_id, '')) <> '' THEN 'id:' || TRIM(sc.chatter_id)
+                                ELSE 'login:' || LOWER(sc.chatter_login)
+                            END
+                    ),
+                    live_candidates AS (
+                        SELECT
+                            live_sc.chatter_login,
+                            live_sc.chatter_id,
+                            CASE
+                                WHEN TRIM(COALESCE(live_sc.chatter_id, '')) <> '' THEN 'id:' || TRIM(live_sc.chatter_id)
+                                ELSE 'login:' || LOWER(live_sc.chatter_login)
+                            END AS chatter_identity_key
+                        FROM twitch_session_chatters live_sc
+                        WHERE live_sc.session_id = ?
+                          AND LOWER(live_sc.streamer_login) = LOWER(?)
+                          AND COALESCE(live_sc.messages, 0) = 0
+                          AND LOWER(COALESCE(CAST(live_sc.seen_via_chatters_api AS TEXT), '0')) IN ('1', 't', 'true')
+                          AND live_sc.last_seen_at IS NOT NULL
+                          AND live_sc.last_seen_at >= ?
+                    )
+                    SELECT
+                        live_candidates.chatter_login,
+                        live_candidates.chatter_id,
+                        historical_lurks.prior_lurk_sessions,
+                        historical_lurks.estimated_lurk_minutes
+                    FROM live_candidates
+                    JOIN historical_lurks
+                      ON historical_lurks.chatter_identity_key = live_candidates.chatter_identity_key
+                    WHERE historical_lurks.prior_lurk_sessions >= ?
+                      AND historical_lurks.estimated_lurk_minutes >= ?
+                      AND {current_bot_clause}
+                    ORDER BY historical_lurks.estimated_lurk_minutes DESC, LOWER(live_candidates.chatter_login) ASC
+                    """,
+                    (
+                        login,
+                        *historical_bot_params,
+                        session_id,
+                        login,
+                        freshness_cutoff,
+                        _LURKER_TAX_MIN_PRIOR_SESSIONS,
+                        _LURKER_TAX_MIN_WATCHTIME_MINUTES,
+                        *current_bot_params,
+                    ),
+                ).fetchall()
+        except Exception:
+            log.debug("Lurker-Tax candidate lookup failed for %s", login, exc_info=True)
+            return []
+
+        payload: list[dict[str, object]] = []
+        for row in rows:
+            chatter_login = str(
+                (row["chatter_login"] if hasattr(row, "keys") else row[0]) or ""
+            ).strip().lower()
+            if not chatter_login:
+                continue
+            payload.append(
+                {
+                    "chatter_login": chatter_login,
+                    "chatter_id": str(
+                        (row["chatter_id"] if hasattr(row, "keys") else row[1]) or ""
+                    ).strip(),
+                    "prior_lurk_sessions": int(
+                        (row["prior_lurk_sessions"] if hasattr(row, "keys") else row[2]) or 0
+                    ),
+                    "estimated_lurk_minutes": float(
+                        (row["estimated_lurk_minutes"] if hasattr(row, "keys") else row[3]) or 0.0
+                    ),
+                }
+            )
+        return payload
+
+    def _select_lurker_tax_mentions(
+        self,
+        *,
+        login: str,
+        session_id: int,
+        now_utc: datetime | None = None,
+    ) -> list[str]:
+        mentioned = self._lurker_tax_mentions_for_session(session_id)
+        selected: list[str] = []
+        for candidate in self._get_lurker_tax_candidates(
+            login=login,
+            session_id=session_id,
+            now_utc=now_utc,
+        ):
+            chatter_login = str(candidate.get("chatter_login") or "").strip().lower()
+            if not chatter_login or chatter_login in mentioned:
+                continue
+            selected.append(chatter_login)
+            if len(selected) >= _LURKER_TAX_MAX_MENTIONS:
+                break
+        return selected
 
     def _record_raw_chat_message(self, login: str) -> None:
         if not login:
@@ -242,6 +705,18 @@ class PromoMixin:
             log.warning("Promo template could not be rendered", exc_info=True)
             return None
 
+    def _mark_promo_sent(self, login: str, now: float, *, reason: str) -> None:
+        self._last_promo_sent[login] = now
+        raw_count_map = getattr(self, "_raw_msg_count_since_promo", None)
+        if isinstance(raw_count_map, dict):
+            raw_count_map[login] = 0
+        if reason == "viewer_spike":
+            viewer_spike_map = getattr(self, "_last_promo_viewer_spike", None)
+            if not isinstance(viewer_spike_map, dict):
+                viewer_spike_map = {}
+                self._last_promo_viewer_spike = viewer_spike_map
+            viewer_spike_map[login] = now
+
     def _build_promo_text(self, login: str, invite: str) -> str | None:
         global_message = self._load_global_promo_message()
         if global_message:
@@ -274,16 +749,7 @@ class PromoMixin:
         if not ok:
             return False
 
-        self._last_promo_sent[login] = now
-        raw_count_map = getattr(self, "_raw_msg_count_since_promo", None)
-        if isinstance(raw_count_map, dict):
-            raw_count_map[login] = 0
-        if reason == "viewer_spike":
-            viewer_spike_map = getattr(self, "_last_promo_viewer_spike", None)
-            if not isinstance(viewer_spike_map, dict):
-                viewer_spike_map = {}
-                self._last_promo_viewer_spike = viewer_spike_map
-            viewer_spike_map[login] = now
+        self._mark_promo_sent(login, now, reason=reason)
 
         if is_specific:
             marker = getattr(self, "_mark_streamer_invite_sent", None)
@@ -489,6 +955,54 @@ class PromoMixin:
             )
         return ok
 
+    async def _maybe_send_lurker_tax_reminder(self, login: str, channel_id: str, now: float) -> bool:
+        if not SUBSCRIPTION_PLANS_ENABLED:
+            return False
+        if not self._overall_promo_ready(login, now):
+            return False
+
+        settings = self._load_lurker_tax_settings(login)
+        if not bool(settings.get("is_live")):
+            return False
+        if not bool(settings.get("is_paid_plan")):
+            return False
+        if not bool(settings.get("enabled")):
+            return False
+        if not bool(settings.get("has_moderator_read_chatters")):
+            return False
+
+        session_id = settings.get("active_session_id")
+        if not session_id:
+            return False
+
+        selected_logins = self._select_lurker_tax_mentions(
+            login=login,
+            session_id=int(session_id),
+            now_utc=datetime.now(UTC),
+        )
+        if not selected_logins:
+            return False
+
+        message = self._build_lurker_tax_text(selected_logins)
+        ok = await self._send_announcement(
+            self._make_promo_channel(login, channel_id),
+            message,
+            color="orange",
+            source="lurker_tax",
+        )
+        if not ok:
+            return False
+
+        self._lurker_tax_mentions_for_session(int(session_id)).update(selected_logins)
+        self._mark_promo_sent(login, now, reason="lurker_tax")
+        log.info(
+            "Lurker-Steuer Reminder gesendet in %s (session=%s, mentions=%s)",
+            login,
+            session_id,
+            ",".join(selected_logins),
+        )
+        return True
+
     async def _maybe_send_activity_promo(self, message) -> None:
         if not _PROMO_ACTIVITY_ENABLED:
             return
@@ -549,8 +1063,14 @@ class PromoMixin:
         """Sendet eine Promo in jeden live-Kanal, für den das Intervall abgelaufen ist."""
         now = time.monotonic()
         live_channels = await self._get_live_channels_for_promo()
+        lurker_tax_channels = await self._get_live_channels_for_lurker_tax()
 
         from ..core.partner_utils import is_partner_channel_for_chat_tracking
+
+        for login, broadcaster_id in lurker_tax_channels:
+            if not is_partner_channel_for_chat_tracking(login):
+                continue
+            await self._maybe_send_lurker_tax_reminder(login, str(broadcaster_id), now)
 
         if _PROMO_ACTIVITY_ENABLED or PROMO_VIEWER_SPIKE_ENABLED:
             for login, broadcaster_id in live_channels:
@@ -598,7 +1118,7 @@ class PromoMixin:
                 source="promo",
             )
             if ok:
-                self._last_promo_sent[login] = now
+                self._mark_promo_sent(login, now, reason="promo")
                 if is_specific:
                     marker = getattr(self, "_mark_streamer_invite_sent", None)
                     if callable(marker):
@@ -606,6 +1126,42 @@ class PromoMixin:
                 log.info("Chat-Promo gesendet in %s", login)
             else:
                 log.debug("Chat-Promo in %s fehlgeschlagen", login)
+
+    async def _get_live_channels_for_lurker_tax(self) -> list[tuple[str, str]]:
+        """Gibt alle live-Kanäle mit aktiver Session zurück, in denen die Lurker Steuer laufen kann."""
+        if not self._channel_ids:
+            return []
+
+        allowed_logins = {str(login).lower() for login in self._channel_ids if login}
+        if not allowed_logins:
+            return []
+
+        try:
+            rows = _pg_query_all(
+                """
+                SELECT streamer_login, twitch_user_id
+                  FROM twitch_live_state
+                 WHERE is_live = 1
+                   AND active_session_id IS NOT NULL
+                """
+            )
+        except Exception:
+            log.debug("_get_live_channels_for_lurker_tax: DB-Query fehlgeschlagen", exc_info=True)
+            return []
+
+        channels: list[tuple[str, str]] = []
+        for row in rows:
+            login = str(
+                (row["streamer_login"] if hasattr(row, "keys") else row[0]) or ""
+            ).strip().lower()
+            broadcaster_id = str(
+                (row["twitch_user_id"] if hasattr(row, "keys") else row[1]) or ""
+            ).strip()
+            if not login or not broadcaster_id:
+                continue
+            if login in allowed_logins:
+                channels.append((login, broadcaster_id))
+        return channels
 
     async def _get_live_channels_for_promo(self) -> list[tuple[str, str]]:
         """Gibt alle live-Kanäle zurück, in denen der Bot aktiv ist (login, broadcaster_id)."""

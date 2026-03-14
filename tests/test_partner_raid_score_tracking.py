@@ -100,10 +100,82 @@ class PartnerRaidScoreTrackingTests(unittest.TestCase):
         self.assertIsNotNone(row)
         assert row is not None
         self.assertEqual(int(row["raid_history_id"]), 1)
+        self.assertEqual(
+            row["raid_history_executed_at"],
+            _iso_utc(confirmed_at - timedelta(minutes=1)),
+        )
         self.assertEqual(int(row["target_session_id"]), 77)
         self.assertEqual(int(row["was_deadlock_at_raid"]), 1)
         self.assertAlmostEqual(float(row["final_score"]), 1.125, places=6)
         self.assertIsNone(row["resolved_at"])
+        conn.close()
+
+    def test_track_confirmed_partner_raid_prefers_latest_executed_at_over_higher_id(self) -> None:
+        conn = self._make_conn()
+        confirmed_at = datetime(2026, 3, 9, 20, 0, tzinfo=UTC)
+        conn.execute(
+            """
+            INSERT INTO twitch_live_state (
+                twitch_user_id, streamer_login, is_live, last_started_at, last_game, active_session_id
+            ) VALUES (?, ?, 1, ?, ?, ?)
+            """,
+            ("2002", "target_login", _iso_utc(confirmed_at - timedelta(hours=1)), "Deadlock", 77),
+        )
+        conn.execute(
+            """
+            INSERT INTO twitch_raid_history (
+                id,
+                from_broadcaster_id,
+                from_broadcaster_login,
+                to_broadcaster_id,
+                to_broadcaster_login,
+                executed_at,
+                success
+            ) VALUES (?, ?, ?, ?, ?, ?, 1)
+            """,
+            (99, "1001", "source_login", "2002", "target_login", _iso_utc(confirmed_at - timedelta(minutes=3))),
+        )
+        conn.execute(
+            """
+            INSERT INTO twitch_raid_history (
+                id,
+                from_broadcaster_id,
+                from_broadcaster_login,
+                to_broadcaster_id,
+                to_broadcaster_login,
+                executed_at,
+                success
+            ) VALUES (?, ?, ?, ?, ?, ?, 1)
+            """,
+            (10, "1001", "source_login", "2002", "target_login", _iso_utc(confirmed_at - timedelta(minutes=1))),
+        )
+        conn.commit()
+
+        with patch(
+            "bot.raid.partner_raid_score_tracking.get_conn",
+            side_effect=lambda: contextlib.nullcontext(conn),
+        ):
+            tracking_id = track_confirmed_partner_raid(
+                to_broadcaster_id="2002",
+                to_broadcaster_login="target_login",
+                from_broadcaster_login="source_login",
+                from_broadcaster_id="1001",
+                viewer_count=42,
+                confirmed_at=confirmed_at,
+            )
+
+        self.assertIsNotNone(tracking_id)
+        row = conn.execute(
+            "SELECT raid_history_id, raid_history_executed_at FROM twitch_partner_raid_score_tracking WHERE id = ?",
+            (tracking_id,),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(int(row["raid_history_id"]), 10)
+        self.assertEqual(
+            row["raid_history_executed_at"],
+            _iso_utc(confirmed_at - timedelta(minutes=1)),
+        )
         conn.close()
 
     def test_resolve_partner_raid_tracking_uses_first_non_deadlock_channel_update(self) -> None:

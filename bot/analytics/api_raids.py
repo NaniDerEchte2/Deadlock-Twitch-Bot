@@ -13,7 +13,7 @@ from typing import Any
 from aiohttp import web
 
 from ..core.chat_bots import build_known_chat_bot_not_in_clause
-from .raid_metrics import recalculate_raid_chat_metrics
+from .raid_metrics import raid_identity_key, recalculate_raid_chat_metrics
 from ..storage import pg as storage
 
 log = logging.getLogger("TwitchStreams.AnalyticsV2")
@@ -54,7 +54,9 @@ class _AnalyticsRaidsMixin:
                         rr.target_session_id,
                         rr.to_broadcaster_login
                     FROM twitch_raid_retention rr
-                    JOIN twitch_raid_history rh ON rh.id = rr.raid_id
+                    JOIN twitch_raid_history rh
+                      ON rh.id = rr.raid_id
+                     AND rh.executed_at = rr.executed_at
                     JOIN twitch_stream_sessions ss ON ss.id = rr.target_session_id
                     WHERE LOWER(ss.streamer_login) = ?
                       AND ss.started_at >= ?
@@ -87,7 +89,9 @@ class _AnalyticsRaidsMixin:
                         ON sc.session_id = ss.id
                        AND LOWER(sc.chatter_login) = LOWER(fe.follower_login)
                     LEFT JOIN twitch_raid_retention rr ON rr.target_session_id = ss.id
-                    LEFT JOIN twitch_raid_history rh ON rh.id = rr.raid_id
+                    LEFT JOIN twitch_raid_history rh
+                      ON rh.id = rr.raid_id
+                     AND rh.executed_at = rr.executed_at
                     LEFT JOIN twitch_chatter_rollup cr_before
                         ON LOWER(cr_before.chatter_login) = LOWER(fe.follower_login)
                        AND LOWER(cr_before.streamer_login) = LOWER(fe.streamer_login)
@@ -121,10 +125,14 @@ class _AnalyticsRaidsMixin:
                     if len(base_raids_sample) < self.RAID_RETENTION_SAMPLE_LIMIT:
                         base_raids_sample.append(base_raids_full[-1])
 
-                sample_raid_ids = {int(raid["raid_id"]) for raid in base_raids_sample}
+                sample_raid_keys = {
+                    key
+                    for raid in base_raids_sample
+                    if (key := raid_identity_key(raid.get("raid_id"), raid.get("executed_at"))) is not None
+                }
 
                 grouped_source: dict[str, dict[str, Any]] = {}
-                sample_metrics: dict[int, dict[str, int]] = {}
+                sample_metrics: dict[tuple[int, str], dict[str, int]] = {}
                 for start in range(0, len(base_raids_full), self.RAID_METRIC_BATCH_SIZE):
                     raid_batch = base_raids_full[start : start + self.RAID_METRIC_BATCH_SIZE]
                     batch_metrics = recalculate_raid_chat_metrics(
@@ -133,9 +141,12 @@ class _AnalyticsRaidsMixin:
                     )
                     for raid in raid_batch:
                         raid_id = int(raid["raid_id"])
+                        raid_key = raid_identity_key(raid_id, raid.get("executed_at"))
+                        if raid_key is None:
+                            continue
                         src_key = str(raid["from"] or "unknown").lower()
                         sent = int(raid["viewers_sent"] or 0)
-                        metric = batch_metrics.get(raid_id, {})
+                        metric = batch_metrics.get(raid_key, {})
                         new_chatters = int(metric.get("new_chatters", 0) or 0)
                         plus30m = int(metric.get("plus30m", 0) or 0)
                         known_from_raider = int(metric.get("known_from_raider", 0) or 0)
@@ -162,8 +173,8 @@ class _AnalyticsRaidsMixin:
                             source_bucket["overlap_ratio_sum"] += float(known_from_raider) / float(sent)
                             source_bucket["overlap_ratio_count"] += 1
 
-                        if raid_id in sample_raid_ids:
-                            sample_metrics[raid_id] = {
+                        if raid_key in sample_raid_keys:
+                            sample_metrics[raid_key] = {
                                 "plus5m": int(metric.get("plus5m", 0) or 0),
                                 "plus15m": int(metric.get("plus15m", 0) or 0),
                                 "plus30m": plus30m,
@@ -239,8 +250,11 @@ class _AnalyticsRaidsMixin:
                 retention_curves = []
                 for raid in base_raids_sample:
                     raid_id = int(raid["raid_id"])
+                    raid_key = raid_identity_key(raid_id, raid.get("executed_at"))
+                    if raid_key is None:
+                        continue
                     sent = int(raid["viewers_sent"] or 0)
-                    metric = sample_metrics.get(raid_id, {})
+                    metric = sample_metrics.get(raid_key, {})
                     plus5m = int(metric.get("plus5m", 0) or 0)
                     plus15m = int(metric.get("plus15m", 0) or 0)
                     plus30m = int(metric.get("plus30m", 0) or 0)

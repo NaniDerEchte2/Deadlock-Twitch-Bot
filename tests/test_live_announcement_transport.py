@@ -123,6 +123,21 @@ class LiveAnnouncementTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(dummy._master_broker_token(), "fallback-token")
             self.assertTrue(dummy._announcement_transport_prefers_master_broker())
 
+    def test_broker_token_fallback_accepts_shared_internal_api_token(self) -> None:
+        dummy = _DummyMonitoring()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "MASTER_BROKER_TOKEN": "",
+                "MAIN_BOT_INTERNAL_TOKEN": "",
+                "TWITCH_INTERNAL_API_TOKEN": "shared-internal-token",
+            },
+            clear=False,
+        ):
+            self.assertEqual(dummy._master_broker_token(), "shared-internal-token")
+            self.assertTrue(dummy._announcement_transport_prefers_master_broker())
+
     def test_master_broker_base_url_accepts_loopback_host(self) -> None:
         dummy = _DummyMonitoring()
 

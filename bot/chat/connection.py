@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 from datetime import UTC, datetime, timedelta
 
@@ -391,6 +392,222 @@ class ConnectionMixin:
                 log.exception("join_channels: unerwarteter Fehler bei %s", login)
 
         return joined
+
+    async def part_channels(self, channels: list[str]) -> int:
+        """Best-effort Unsubscribe + lokale Cache-Bereinigung für Channels."""
+        if not channels:
+            return 0
+
+        normalized = [str(ch or "").strip().lower().lstrip("#") for ch in channels]
+        normalized = [ch for ch in normalized if ch]
+        if not normalized:
+            return 0
+
+        # Kandidaten-IDs vor dem Cache-Cleanup sichern
+        channel_ids: dict[str, str] = {}
+        channel_id_map = getattr(self, "_channel_ids", None)
+        if isinstance(channel_id_map, dict):
+            for login in normalized:
+                raw_id = channel_id_map.get(login)
+                if raw_id:
+                    channel_ids[login] = str(raw_id)
+
+        # Fehlende IDs nachladen (best effort)
+        missing = [login for login in normalized if login not in channel_ids]
+        fetch_users = getattr(self, "fetch_users", None)
+        if missing and callable(fetch_users):
+            try:
+                users = await fetch_users(logins=missing)
+                for user in users or []:
+                    login = str(getattr(user, "login", "") or "").lower()
+                    uid = str(getattr(user, "id", "") or "").strip()
+                    if login and uid:
+                        channel_ids[login] = uid
+            except Exception:
+                log.debug(
+                    "part_channels: konnte User-IDs nicht nachladen (%s)",
+                    ", ".join(missing),
+                    exc_info=True,
+                )
+        elif missing:
+            fetch_user = getattr(self, "fetch_user", None)
+            if callable(fetch_user):
+                for login in missing:
+                    try:
+                        user = await fetch_user(login=login)
+                        uid = str(getattr(user, "id", "") or "").strip() if user else ""
+                        if uid:
+                            channel_ids[login] = uid
+                    except Exception:
+                        log.debug(
+                            "part_channels: fetch_user fehlgeschlagen für %s",
+                            login,
+                            exc_info=True,
+                        )
+
+        target_ids = {uid for uid in channel_ids.values() if uid}
+        unsubscribed = 0
+
+        # 1) Primärpfad: Helix EventSub listing (TwitchIO fetch_eventsub_subscriptions)
+        fetch_subs = getattr(self, "fetch_eventsub_subscriptions", None)
+        delete_sub = getattr(self, "delete_eventsub_subscription", None)
+        if target_ids and callable(fetch_subs) and callable(delete_sub):
+            try:
+                subs_result = fetch_subs()
+                if inspect.isawaitable(subs_result):
+                    subs_result = await subs_result
+
+                subs_list = []
+
+                async def _consume_async_iter(source) -> bool:
+                    if source is None:
+                        return False
+                    if hasattr(source, "__aiter__"):
+                        async for sub in source:
+                            subs_list.append(sub)
+                        return True
+                    if hasattr(source, "__anext__"):
+                        while True:
+                            try:
+                                sub = await source.__anext__()
+                            except StopAsyncIteration:
+                                break
+                            subs_list.append(sub)
+                        return True
+                    return False
+
+                handled = await _consume_async_iter(subs_result)
+                if not handled and subs_result is not None:
+                    inner = getattr(subs_result, "subscriptions", None)
+                    if inner is not None:
+                        handled = await _consume_async_iter(inner)
+                        if not handled:
+                            try:
+                                subs_list.extend(list(inner))
+                            except TypeError:
+                                log.debug(
+                                    "part_channels: unerwarteter subscriptions-Typ: %s",
+                                    type(inner),
+                                )
+                    else:
+                        try:
+                            subs_list.extend(list(subs_result))
+                        except TypeError:
+                            log.debug(
+                                "part_channels: unerwarteter fetch_eventsub_subscriptions-Typ: %s",
+                                type(subs_result),
+                            )
+
+                for sub in subs_list:
+                    try:
+                        sub_type = getattr(sub, "type", "") or getattr(sub, "subscription_type", "")
+                        if sub_type != "channel.chat.message":
+                            continue
+                        condition = getattr(sub, "condition", None)
+                        if isinstance(condition, dict):
+                            broadcaster_id = str(
+                                condition.get("broadcaster_user_id")
+                                or condition.get("broadcaster_id")
+                                or ""
+                            ).strip()
+                        else:
+                            broadcaster_id = str(
+                                getattr(condition, "broadcaster_user_id", "")
+                                or getattr(condition, "broadcaster_id", "")
+                                or ""
+                            ).strip()
+                        if not broadcaster_id or broadcaster_id not in target_ids:
+                            continue
+
+                        sub_id = (
+                            getattr(sub, "id", None)
+                            or getattr(sub, "subscription_id", None)
+                            or getattr(sub, "uuid", None)
+                        )
+                        if sub_id:
+                            await delete_sub(sub_id)
+                            unsubscribed += 1
+                    except Exception:
+                        log.debug(
+                            "part_channels: Fehler beim Loeschen einer EventSub-Subscription",
+                            exc_info=True,
+                        )
+            except Exception:
+                log.debug("part_channels: fetch_eventsub_subscriptions fehlgeschlagen", exc_info=True)
+
+        # 2) Fallback: TwitchIO 3.x WebSocket-Subscriptions (falls verfügbar)
+        if target_ids and unsubscribed == 0:
+            ws_subs = getattr(self, "websocket_subscriptions", None)
+            ws_delete = getattr(self, "delete_websocket_subscription", None)
+            if callable(ws_subs) and callable(ws_delete):
+                try:
+                    subs_map = await ws_subs()
+                    if isinstance(subs_map, dict):
+                        for sub_id, sub in subs_map.items():
+                            try:
+                                condition = getattr(sub, "condition", None)
+                                if isinstance(condition, dict):
+                                    broadcaster_id = str(
+                                        condition.get("broadcaster_user_id")
+                                        or condition.get("broadcaster_id")
+                                        or ""
+                                    ).strip()
+                                else:
+                                    broadcaster_id = str(
+                                        getattr(condition, "broadcaster_user_id", "")
+                                        or getattr(condition, "broadcaster_id", "")
+                                        or ""
+                                    ).strip()
+                                if not broadcaster_id or broadcaster_id not in target_ids:
+                                    continue
+
+                                sub_type = getattr(sub, "type", "")
+                                sub_type_value = getattr(sub_type, "value", None) or str(sub_type or "")
+                                if not sub_type_value:
+                                    continue
+                                if (
+                                    "channel.chat.message" not in sub_type_value
+                                    and "ChannelChatMessage" not in sub_type_value
+                                ):
+                                    continue
+
+                                await ws_delete(sub_id)
+                                unsubscribed += 1
+                            except Exception:
+                                log.debug(
+                                    "part_channels: Fehler beim Loeschen einer WebSocket-Subscription",
+                                    exc_info=True,
+                                )
+                except Exception:
+                    log.debug("part_channels: websocket_subscriptions fehlgeschlagen", exc_info=True)
+
+        # Lokale Caches bereinigen
+        monitored = getattr(self, "_monitored_streamers", None)
+        if isinstance(monitored, set):
+            for login in normalized:
+                monitored.discard(login)
+        if isinstance(channel_id_map, dict):
+            for login in normalized:
+                channel_id_map.pop(login, None)
+        monitored_only = getattr(self, "_monitored_only_channels", None)
+        if isinstance(monitored_only, set):
+            for login in normalized:
+                monitored_only.discard(login)
+
+        if unsubscribed:
+            log.info(
+                "part_channels: %d EventSub-Subscription(s) geloescht (%d Channels).",
+                unsubscribed,
+                len(normalized),
+            )
+        else:
+            log.debug(
+                "part_channels: keine EventSub-Subscription geloescht (Channels=%d, targets=%d)",
+                len(normalized),
+                len(target_ids),
+            )
+
+        return unsubscribed
 
     async def follow_channel(self, broadcaster_id: str) -> bool:
         """

@@ -129,7 +129,7 @@ class ClipManager:
             users = await self.api.get_users([streamer_login])
             user_data = users.get(streamer_login.lower())
             if not user_data:
-                log.warning("User nicht gefunden: %s", streamer_login)
+                log.debug("User nicht gefunden: %s", streamer_login)
                 return []
 
             user_id = user_data["id"]

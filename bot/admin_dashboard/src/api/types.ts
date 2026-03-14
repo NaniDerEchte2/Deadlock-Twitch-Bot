@@ -85,6 +85,15 @@ export interface SystemHealth {
   processId?: number;
   lastTickAt?: string;
   lastTickAgeSeconds?: number;
+  rawChatLagSeconds?: number;
+  rawChatLagStreamer?: string;
+  rawChatLastMessageAt?: string;
+  rawChatLastInsertOkAt?: string;
+  rawChatLastInsertErrorAt?: string;
+  rawChatLastError?: string;
+  analyticsDbFingerprint?: string;
+  internalAnalyticsDbFingerprint?: string;
+  analyticsDbFingerprintMismatch?: boolean;
   serviceWarnings?: Record<string, unknown>[];
   raw?: Record<string, unknown>;
 }

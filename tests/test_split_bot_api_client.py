@@ -2,6 +2,12 @@ import asyncio
 import unittest
 from unittest.mock import patch
 
+from bot.app_keys import (
+    ANALYTICS_DB_FINGERPRINT_KEY,
+    ANALYTICS_DB_FINGERPRINT_MISMATCH_KEY,
+    BOT_API_CLIENT_KEY,
+    INTERNAL_API_ANALYTICS_DB_FINGERPRINT_KEY,
+)
 from bot.dashboard_service.app import build_dashboard_service_app
 from bot.dashboard_service.client import BotApiClient, BotApiClientError
 from bot.internal_api import INTERNAL_API_BASE_PATH
@@ -230,6 +236,51 @@ class BotApiClientErrorMappingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(session.calls), 1)
         self.assertIn("kwargs", session.calls[0])
         self.assertFalse(session.calls[0]["kwargs"].get("allow_redirects", True))
+
+    async def test_dashboard_service_marks_analytics_db_fingerprint_mismatch_on_startup(
+        self,
+    ) -> None:
+        with patch(
+            "bot.dashboard_service.app.analytics_db_fingerprint_details",
+            return_value={
+                "fingerprint": "pg:local123456",
+                "hostHash": "hosthash",
+                "databaseHash": "dbhash",
+                "portHash": "porthash",
+                "engine": "postgres",
+            },
+        ):
+            app = build_dashboard_service_app(
+                noauth=False,
+                oauth_client_id="client-id",
+                oauth_client_secret="client-secret",
+                internal_api_token="secret-token",
+                internal_api_base_url="http://127.0.0.1:8776",
+            )
+
+        client = app[BOT_API_CLIENT_KEY]
+        self.assertIsNotNone(client)
+
+        with patch.object(
+            client,
+            "healthz",
+            return_value={
+                "ok": True,
+                "analyticsDbFingerprint": "pg:remote654321",
+            },
+        ):
+            for callback in app.on_startup:
+                await callback(app)
+
+        self.assertTrue(app[ANALYTICS_DB_FINGERPRINT_MISMATCH_KEY])
+        self.assertEqual(app[ANALYTICS_DB_FINGERPRINT_KEY], "pg:local123456")
+        self.assertEqual(
+            app[INTERNAL_API_ANALYTICS_DB_FINGERPRINT_KEY],
+            "pg:remote654321",
+        )
+
+        for callback in app.on_cleanup:
+            await callback(app)
 
     def test_rejects_non_loopback_base_url_by_default(self) -> None:
         with self.assertRaises(ValueError) as ctx:

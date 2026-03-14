@@ -7,6 +7,7 @@ import { fetchMonthlyStats, fetchWeekdayStats } from '@/api/client';
 import { useTagAnalysisExtended, useTitlePerformance, useRaidRetention } from '@/hooks/useAnalytics';
 import { TagPerformanceChart } from '@/components/charts/TagPerformance';
 import { RaidRetention } from '@/components/charts/RaidRetention';
+import { PlanGateCard } from '@/components/cards/PlanGateCard';
 import type { MonthlyStats, WeekdayStats, TimeRange } from '@/types/analytics';
 
 interface GrowthProps {
@@ -198,26 +199,30 @@ export function Growth({ streamer, days }: GrowthProps) {
       </motion.div>
 
       {/* Tag & Title Performance */}
-      {(tagData || titleData) && (
-        <TagPerformanceChart
-          tagData={tagData || mockTagData}
-          titleData={titleData}
-        />
-      )}
+      <PlanGateCard featureId="title_performance" title="Titel-Performance">
+        {(tagData || titleData) && (
+          <TagPerformanceChart
+            tagData={tagData || mockTagData}
+            titleData={titleData}
+          />
+        )}
 
-      {/* Fallback if no tag data from API */}
-      {!tagData && !titleData && (
-        <TagPerformanceChart
-          tagData={mockTagData}
-          titleData={mockTitleData}
-        />
-      )}
+        {/* Fallback if no tag data from API */}
+        {!tagData && !titleData && (
+          <TagPerformanceChart
+            tagData={mockTagData}
+            titleData={mockTitleData}
+          />
+        )}
+      </PlanGateCard>
 
       {/* Raid Retention */}
-      <div>
-        <h2 className="text-lg font-semibold text-white mb-4">Raid-Retention</h2>
-        <RaidRetention data={raidRetentionData} />
-      </div>
+      <PlanGateCard featureId="raid_retention" title="Raid-Retention">
+        <div>
+          <h2 className="text-lg font-semibold text-white mb-4">Raid-Retention</h2>
+          <RaidRetention data={raidRetentionData} />
+        </div>
+      </PlanGateCard>
     </div>
   );
 }

@@ -50,7 +50,11 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
         return parsed if parsed > 0 else int(default)
 
     def _master_broker_token(self) -> str | None:
-        for key in ("MASTER_BROKER_TOKEN", "MAIN_BOT_INTERNAL_TOKEN"):
+        for key in (
+            "MASTER_BROKER_TOKEN",
+            "MAIN_BOT_INTERNAL_TOKEN",
+            "TWITCH_INTERNAL_API_TOKEN",
+        ):
             value = (os.getenv(key) or "").strip()
             if value:
                 return value

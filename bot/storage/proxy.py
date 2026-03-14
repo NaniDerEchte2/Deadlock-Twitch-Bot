@@ -1118,6 +1118,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS twitch_partner_raid_score_tracking (
             id                        INTEGER PRIMARY KEY AUTOINCREMENT,
             raid_history_id           INTEGER,
+            raid_history_executed_at  TEXT,
             from_broadcaster_id       TEXT,
             from_broadcaster_login    TEXT NOT NULL,
             to_broadcaster_id         TEXT NOT NULL,
@@ -1142,6 +1143,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    _add_column_if_missing(
+        conn,
+        "twitch_partner_raid_score_tracking",
+        "raid_history_executed_at",
+        "TEXT",
+    )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_partner_raid_tracking_target "
         "ON twitch_partner_raid_score_tracking(to_broadcaster_id, confirmed_at)"
@@ -1153,6 +1160,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_partner_raid_tracking_history "
         "ON twitch_partner_raid_score_tracking(raid_history_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_partner_raid_tracking_history_ref "
+        "ON twitch_partner_raid_score_tracking(raid_history_id, raid_history_executed_at)"
     )
 
     # Seed default global templates

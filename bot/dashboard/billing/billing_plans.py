@@ -33,6 +33,7 @@ BILLING_PLANS: tuple[dict[str, Any], ...] = (
         "features": [
             "Bevorzugte Platzierung im Raid-Netzwerk",
             "Sichtbarkeit auch bei deiner Inaktivit\u00e4t",
+            "Lurker Steuer Erinnerungen f\u00fcr bekannte Lurker",
             "Kein Setup n\u00f6tig \u2014 l\u00e4uft automatisch",
         ],
     },
@@ -46,6 +47,7 @@ BILLING_PLANS: tuple[dict[str, Any], ...] = (
         "features": [
             "Viewer-Verlauf & Peak-Analyse pro Stream",
             "Zeitraumvergleiche und Wachstumstrends",
+            "Lurker Steuer Erinnerungen f\u00fcr bekannte Lurker",
             "Follower- und Retention-\u00dcbersichten",
         ],
     },
@@ -59,9 +61,16 @@ BILLING_PLANS: tuple[dict[str, Any], ...] = (
         "features": [
             "Alle Analytics-Features inklusive",
             "Bevorzugte Raid-Platzierung aktiv",
+            "Lurker Steuer Erinnerungen f\u00fcr bekannte Lurker",
             "Spare gegen\u00fcber Einzelbuchung",
         ],
     },
+)
+
+PAID_PLAN_IDS: frozenset[str] = frozenset(
+    str(plan.get("id") or "").strip()
+    for plan in BILLING_PLANS
+    if int(plan.get("monthly_net_cents") or 0) > 0 and str(plan.get("id") or "").strip()
 )
 
 
@@ -250,8 +259,17 @@ def billing_dump_product_id_mapping(mapping: dict[str, str]) -> str:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
-def billing_is_paid_plan(plan: dict[str, Any]) -> bool:
-    return int(plan.get("monthly_net_cents") or 0) > 0
+def billing_is_paid_plan_id(plan_id: str | None) -> bool:
+    return str(plan_id or "").strip() in PAID_PLAN_IDS
+
+
+def billing_is_paid_plan(plan: dict[str, Any] | str | None) -> bool:
+    if isinstance(plan, dict):
+        plan_id = str(plan.get("id") or "").strip()
+        if plan_id:
+            return billing_is_paid_plan_id(plan_id)
+        return int(plan.get("monthly_net_cents") or 0) > 0
+    return billing_is_paid_plan_id(str(plan or "").strip())
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +277,7 @@ def billing_is_paid_plan(plan: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 _BILLING_CYCLE_DISCOUNTS = BILLING_CYCLE_DISCOUNTS
 _BILLING_PLANS = BILLING_PLANS
+_PAID_PLAN_IDS = PAID_PLAN_IDS
 _build_billing_catalog = build_billing_catalog
 _billing_cycle_label = billing_cycle_label
 _normalize_billing_cycle = normalize_billing_cycle
@@ -269,4 +288,5 @@ _billing_parse_price_id_mapping = billing_parse_price_id_mapping
 _billing_parse_product_id_mapping = billing_parse_product_id_mapping
 _billing_dump_price_id_mapping = billing_dump_price_id_mapping
 _billing_dump_product_id_mapping = billing_dump_product_id_mapping
+_billing_is_paid_plan_id = billing_is_paid_plan_id
 _billing_is_paid_plan = billing_is_paid_plan

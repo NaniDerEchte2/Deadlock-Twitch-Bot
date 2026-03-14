@@ -12,6 +12,7 @@ Twitch-Monitoring, Analytics, Auto-Raids, Dashboard und Social-Media-Automatisie
 | [docs/API.md](docs/API.md) | Alle HTTP-Routes mit Methode und Zugriffslevel |
 | [docs/ADMIN.md](docs/ADMIN.md) | Admin-Features: Panel, Billing, Partner-Management |
 | [docs/STREAMER.md](docs/STREAMER.md) | Streamer-Features: Dashboard, Analytics, Raids, Social Media |
+| [docs/streamer/README.md](docs/streamer/README.md) | Aktueller Streamer-Guide mit Dashboard, Commands und Feature-Doku |
 
 ## Feature-Matrix
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..core.constants import TWITCH_TARGET_GAME_NAME
@@ -131,46 +131,56 @@ def _load_cached_score_snapshot(conn, twitch_user_id: str) -> dict[str, object]:
     }
 
 
-def _load_raid_history_id(
+def _load_raid_history_reference(
     conn,
     *,
     target_id: str,
     target_login: str,
     source_login: str,
     source_id: str | None,
-) -> int | None:
+    confirmed_at: datetime,
+) -> tuple[int | None, str | None]:
+    confirmed_upper_bound = _iso_utc(confirmed_at.astimezone(UTC) + timedelta(minutes=10))
+
+    def _extract_reference(row: Any) -> tuple[int | None, str | None]:
+        raid_history_id = _safe_int(_row_value(row, "id", 0), 0) or None
+        executed_at = _parse_dt(_row_value(row, "executed_at", 1))
+        return raid_history_id, (_iso_utc(executed_at) if executed_at is not None else None)
+
     if source_id:
         row = conn.execute(
             """
-            SELECT id
+            SELECT id, executed_at
             FROM twitch_raid_history
             WHERE to_broadcaster_id = ?
               AND LOWER(to_broadcaster_login) = LOWER(?)
               AND from_broadcaster_id = ?
               AND LOWER(from_broadcaster_login) = LOWER(?)
               AND COALESCE(success, FALSE) IS TRUE
-            ORDER BY id DESC
+              AND executed_at <= ?
+            ORDER BY executed_at DESC, id DESC
             LIMIT 1
             """,
-            (target_id, target_login, source_id, source_login),
+            (target_id, target_login, source_id, source_login, confirmed_upper_bound),
         ).fetchone()
-        raid_history_id = _safe_int(_row_value(row, "id", 0), 0) or None
-        if raid_history_id is not None:
-            return raid_history_id
+        raid_history_reference = _extract_reference(row)
+        if raid_history_reference[0] is not None:
+            return raid_history_reference
     row = conn.execute(
         """
-        SELECT id
+        SELECT id, executed_at
         FROM twitch_raid_history
         WHERE to_broadcaster_id = ?
           AND LOWER(to_broadcaster_login) = LOWER(?)
           AND LOWER(from_broadcaster_login) = LOWER(?)
           AND COALESCE(success, FALSE) IS TRUE
-        ORDER BY id DESC
+          AND executed_at <= ?
+        ORDER BY executed_at DESC, id DESC
         LIMIT 1
         """,
-        (target_id, target_login, source_login),
+        (target_id, target_login, source_login, confirmed_upper_bound),
     ).fetchone()
-    return _safe_int(_row_value(row, "id", 0), 0) or None
+    return _extract_reference(row)
 
 
 def _load_session_started_at(conn, session_id: int) -> datetime | None:
@@ -318,12 +328,13 @@ def track_confirmed_partner_raid(
                 )
             was_deadlock_at_raid = bool(last_game and last_game == _target_game_lower())
 
-            raid_history_id = _load_raid_history_id(
+            raid_history_id, raid_history_executed_at = _load_raid_history_reference(
                 conn,
                 target_id=target_id,
                 target_login=target_login,
                 source_login=source_login,
                 source_id=source_id,
+                confirmed_at=confirmed_dt,
             )
 
             deadlock_continued_until = None if was_deadlock_at_raid else confirmed_at_iso
@@ -335,6 +346,7 @@ def track_confirmed_partner_raid(
                 """
                 INSERT INTO twitch_partner_raid_score_tracking (
                     raid_history_id,
+                    raid_history_executed_at,
                     from_broadcaster_id,
                     from_broadcaster_login,
                     to_broadcaster_id,
@@ -356,10 +368,11 @@ def track_confirmed_partner_raid(
                     deadlock_continued_sec,
                     resolved_at,
                     resolution_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     raid_history_id,
+                    raid_history_executed_at,
                     source_id,
                     source_login,
                     target_id,
@@ -390,18 +403,23 @@ def track_confirmed_partner_raid(
                     SELECT id
                     FROM twitch_partner_raid_score_tracking
                     WHERE raid_history_id = ?
+                      AND (
+                          raid_history_executed_at = ?
+                          OR (? IS NULL AND raid_history_executed_at IS NULL)
+                      )
                     ORDER BY id DESC
                     LIMIT 1
                     """,
-                    (raid_history_id,),
+                    (raid_history_id, raid_history_executed_at, raid_history_executed_at),
                 ).fetchone()
                 tracking_id = _safe_int(_row_value(row, "id", 0), 0) or None
 
         log.info(
-            "Partner raid score tracking stored for %s -> %s (raid_history_id=%s, deadlock_at_raid=%s)",
+            "Partner raid score tracking stored for %s -> %s (raid_history_id=%s, raid_history_executed_at=%s, deadlock_at_raid=%s)",
             source_login or source_id or "<unknown>",
             target_login or target_id,
             raid_history_id,
+            raid_history_executed_at,
             was_deadlock_at_raid,
         )
         return _safe_int(tracking_id, 0) or None

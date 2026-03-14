@@ -19,7 +19,9 @@ from uuid import UUID
 
 from aiohttp import web
 
+from ..app_keys import ANALYTICS_DB_FINGERPRINT_DETAILS_KEY, ANALYTICS_DB_FINGERPRINT_KEY
 from ..core.constants import log
+from ..storage import analytics_db_fingerprint_details
 
 INTERNAL_API_BASE_PATH = "/internal/twitch/v1"
 INTERNAL_TOKEN_HEADER = "X-Internal-Token"
@@ -922,11 +924,13 @@ class InternalApiServer:
         return body
 
     async def healthz(self, request: web.Request) -> web.Response:
-        del request
+        analytics_db = request.app.get(ANALYTICS_DB_FINGERPRINT_DETAILS_KEY) or {}
         return self._json_response(
             {
                 "ok": True,
                 "service": "twitch-internal-api",
+                "analyticsDbFingerprint": analytics_db.get("fingerprint"),
+                "analyticsDb": analytics_db,
             }
         )
 
@@ -1900,6 +1904,16 @@ def build_internal_api_app(
         return await handler(request)
 
     app = web.Application(middlewares=[_loopback_middleware, _auth_middleware])
+    analytics_db = analytics_db_fingerprint_details()
+    app[ANALYTICS_DB_FINGERPRINT_KEY] = analytics_db.get("fingerprint")
+    app[ANALYTICS_DB_FINGERPRINT_DETAILS_KEY] = analytics_db
+    log.info(
+        "Internal API analytics DB fingerprint=%s host_hash=%s db_hash=%s port_hash=%s",
+        analytics_db.get("fingerprint"),
+        analytics_db.get("hostHash"),
+        analytics_db.get("databaseHash"),
+        analytics_db.get("portHash"),
+    )
     server.attach(app)
     return app
 

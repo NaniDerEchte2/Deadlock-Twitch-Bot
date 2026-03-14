@@ -215,6 +215,12 @@ Zuletzt verwendete Hashtags pro Streamer/Plattform.
 ### streamer_plans
 Aktueller Abo-Plan pro Streamer (welcher Plan, wann, Stripe-IDs).
 
+Wichtige Feature-Flags in dieser Tabelle:
+
+- `promo_disabled`
+- `promo_message`
+- `lurker_tax_enabled`
+
 ---
 
 ## Community / Discord

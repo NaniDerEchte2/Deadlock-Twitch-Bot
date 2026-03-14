@@ -23,6 +23,7 @@ class _DummyModerationChat(ModerationMixin):
         self._client_id = "client"
         self.bot_id_safe = "sender-1"
         self.bot_id = "sender-1"
+        self.prefix = "!"
         self._token_manager = _DummyTokenManager()
         self._raid_bot = _DummyRaidBot()
 
@@ -37,6 +38,17 @@ class _DummyModerationChat(ModerationMixin):
     def _is_partner_channel_for_chat_tracking(login: str) -> bool:
         del login
         return False
+
+    def _record_raw_chat_message(self, login: str) -> None:
+        del login
+
+    def _resolve_session_id(self, login: str) -> int | None:
+        del login
+        return 123
+
+    def _is_target_game_live_for_chat(self, login: str, session_id: int | None) -> bool:
+        del login, session_id
+        return True
 
 
 class _DummyResponse:
@@ -77,6 +89,47 @@ class _DummyChannel:
         self.id = channel_id
 
 
+class _RecordingConn:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def execute(self, sql, params=None):
+        self.calls.append((str(sql), tuple(params or ())))
+
+        class _Cursor:
+            @staticmethod
+            def fetchone():
+                return None
+
+        return _Cursor()
+
+
+class _RecordingConnContext:
+    def __init__(self, conn: _RecordingConn) -> None:
+        self._conn = conn
+
+    def __enter__(self) -> _RecordingConn:
+        return self._conn
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        del exc_type, exc, tb
+        return False
+
+
+class _DummyAuthor:
+    def __init__(self, name: str, author_id: str) -> None:
+        self.name = name
+        self.id = author_id
+
+
+class _DummyMessage:
+    def __init__(self, *, channel_name: str, author_name: str, author_id: str, content: str) -> None:
+        self.channel = _DummyChannel(channel_name, "channel-1")
+        self.author = _DummyAuthor(author_name, author_id)
+        self.content = content
+        self.id = "msg-1"
+
+
 class ChatMessageBlacklistTests(unittest.IsolatedAsyncioTestCase):
     async def test_dropped_recruitment_message_blacklists_banned_phone_alias(self) -> None:
         handler = _DummyModerationChat()
@@ -99,6 +152,45 @@ class ChatMessageBlacklistTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(target_login, "cemo_336")
         self.assertIn("recruitment_bot_banned", reason)
         self.assertIn("banned_phone_alias", reason)
+
+    def test_raw_chat_health_upsert_uses_boolean_case_flag(self) -> None:
+        handler = _DummyModerationChat()
+        conn = _RecordingConn()
+
+        handler._upsert_raw_chat_ingest_health_row(
+            conn,
+            "partner_one",
+            last_raw_chat_error="boom",
+        )
+
+        self.assertEqual(len(conn.calls), 1)
+        _, params = conn.calls[0]
+        self.assertIs(params[7], True)
+        self.assertEqual(params[8], "boom")
+
+    async def test_raw_chat_message_insert_uses_boolean_is_command_value(self) -> None:
+        handler = _DummyModerationChat()
+        conn = _RecordingConn()
+        message = _DummyMessage(
+            channel_name="partner_one",
+            author_name="viewer_one",
+            author_id="42",
+            content="!ping",
+        )
+
+        with patch("bot.chat.moderation.get_conn", return_value=_RecordingConnContext(conn)):
+            with patch.object(handler, "_is_partner_channel_for_chat_tracking", return_value=True):
+                self.assertIsNone(await handler._track_chat_health(message))
+
+        chat_message_call = next(
+            params for sql, params in conn.calls if "INSERT INTO twitch_chat_messages" in sql
+        )
+        session_chatter_call = next(
+            params for sql, params in conn.calls if "INSERT INTO twitch_session_chatters" in sql
+        )
+        self.assertIs(chat_message_call[6], True)
+        self.assertIs(session_chatter_call[6], True)
+        self.assertIs(session_chatter_call[7], False)
 
 
 if __name__ == "__main__":

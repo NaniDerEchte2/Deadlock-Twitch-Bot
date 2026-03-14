@@ -9,16 +9,85 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import os
 from collections.abc import Iterable, Sequence
+from urllib.parse import urlsplit
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict
 
 log = logging.getLogger("TwitchStreams.StoragePG")
 
 KEYRING_SERVICE = "DeadlockBot"
 ENV_DSN = "TWITCH_ANALYTICS_DSN"
+
+
+def _normalize_conninfo_value(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _dsn_conninfo(dsn: str | None = None) -> dict[str, str]:
+    raw_dsn = (dsn or _load_dsn()).strip()
+    if not raw_dsn:
+        return {}
+    try:
+        parsed = conninfo_to_dict(raw_dsn)
+        return {
+            str(key): _normalize_conninfo_value(value)
+            for key, value in parsed.items()
+            if _normalize_conninfo_value(value)
+        }
+    except Exception:
+        pass
+
+    # Fallback for URI-style DSNs if psycopg cannot parse the string.
+    try:
+        parts = urlsplit(raw_dsn if "://" in raw_dsn else f"postgresql://{raw_dsn}")
+    except Exception:
+        return {}
+
+    info: dict[str, str] = {}
+    if parts.hostname:
+        info["host"] = str(parts.hostname).strip()
+    if parts.port is not None:
+        info["port"] = str(parts.port).strip()
+    if parts.username:
+        info["user"] = str(parts.username).strip()
+    dbname = str(parts.path or "").strip().lstrip("/")
+    if dbname:
+        info["dbname"] = dbname
+    return info
+
+
+def analytics_db_fingerprint(dsn: str | None = None) -> str:
+    """Return a stable, non-secret fingerprint for the configured analytics DB."""
+    info = _dsn_conninfo(dsn)
+    host = (info.get("host") or "").strip().lower()
+    dbname = (info.get("dbname") or info.get("database") or "").strip().lower()
+    port = (info.get("port") or "").strip().lower()
+    basis = f"{host}|{port}|{dbname}".encode("utf-8", errors="ignore")
+    return f"pg:{hashlib.sha256(basis).hexdigest()[:12]}"
+
+
+def analytics_db_fingerprint_details(dsn: str | None = None) -> dict[str, str]:
+    """Expose hashed DB identity details safe enough for logs and health endpoints."""
+    info = _dsn_conninfo(dsn)
+    host = (info.get("host") or "").strip().lower()
+    dbname = (info.get("dbname") or info.get("database") or "").strip().lower()
+    port = (info.get("port") or "").strip().lower()
+
+    def _digest(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+    return {
+        "fingerprint": analytics_db_fingerprint(dsn),
+        "hostHash": _digest(host or "-"),
+        "databaseHash": _digest(dbname or "-"),
+        "portHash": _digest(port or "-"),
+        "engine": "postgres",
+    }
 
 
 def _placeholder_sql(sql: str) -> str:
@@ -83,6 +152,61 @@ def _align_serial_sequence(conn: psycopg.Connection, table: str, column: str) ->
         log.debug("Could not align serial sequence for %s.%s: %s", table, column, exc)
 
 
+def _coerce_column_to_boolean(
+    conn: psycopg.Connection,
+    table: str,
+    column: str,
+    *,
+    default: bool = False,
+) -> None:
+    """
+    Best-effort migration for legacy integer/text flags that are now modeled as BOOLEAN.
+    Safe to call repeatedly on startup.
+    """
+    try:
+        row = conn.execute(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = %s AND column_name = %s",
+            (table, column),
+        ).fetchone()
+    except Exception as exc:  # pragma: no cover - best effort guard
+        log.debug("Could not inspect column type for %s.%s: %s", table, column, exc)
+        return
+
+    if not row:
+        return
+
+    value = row[0] if not hasattr(row, "keys") else row["data_type"]
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return
+
+    if normalized != "boolean":
+        try:
+            conn.execute(
+                f"""
+                ALTER TABLE {table}
+                ALTER COLUMN {column} TYPE BOOLEAN
+                USING CASE
+                    WHEN {column} IS NULL THEN FALSE
+                    WHEN LOWER(BTRIM({column}::text)) IN ('1', 'true', 't', 'yes', 'y', 'on') THEN TRUE
+                    ELSE FALSE
+                END
+                """
+            )
+            log.info("DB migration: converted %s.%s to BOOLEAN", table, column)
+        except Exception as exc:  # pragma: no cover - best effort guard
+            log.warning("DB migration: could not convert %s.%s to BOOLEAN: %s", table, column, exc)
+            return
+
+    try:
+        conn.execute(
+            f"ALTER TABLE {table} ALTER COLUMN {column} SET DEFAULT {'TRUE' if default else 'FALSE'}"
+        )
+    except Exception as exc:  # pragma: no cover - best effort guard
+        log.debug("Skipping default migration on %s.%s: %s", table, column, exc)
+
+
 def _run_startup_maintenance(conn: psycopg.Connection) -> None:
     """
     One-time runtime maintenance for existing schemas.
@@ -94,8 +218,12 @@ def _run_startup_maintenance(conn: psycopg.Connection) -> None:
 
     # Keep this list focused on tables where stale sequences have caused issues.
     _align_serial_sequence(conn, "twitch_stream_sessions", "id")
+    _align_serial_sequence(conn, "twitch_raid_history", "id")
     _align_serial_sequence(conn, "clip_fetch_history", "id")
     _align_serial_sequence(conn, "twitch_clips_social_media", "id")
+    _coerce_column_to_boolean(conn, "twitch_session_chatters", "is_first_time_streamer", default=False)
+    _coerce_column_to_boolean(conn, "twitch_session_chatters", "seen_via_chatters_api", default=False)
+    _coerce_column_to_boolean(conn, "twitch_chat_messages", "is_command", default=False)
 
     _run_startup_maintenance._done = True
 
@@ -693,11 +821,83 @@ def ensure_schema(conn) -> None:
         except Exception:
             return False
 
-    def _has_unique_constraint(table: str, columns: Sequence[str]) -> bool:
+    def _table_exists(table: str) -> bool:
+        try:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                  AND table_name = %s
+                """,
+                (table,),
+            ).fetchone()
+            return bool(row)
+        except Exception:
+            return False
+
+    def _constraint_exists(table: str, constraint_name: str) -> bool:
+        try:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM information_schema.table_constraints
+                WHERE table_schema = current_schema()
+                  AND table_name = %s
+                  AND constraint_name = %s
+                """,
+                (table, constraint_name),
+            ).fetchone()
+            return bool(row)
+        except Exception:
+            return False
+
+    def _matching_constraint_names(
+        table: str,
+        columns: Sequence[str],
+        constraint_type: str,
+    ) -> list[str]:
+        try:
+            rows = conn.execute(
+                """
+                SELECT tc.constraint_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                  ON tc.constraint_name = kcu.constraint_name
+                 AND tc.table_schema = kcu.table_schema
+                 AND tc.table_name = kcu.table_name
+                WHERE tc.table_schema = current_schema()
+                  AND tc.table_name = %s
+                  AND tc.constraint_type = %s
+                GROUP BY tc.constraint_name
+                HAVING array_agg(kcu.column_name ORDER BY kcu.ordinal_position) = %s
+                ORDER BY tc.constraint_name
+                """,
+                (table, constraint_type, list(columns)),
+            ).fetchall()
+            return [
+                str((row[0] if not hasattr(row, "keys") else row["constraint_name"]) or "").strip()
+                for row in rows or []
+                if str((row[0] if not hasattr(row, "keys") else row["constraint_name"]) or "").strip()
+            ]
+        except Exception as exc:
+            log.debug(
+                "Could not inspect %s constraints on %s(%s): %s",
+                constraint_type,
+                table,
+                ",".join(columns),
+                exc,
+            )
+            return []
+
+    def _has_key_constraint(
+        table: str,
+        columns: Sequence[str],
+        constraint_types: Sequence[str],
+    ) -> bool:
         """
-        Return True when there is a PRIMARY KEY or UNIQUE constraint that matches the
-        provided column list exactly (order-sensitive). Prevents false positives when a
-        non-unique index with the same name already exists.
+        Return True when a key constraint with the given type matches the provided
+        column list exactly (order-sensitive).
         """
         try:
             row = conn.execute(
@@ -705,21 +905,64 @@ def ensure_schema(conn) -> None:
                 SELECT 1
                   FROM information_schema.table_constraints tc
                   JOIN information_schema.key_column_usage kcu
-                    ON tc.constraint_name = kcu.constraint_name
+                   ON tc.constraint_name = kcu.constraint_name
                    AND tc.table_schema = kcu.table_schema
                  WHERE tc.table_schema = current_schema()
                    AND tc.table_name = %s
-                   AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+                   AND tc.constraint_type = ANY(%s)
                  GROUP BY tc.constraint_name
                 HAVING array_agg(kcu.column_name ORDER BY kcu.ordinal_position) = %s
                  LIMIT 1
+                """,
+                (table, list(constraint_types), list(columns)),
+            ).fetchone()
+            return bool(row)
+        except Exception as exc:
+            log.debug(
+                "Could not inspect key constraint on %s(%s): %s",
+                table,
+                ",".join(columns),
+                exc,
+            )
+            return False
+
+    def _has_unique_constraint(table: str, columns: Sequence[str]) -> bool:
+        """
+        Return True when there is a PRIMARY KEY, UNIQUE constraint, or UNIQUE index
+        matching the provided column list exactly (order-sensitive).
+        """
+        if _has_key_constraint(table, columns, ["PRIMARY KEY", "UNIQUE"]):
+            return True
+        try:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM (
+                    SELECT array_agg(att.attname ORDER BY ord.pos) AS column_names
+                    FROM pg_class tbl
+                    JOIN pg_namespace ns
+                      ON ns.oid = tbl.relnamespace
+                    JOIN pg_index idx
+                      ON idx.indrelid = tbl.oid
+                    JOIN LATERAL unnest(idx.indkey) WITH ORDINALITY AS ord(attnum, pos)
+                      ON TRUE
+                    JOIN pg_attribute att
+                      ON att.attrelid = tbl.oid
+                     AND att.attnum = ord.attnum
+                    WHERE ns.nspname = current_schema()
+                      AND tbl.relname = %s
+                      AND idx.indisunique
+                    GROUP BY idx.indexrelid
+                ) indexed
+                WHERE indexed.column_names = %s
+                LIMIT 1
                 """,
                 (table, list(columns)),
             ).fetchone()
             return bool(row)
         except Exception as exc:
             log.debug(
-                "Could not inspect unique constraint on %s(%s): %s",
+                "Could not inspect unique key on %s(%s): %s",
                 table,
                 ",".join(columns),
                 exc,
@@ -812,6 +1055,226 @@ def ensure_schema(conn) -> None:
             finally:
                 _set_timescale_compression(table, True)
             return False
+
+    def _backup_table_if_missing(source_table: str, backup_table: str) -> None:
+        if not _table_exists(source_table) or _table_exists(backup_table):
+            return
+        conn.execute(f"CREATE TABLE {backup_table} AS TABLE {source_table} WITH DATA")
+
+    def _repair_raid_identity_schema() -> None:
+        if not (
+            _table_exists("twitch_raid_history")
+            and _table_exists("twitch_raid_retention")
+            and _table_exists("twitch_partner_raid_score_tracking")
+        ):
+            return
+
+        history_has_reference_key = _has_unique_constraint("twitch_raid_history", ["id", "executed_at"])
+        retention_has_reference_key = _has_key_constraint(
+            "twitch_raid_retention",
+            ["raid_id", "executed_at"],
+            ["PRIMARY KEY"],
+        )
+        retention_has_fk = _constraint_exists(
+            "twitch_raid_retention",
+            "twitch_raid_retention_raid_history_ref_fkey",
+        )
+        partner_has_fk = _constraint_exists(
+            "twitch_partner_raid_score_tracking",
+            "twitch_partner_raid_score_tracking_raid_history_ref_fkey",
+        )
+
+        migration_needed = any(
+            [
+                not history_has_reference_key,
+                _column_data_type("twitch_raid_retention", "raid_id") != "bigint",
+                _column_data_type("twitch_raid_retention", "executed_at") != "timestamp with time zone",
+                _column_data_type("twitch_raid_retention", "computed_at") != "timestamp with time zone",
+                not retention_has_reference_key,
+                not retention_has_fk,
+                _column_data_type("twitch_partner_raid_score_tracking", "raid_history_id") != "bigint",
+                _column_data_type("twitch_partner_raid_score_tracking", "raid_history_executed_at")
+                != "timestamp with time zone",
+                not partner_has_fk,
+                not _index_exists("idx_twitch_raid_history_id_executed_at"),
+                not _index_exists("idx_twitch_raid_retention_raid_id"),
+                not _index_exists("idx_partner_raid_tracking_history_ref"),
+            ]
+        )
+        if not migration_needed:
+            _align_serial_sequence(conn, "twitch_raid_history", "id")
+            return
+
+        log.info("DB migration: repairing raid identity references with (raid_id, executed_at)")
+        with conn.transaction():
+            conn.execute(
+                """
+                LOCK TABLE
+                    twitch_raid_history,
+                    twitch_raid_retention,
+                    twitch_partner_raid_score_tracking
+                IN ACCESS EXCLUSIVE MODE
+                """
+            )
+
+            _backup_table_if_missing(
+                "twitch_raid_history",
+                "twitch_raid_history_raid_identity_fix_backup",
+            )
+            _backup_table_if_missing(
+                "twitch_raid_retention",
+                "twitch_raid_retention_raid_identity_fix_backup",
+            )
+            _backup_table_if_missing(
+                "twitch_partner_raid_score_tracking",
+                "twitch_partner_raid_score_tracking_raid_identity_fix_backup",
+            )
+
+            _align_serial_sequence(conn, "twitch_raid_history", "id")
+            if not history_has_reference_key:
+                created_reference_index = _create_index_allowing_compressed_hypertable(
+                    "twitch_raid_history",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_raid_history_id_executed_at "
+                    "ON twitch_raid_history(id, executed_at)",
+                )
+                history_has_reference_key = (
+                    _has_unique_constraint("twitch_raid_history", ["id", "executed_at"])
+                    if created_reference_index
+                    else _has_unique_constraint("twitch_raid_history", ["id", "executed_at"])
+                )
+            if not history_has_reference_key:
+                raise RuntimeError(
+                    "twitch_raid_history(id, executed_at) is not uniquely indexable; "
+                    "raid identity repair cannot continue."
+                )
+
+            if _column_data_type("twitch_raid_retention", "raid_id") != "bigint":
+                conn.execute(
+                    """
+                    ALTER TABLE twitch_raid_retention
+                    ALTER COLUMN raid_id TYPE BIGINT
+                    USING raid_id::bigint
+                    """
+                )
+            if _column_data_type("twitch_raid_retention", "executed_at") != "timestamp with time zone":
+                conn.execute(
+                    """
+                    ALTER TABLE twitch_raid_retention
+                    ALTER COLUMN executed_at TYPE TIMESTAMPTZ
+                    USING NULLIF(BTRIM(executed_at::text), '')::timestamptz
+                    """
+                )
+            if _column_data_type("twitch_raid_retention", "computed_at") != "timestamp with time zone":
+                conn.execute(
+                    """
+                    ALTER TABLE twitch_raid_retention
+                    ALTER COLUMN computed_at TYPE TIMESTAMPTZ
+                    USING NULLIF(BTRIM(computed_at::text), '')::timestamptz
+                    """
+                )
+            if not _has_key_constraint("twitch_raid_retention", ["raid_id", "executed_at"], ["PRIMARY KEY"]):
+                if _constraint_exists("twitch_raid_retention", "twitch_raid_retention_pkey"):
+                    conn.execute(
+                        "ALTER TABLE twitch_raid_retention DROP CONSTRAINT twitch_raid_retention_pkey"
+                    )
+                conn.execute(
+                    """
+                    ALTER TABLE twitch_raid_retention
+                    ADD CONSTRAINT twitch_raid_retention_pkey PRIMARY KEY (raid_id, executed_at)
+                    """
+                )
+            if not _constraint_exists(
+                "twitch_raid_retention",
+                "twitch_raid_retention_raid_history_ref_fkey",
+            ):
+                conn.execute(
+                    """
+                    ALTER TABLE twitch_raid_retention
+                    ADD CONSTRAINT twitch_raid_retention_raid_history_ref_fkey
+                    FOREIGN KEY (raid_id, executed_at)
+                    REFERENCES twitch_raid_history(id, executed_at)
+                    ON DELETE CASCADE
+                    """
+                )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_twitch_raid_retention_raid_id
+                ON twitch_raid_retention(raid_id)
+                """
+            )
+
+            if _column_data_type("twitch_partner_raid_score_tracking", "raid_history_id") != "bigint":
+                conn.execute(
+                    """
+                    ALTER TABLE twitch_partner_raid_score_tracking
+                    ALTER COLUMN raid_history_id TYPE BIGINT
+                    USING raid_history_id::bigint
+                    """
+                )
+            conn.execute(
+                """
+                ALTER TABLE twitch_partner_raid_score_tracking
+                ADD COLUMN IF NOT EXISTS raid_history_executed_at TIMESTAMPTZ
+                """
+            )
+            conn.execute(
+                """
+                WITH resolved_history AS (
+                    SELECT
+                        tracking.id,
+                        history.id AS raid_history_id,
+                        history.executed_at AS raid_history_executed_at
+                    FROM twitch_partner_raid_score_tracking tracking
+                    LEFT JOIN LATERAL (
+                        SELECT rh.id, rh.executed_at
+                        FROM twitch_raid_history rh
+                        WHERE rh.to_broadcaster_id = tracking.to_broadcaster_id
+                          AND LOWER(rh.to_broadcaster_login) = LOWER(tracking.to_broadcaster_login)
+                          AND LOWER(rh.from_broadcaster_login) = LOWER(tracking.from_broadcaster_login)
+                          AND COALESCE(rh.success, FALSE) IS TRUE
+                          AND (
+                              COALESCE(NULLIF(BTRIM(tracking.from_broadcaster_id::text), ''), '') = ''
+                              OR rh.from_broadcaster_id = tracking.from_broadcaster_id
+                          )
+                          AND NULLIF(BTRIM(tracking.confirmed_at::text), '') IS NOT NULL
+                          AND rh.executed_at
+                              <= NULLIF(BTRIM(tracking.confirmed_at::text), '')::timestamptz
+                                 + INTERVAL '10 minutes'
+                        ORDER BY rh.executed_at DESC, rh.id DESC
+                        LIMIT 1
+                    ) history ON TRUE
+                )
+                UPDATE twitch_partner_raid_score_tracking tracking
+                SET raid_history_id = resolved_history.raid_history_id,
+                    raid_history_executed_at = resolved_history.raid_history_executed_at
+                FROM resolved_history
+                WHERE tracking.id = resolved_history.id
+                  AND (
+                      tracking.raid_history_id IS DISTINCT FROM resolved_history.raid_history_id
+                      OR tracking.raid_history_executed_at
+                         IS DISTINCT FROM resolved_history.raid_history_executed_at
+                  )
+                """
+            )
+            if not _constraint_exists(
+                "twitch_partner_raid_score_tracking",
+                "twitch_partner_raid_score_tracking_raid_history_ref_fkey",
+            ):
+                conn.execute(
+                    """
+                    ALTER TABLE twitch_partner_raid_score_tracking
+                    ADD CONSTRAINT twitch_partner_raid_score_tracking_raid_history_ref_fkey
+                    FOREIGN KEY (raid_history_id, raid_history_executed_at)
+                    REFERENCES twitch_raid_history(id, executed_at)
+                    ON DELETE SET NULL
+                    """
+                )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_partner_raid_tracking_history_ref
+                ON twitch_partner_raid_score_tracking(raid_history_id, raid_history_executed_at)
+                """
+            )
 
     # 1) twitch_streamers
     conn.execute(
@@ -1129,8 +1592,8 @@ def ensure_schema(conn) -> None:
             chatter_id               TEXT,
             first_message_at         TEXT    NOT NULL,
             messages                 INTEGER DEFAULT 0,
-            is_first_time_streamer     INTEGER DEFAULT 0,
-            seen_via_chatters_api    INTEGER DEFAULT 0,
+            is_first_time_streamer   BOOLEAN DEFAULT FALSE,
+            seen_via_chatters_api    BOOLEAN DEFAULT FALSE,
             last_seen_at             TEXT,
             PRIMARY KEY (session_id, chatter_login)
         )
@@ -1181,7 +1644,7 @@ def ensure_schema(conn) -> None:
             chatter_id     TEXT,
             message_id     TEXT,
             message_ts     TEXT    NOT NULL,
-            is_command     INTEGER DEFAULT 0,
+            is_command     BOOLEAN DEFAULT FALSE,
             content        TEXT
         )
         """
@@ -1198,12 +1661,49 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_twitch_chat_messages_message_id ON twitch_chat_messages(message_id)"
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS twitch_raw_chat_ingest_health (
+            streamer_login             TEXT PRIMARY KEY,
+            last_raw_chat_message_at   TEXT,
+            last_raw_chat_insert_ok_at TEXT,
+            last_raw_chat_insert_error_at TEXT,
+            last_raw_chat_error        TEXT,
+            raw_chat_lag_seconds       INTEGER,
+            updated_at                 TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_twitch_raw_chat_ingest_health_updated "
+        "ON twitch_raw_chat_ingest_health(updated_at)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS twitch_raw_chat_backfill_runs (
+            id               SERIAL PRIMARY KEY,
+            streamer_login   TEXT NOT NULL,
+            started_at       TEXT NOT NULL,
+            finished_at      TEXT,
+            status           TEXT NOT NULL DEFAULT 'not_started',
+            source_label     TEXT,
+            imported_messages INTEGER DEFAULT 0,
+            deduped_messages  INTEGER DEFAULT 0,
+            affected_sessions INTEGER DEFAULT 0,
+            note             TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_twitch_raw_chat_backfill_runs_streamer "
+        "ON twitch_raw_chat_backfill_runs(streamer_login, started_at DESC)"
+    )
 
     # 6) Raid history & blacklist
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS twitch_raid_history (
-            id                       SERIAL PRIMARY KEY,
+            id                       BIGSERIAL PRIMARY KEY,
             from_broadcaster_id      TEXT NOT NULL,
             from_broadcaster_login   TEXT NOT NULL,
             to_broadcaster_id        TEXT NOT NULL,
@@ -1211,10 +1711,10 @@ def ensure_schema(conn) -> None:
             viewer_count             INTEGER DEFAULT 0,
             stream_duration_sec      INTEGER,
             reason                   TEXT,
-            executed_at              TEXT DEFAULT CURRENT_TIMESTAMP,
+            executed_at              TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
             success                  BOOLEAN DEFAULT TRUE,
             error_message            TEXT,
-            target_stream_started_at TEXT,
+            target_stream_started_at TIMESTAMPTZ,
             candidates_count         INTEGER DEFAULT 0
         )
         """
@@ -1249,31 +1749,23 @@ def ensure_schema(conn) -> None:
         conn.execute("ALTER TABLE twitch_raid_history ALTER COLUMN success SET DEFAULT TRUE")
     except Exception as exc:
         log.debug("Skipping default migration on twitch_raid_history.success: %s", exc)
-    # Ältere Deployments hatten auf twitch_raid_history kein Primary/Unique-Key.
-    # Der FK von twitch_raid_retention -> twitch_raid_history(id) schlägt dann fehl.
-    raid_history_has_unique_index = _has_unique_constraint("twitch_raid_history", ["id"])
-    raid_history_dimensions = _timescale_dimension_columns("twitch_raid_history")
-    raid_history_is_timescale_time_partitioned = "executed_at" in raid_history_dimensions
-    if not raid_history_has_unique_index:
-        if raid_history_is_timescale_time_partitioned:
-            log.info(
-                "twitch_raid_history ist Timescale-time-partitioned (executed_at). "
-                "Eine UNIQUE-Constraint nur auf id ist dort nicht möglich; "
-                "twitch_raid_retention bleibt ohne FK auf raid_history."
+    raid_history_has_reference_key = _has_unique_constraint("twitch_raid_history", ["id", "executed_at"])
+    if not raid_history_has_reference_key:
+        created_reference_index = _create_index_allowing_compressed_hypertable(
+            "twitch_raid_history",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_raid_history_id_executed_at "
+            "ON twitch_raid_history(id, executed_at)",
+        )
+        raid_history_has_reference_key = (
+            _has_unique_constraint("twitch_raid_history", ["id", "executed_at"])
+            if created_reference_index
+            else _has_unique_constraint("twitch_raid_history", ["id", "executed_at"])
+        )
+        if _index_exists("idx_twitch_raid_history_id_executed_at") and not raid_history_has_reference_key:
+            log.warning(
+                "Index idx_twitch_raid_history_id_executed_at already exists but is not UNIQUE; "
+                "raid reference foreign keys remain deferred until the table is repaired."
             )
-        else:
-            created_unique_index = _create_index_allowing_compressed_hypertable(
-                "twitch_raid_history",
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_raid_history_id ON twitch_raid_history(id)",
-            )
-            # Re-check to ensure the constraint is actually unique (IF NOT EXISTS may keep a legacy non-unique index).
-            raid_history_has_unique_index = _has_unique_constraint("twitch_raid_history", ["id"]) if created_unique_index else False
-            if _index_exists("idx_twitch_raid_history_id") and not raid_history_has_unique_index:
-                log.warning(
-                    "Index idx_twitch_raid_history_id already exists but is not UNIQUE; "
-                    "twitch_raid_retention will be created without a foreign key. "
-                    "Consider decompressing old chunks and recreating the unique index."
-                )
 
     conn.execute(
         """
@@ -1287,69 +1779,35 @@ def ensure_schema(conn) -> None:
     )
 
     # 6b) Raid retention rollup (computed)
-    if not raid_history_has_unique_index:
-        if raid_history_is_timescale_time_partitioned:
-            log.info(
-                "twitch_raid_retention wird ohne FK zu twitch_raid_history erstellt "
-                "(Timescale-Partitionierung auf executed_at verhindert UNIQUE(id))."
-            )
-        else:
-            log.warning(
-                "twitch_raid_history(id) is still missing a unique index; twitch_raid_retention will be created without FK. "
-                "Consider manually decompressing old chunks and adding the unique index to restore cascading deletes."
-            )
-
-    raid_id_fk_sql = (
-        "raid_id                INTEGER PRIMARY KEY REFERENCES twitch_raid_history(id) ON DELETE CASCADE"
-        if raid_history_has_unique_index
-        else "raid_id                INTEGER PRIMARY KEY"
-    )
-
-    try:
-        conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS twitch_raid_retention (
-                {raid_id_fk_sql},
-                from_broadcaster_login TEXT NOT NULL,
-                to_broadcaster_login   TEXT NOT NULL,
-                viewer_count_sent      INTEGER NOT NULL,
-                executed_at            TEXT NOT NULL,
-                target_session_id      INTEGER REFERENCES twitch_stream_sessions(id),
-                chatters_at_plus5m     INTEGER,
-                chatters_at_plus15m    INTEGER,
-                chatters_at_plus30m    INTEGER,
-                known_from_raider      INTEGER,
-                new_to_target          INTEGER,
-                new_chatters           INTEGER,
-                computed_at            TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-    except psycopg.errors.InvalidForeignKey as exc:
+    if not raid_history_has_reference_key:
         log.warning(
-            "Creating twitch_raid_retention with FK failed because twitch_raid_history(id) lacks a unique constraint: %s",
-            exc,
+            "twitch_raid_history(id, executed_at) is still missing a unique key; "
+            "raid reference foreign keys will be added by the repair path once the index exists."
         )
-        # Fallback: ensure the table exists without the FK so schema init completes.
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS twitch_raid_retention (
-                raid_id                INTEGER PRIMARY KEY,
-                from_broadcaster_login TEXT NOT NULL,
-                to_broadcaster_login   TEXT NOT NULL,
-                viewer_count_sent      INTEGER NOT NULL,
-                executed_at            TEXT NOT NULL,
-                target_session_id      INTEGER REFERENCES twitch_stream_sessions(id),
-                chatters_at_plus5m     INTEGER,
-                chatters_at_plus15m    INTEGER,
-                chatters_at_plus30m    INTEGER,
-                known_from_raider      INTEGER,
-                new_to_target          INTEGER,
-                new_chatters           INTEGER,
-                computed_at            TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-            """
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS twitch_raid_retention (
+            raid_id                BIGINT NOT NULL,
+            from_broadcaster_login TEXT NOT NULL,
+            to_broadcaster_login   TEXT NOT NULL,
+            viewer_count_sent      INTEGER NOT NULL,
+            executed_at            TIMESTAMPTZ NOT NULL,
+            target_session_id      INTEGER REFERENCES twitch_stream_sessions(id),
+            chatters_at_plus5m     INTEGER,
+            chatters_at_plus15m    INTEGER,
+            chatters_at_plus30m    INTEGER,
+            known_from_raider      INTEGER,
+            new_to_target          INTEGER,
+            new_chatters           INTEGER,
+            computed_at            TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (raid_id, executed_at)
         )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_twitch_raid_retention_raid_id ON twitch_raid_retention(raid_id)"
+    )
 
     # 7) Token blacklist
     conn.execute(
@@ -1997,7 +2455,8 @@ def ensure_schema(conn) -> None:
         """
         CREATE TABLE IF NOT EXISTS twitch_partner_raid_score_tracking (
             id                        SERIAL PRIMARY KEY,
-            raid_history_id           INTEGER,
+            raid_history_id           BIGINT,
+            raid_history_executed_at  TIMESTAMPTZ,
             from_broadcaster_id       TEXT,
             from_broadcaster_login    TEXT NOT NULL,
             to_broadcaster_id         TEXT NOT NULL,
@@ -2023,6 +2482,12 @@ def ensure_schema(conn) -> None:
         """
     )
     conn.execute(
+        """
+        ALTER TABLE twitch_partner_raid_score_tracking
+        ADD COLUMN IF NOT EXISTS raid_history_executed_at TIMESTAMPTZ
+        """
+    )
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_partner_raid_tracking_target "
         "ON twitch_partner_raid_score_tracking(to_broadcaster_id, confirmed_at)"
     )
@@ -2034,6 +2499,11 @@ def ensure_schema(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_partner_raid_tracking_history "
         "ON twitch_partner_raid_score_tracking(raid_history_id)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_partner_raid_tracking_history_ref "
+        "ON twitch_partner_raid_score_tracking(raid_history_id, raid_history_executed_at)"
+    )
+    _repair_raid_identity_schema()
 
     # 20) Web-Sessions (migrated from SQLite)
     conn.execute(

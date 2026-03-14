@@ -10,7 +10,14 @@ import {
 import { fetchChatAnalytics } from '@/api/client';
 import { useViewerProfiles, useCoaching, useChatHypeTimeline, useChatContentAnalysis, useChatSocialGraph } from '@/hooks/useAnalytics';
 import { ViewerProfiles } from '@/components/charts/ViewerProfiles';
-import type { ChatAnalytics as ChatAnalyticsType, CoachingData, ChatHypeTimeline, ChatContentAnalysis, ChatSocialGraph } from '@/types/analytics';
+import type {
+  ChatAnalytics as ChatAnalyticsType,
+  CoachingData,
+  ChatHypeTimeline,
+  ChatContentAnalysis,
+  ChatSocialGraph,
+  RawChatStatus,
+} from '@/types/analytics';
 import {
   CHAT_AUDIENCE_TOOLTIP,
   normalizeHourlyActivity,
@@ -19,11 +26,51 @@ import {
   resolveQualityMethod,
 } from '@/utils/engagementKpi';
 
+import { PlanGateCard } from '@/components/cards/PlanGateCard';
 import type { TimeRange } from '@/types/analytics';
 
 interface ChatAnalyticsProps {
   streamer: string;
   days: TimeRange;
+}
+
+function RawChatStatusBanner({
+  status,
+  compact = false,
+}: {
+  status?: RawChatStatus;
+  compact?: boolean;
+}) {
+  if (!status) {
+    return null;
+  }
+  if (!status.suspectedIngestionIssue && status.available !== false && !status.note) {
+    return null;
+  }
+
+  return (
+    <div
+      className={`rounded-2xl border ${
+        status.suspectedIngestionIssue
+          ? 'border-warning/30 bg-warning/10 text-warning'
+          : 'border-white/10 bg-white/[0.04] text-text-secondary'
+      } ${compact ? 'mb-4 px-4 py-3 text-sm' : 'px-5 py-4 text-sm'}`}
+    >
+      <div className="flex items-start gap-3">
+        <AlertCircle className={`${compact ? 'mt-0.5 h-4 w-4' : 'mt-0.5 h-5 w-5'} shrink-0`} />
+        <div>
+          <p className="font-medium text-white">
+            {status.suspectedIngestionIssue
+              ? 'Roh-Chat-Lücke erkannt'
+              : 'Keine Roh-Chat-Nachrichten im Zeitraum'}
+          </p>
+          <p className="mt-1 leading-5">
+            {status.note || 'Message-basierte KPIs und Charts sind für diesen Zeitraum eingeschränkt.'}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
@@ -91,6 +138,8 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
 
   return (
     <div className="space-y-6">
+      <RawChatStatusBanner status={data.rawChatStatus} />
+
       {dataMethod !== 'real_samples' && (
         <div className="panel-card rounded-2xl p-4 text-sm text-text-secondary">
           Datenqualität eingeschränkt: mindestens eine KPI basiert auf Low-Coverage/Fallback-Samples.
@@ -420,13 +469,19 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
       {/* ═══ Chat Deep Analysis Sections ═══ */}
 
       {/* Hype-Momente */}
-      {hypeData && <HypeMomenteSection data={hypeData} selectedSessionId={selectedSessionId} onSessionChange={setSelectedSessionId} />}
+      <PlanGateCard featureId="hype_timeline" title="Hype-Timeline">
+        {hypeData && <HypeMomenteSection data={hypeData} selectedSessionId={selectedSessionId} onSessionChange={setSelectedSessionId} />}
+      </PlanGateCard>
 
       {/* Stimmung & Topics */}
-      {contentData && <StimmungTopicsSection data={contentData} />}
+      <PlanGateCard featureId="chat_content_analysis" title="Chat-Inhaltsanalyse">
+        {contentData && <StimmungTopicsSection data={contentData} />}
+      </PlanGateCard>
 
       {/* Chat-Netzwerk */}
-      {socialData && <ChatNetzwerkSection data={socialData} />}
+      <PlanGateCard featureId="chat_social_graph" title="Chat Social Graph">
+        {socialData && <ChatNetzwerkSection data={socialData} />}
+      </PlanGateCard>
     </div>
   );
 }
@@ -726,6 +781,8 @@ function HypeMomenteSection({
       transition={{ delay: 0.35 }}
       className="panel-card rounded-2xl p-6"
     >
+      <RawChatStatusBanner status={data.rawChatStatus} compact />
+
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <Zap className="w-6 h-6 text-warning" />
@@ -885,6 +942,8 @@ function StimmungTopicsSection({ data }: { data: ChatContentAnalysis }) {
       transition={{ delay: 0.4 }}
       className="panel-card rounded-2xl p-6"
     >
+      <RawChatStatusBanner status={data.rawChatStatus} compact />
+
       <div className="flex items-center gap-3 mb-6">
         <Smile className="w-6 h-6 text-success" />
         <h2 className="text-xl font-bold text-white">Stimmung & Topics</h2>
@@ -1070,7 +1129,13 @@ function StimmungTopicsSection({ data }: { data: ChatContentAnalysis }) {
 // ---------------------------------------------------------------------------
 
 function ChatNetzwerkSection({ data }: { data: ChatSocialGraph }) {
-  if (data.totalMentions === 0) return null;
+  const shouldRenderEmptyState =
+    data.totalMentions === 0 &&
+    (data.rawChatStatus?.suspectedIngestionIssue ||
+      data.rawChatStatus?.available === false ||
+      Boolean(data.rawChatStatus?.note));
+
+  if (data.totalMentions === 0 && !shouldRenderEmptyState) return null;
 
   return (
     <motion.div
@@ -1079,77 +1144,87 @@ function ChatNetzwerkSection({ data }: { data: ChatSocialGraph }) {
       transition={{ delay: 0.45 }}
       className="panel-card rounded-2xl p-6"
     >
+      <RawChatStatusBanner status={data.rawChatStatus} compact />
+
       <div className="flex items-center gap-3 mb-6">
         <AtSign className="w-6 h-6 text-accent" />
         <h2 className="text-xl font-bold text-white">Chat-Netzwerk</h2>
       </div>
 
-      {/* Stats Row */}
-      <div className="grid grid-cols-3 gap-4 mb-6">
-        <div className="text-center p-3 rounded-lg bg-background/50">
-          <div className="text-2xl font-bold text-white">{data.totalMentions}</div>
-          <div className="text-xs text-text-secondary">@Mentions gesamt</div>
+      {data.totalMentions === 0 ? (
+        <div className="rounded-xl border border-border/60 bg-background/40 px-4 py-8 text-center text-sm text-text-secondary">
+          Keine belastbaren Mention-Daten im gewählten Zeitraum.
         </div>
-        <div className="text-center p-3 rounded-lg bg-background/50">
-          <div className="text-2xl font-bold text-accent">{data.uniqueMentioners}</div>
-          <div className="text-xs text-text-secondary">Unique Mentioner</div>
-        </div>
-        <div className="text-center p-3 rounded-lg bg-background/50">
-          <div className="text-2xl font-bold text-primary">{data.uniqueMentioned}</div>
-          <div className="text-xs text-text-secondary">Erwähnte User</div>
-        </div>
-      </div>
+      ) : (
+        <>
+          {/* Stats Row */}
+          <div className="grid grid-cols-3 gap-4 mb-6">
+            <div className="text-center p-3 rounded-lg bg-background/50">
+              <div className="text-2xl font-bold text-white">{data.totalMentions}</div>
+              <div className="text-xs text-text-secondary">@Mentions gesamt</div>
+            </div>
+            <div className="text-center p-3 rounded-lg bg-background/50">
+              <div className="text-2xl font-bold text-accent">{data.uniqueMentioners}</div>
+              <div className="text-xs text-text-secondary">Unique Mentioner</div>
+            </div>
+            <div className="text-center p-3 rounded-lg bg-background/50">
+              <div className="text-2xl font-bold text-primary">{data.uniqueMentioned}</div>
+              <div className="text-xs text-text-secondary">Erwähnte User</div>
+            </div>
+          </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Hub Cards */}
-        <div>
-          <h3 className="text-sm font-medium text-text-secondary mb-3">Conversation-Hubs</h3>
-          <div className="space-y-2">
-            {data.hubs.slice(0, 5).map((hub, i) => (
-              <div key={hub.login} className="flex items-center gap-3 p-3 rounded-xl bg-background/75 border border-border/65">
-                <div className="w-7 h-7 rounded-full bg-accent/20 flex items-center justify-center text-xs font-bold text-accent">
-                  {i + 1}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="font-medium text-white text-sm truncate">{hub.login}</div>
-                  <div className="text-xs text-text-secondary">
-                    {hub.mentionsSent} gesendet · {hub.mentionsReceived} erhalten
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Hub Cards */}
+            <div>
+              <h3 className="text-sm font-medium text-text-secondary mb-3">Conversation-Hubs</h3>
+              <div className="space-y-2">
+                {data.hubs.slice(0, 5).map((hub, i) => (
+                  <div key={hub.login} className="flex items-center gap-3 p-3 rounded-xl bg-background/75 border border-border/65">
+                    <div className="w-7 h-7 rounded-full bg-accent/20 flex items-center justify-center text-xs font-bold text-accent">
+                      {i + 1}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-white text-sm truncate">{hub.login}</div>
+                      <div className="text-xs text-text-secondary">
+                        {hub.mentionsSent} gesendet · {hub.mentionsReceived} erhalten
+                      </div>
+                    </div>
+                    <div className="text-sm font-bold text-accent">{hub.score}</div>
                   </div>
-                </div>
-                <div className="text-sm font-bold text-accent">{hub.score}</div>
+                ))}
               </div>
-            ))}
-          </div>
-        </div>
+            </div>
 
-        {/* Top Pairs + Distribution */}
-        <div className="space-y-4">
-          <div>
-            <h3 className="text-sm font-medium text-text-secondary mb-3">Top-Gespräche</h3>
-            <div className="space-y-1.5">
-              {data.topPairs.slice(0, 8).map((pair, i) => (
-                <div key={i} className="flex items-center justify-between text-xs bg-background/50 rounded-lg px-3 py-2">
-                  <span className="text-white">
-                    <span className="font-medium">{pair.from}</span>
-                    <span className="text-text-secondary mx-1.5">→</span>
-                    <span className="font-medium">{pair.to}</span>
-                  </span>
-                  <span className="text-accent font-bold">{pair.count}x</span>
+            {/* Top Pairs + Distribution */}
+            <div className="space-y-4">
+              <div>
+                <h3 className="text-sm font-medium text-text-secondary mb-3">Top-Gespräche</h3>
+                <div className="space-y-1.5">
+                  {data.topPairs.slice(0, 8).map((pair, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs bg-background/50 rounded-lg px-3 py-2">
+                      <span className="text-white">
+                        <span className="font-medium">{pair.from}</span>
+                        <span className="text-text-secondary mx-1.5">→</span>
+                        <span className="font-medium">{pair.to}</span>
+                      </span>
+                      <span className="text-accent font-bold">{pair.count}x</span>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          </div>
+              </div>
 
-          <div>
-            <h3 className="text-sm font-medium text-text-secondary mb-2">Mention-Verteilung</h3>
-            <div className="flex gap-3 text-xs">
-              <span className="text-text-secondary">1x: <span className="text-white font-medium">{data.mentionDistribution.mentionedOnce}</span></span>
-              <span className="text-text-secondary">2-5x: <span className="text-white font-medium">{data.mentionDistribution.mentioned2to5}</span></span>
-              <span className="text-text-secondary">5+: <span className="text-white font-medium">{data.mentionDistribution.mentioned5plus}</span></span>
+              <div>
+                <h3 className="text-sm font-medium text-text-secondary mb-2">Mention-Verteilung</h3>
+                <div className="flex gap-3 text-xs">
+                  <span className="text-text-secondary">1x: <span className="text-white font-medium">{data.mentionDistribution.mentionedOnce}</span></span>
+                  <span className="text-text-secondary">2-5x: <span className="text-white font-medium">{data.mentionDistribution.mentioned2to5}</span></span>
+                  <span className="text-text-secondary">5+: <span className="text-white font-medium">{data.mentionDistribution.mentioned5plus}</span></span>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
-      </div>
+        </>
+      )}
     </motion.div>
   );
 }

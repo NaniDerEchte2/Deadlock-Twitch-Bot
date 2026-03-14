@@ -157,6 +157,19 @@ def migrate_table(
     return inserted
 
 
+def align_sequence(pg_conn: psycopg.Connection, table: str, column: str) -> None:
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT pg_get_serial_sequence(%s, %s)", (table, column))
+        row = cur.fetchone()
+        seq_name = row[0] if row else None
+        if not seq_name:
+            return
+        cur.execute(
+            f"SELECT setval(%s, COALESCE((SELECT MAX({column}) FROM {table}), 0), true)",
+            (seq_name,),
+        )
+
+
 def main() -> int:
     args = parse_args()
     if not args.dsn:
@@ -176,6 +189,7 @@ def main() -> int:
             total += migrate_table(
                 table, sqlite_conn, pg_conn, args.batch, truncate_first=not args.no_truncate
             )
+        align_sequence(pg_conn, "twitch_raid_history", "id")
         pg_conn.execute("SET session_replication_role = 'origin';")
         print(f"Fertig. Gesamt migriert: {total} Zeilen.")
     return 0

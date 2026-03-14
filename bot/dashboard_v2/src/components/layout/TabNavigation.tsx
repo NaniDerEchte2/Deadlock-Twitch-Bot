@@ -13,7 +13,10 @@ import {
   UserSearch,
   FlaskConical,
   Brain,
+  Lock,
 } from 'lucide-react';
+import { usePlan } from '../../context/PlanContext';
+import type { TabId as BillingTabId } from '../../types/billing';
 
 export type TabId =
   | 'overview'
@@ -59,20 +62,40 @@ interface TabNavigationProps {
 }
 
 export function TabNavigation({ activeTab, onTabChange }: TabNavigationProps) {
+  const { canAccessTab, isTabLocked, isPreviewMode } = usePlan();
+
+  // Filter tabs: show if accessible, or if in preview mode show locked tabs with opacity
+  const visibleTabs = tabs.filter(tab => {
+    const tabId = tab.id as BillingTabId;
+    if (canAccessTab(tabId)) return true;
+    // In preview mode, show locked tabs (with lock icon + reduced opacity)
+    if (isPreviewMode) return true;
+    return false;
+  });
+
   return (
     <nav className="mb-8 overflow-x-auto">
       <div className="panel-card rounded-2xl p-2.5 min-w-max flex items-center gap-1.5">
-        {tabs.map(tab => {
+        {visibleTabs.map(tab => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
+          const accessible = canAccessTab(tab.id as BillingTabId);
+          const locked = isTabLocked(tab.id as BillingTabId);
 
           return (
             <button
               key={tab.id}
-              onClick={() => onTabChange(tab.id)}
+              type="button"
+              onClick={() => {
+                if (accessible) {
+                  onTabChange(tab.id);
+                }
+              }}
+              disabled={!accessible}
+              aria-disabled={!accessible}
               className={`relative flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors whitespace-nowrap ${
                 isActive ? 'text-white' : 'text-text-secondary hover:text-white'
-              }`}
+              } ${locked ? 'opacity-50' : ''} ${!accessible ? 'cursor-not-allowed hover:text-text-secondary' : ''}`}
             >
               {isActive && (
                 <motion.div
@@ -89,6 +112,9 @@ export function TabNavigation({ activeTab, onTabChange }: TabNavigationProps) {
                   <span className="hidden sm:inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-accent/20 text-accent border border-accent/30 leading-none">
                     Beta
                   </span>
+                )}
+                {locked && (
+                  <Lock className="w-3 h-3 text-white/40" />
                 )}
               </span>
             </button>

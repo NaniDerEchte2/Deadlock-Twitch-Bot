@@ -9,6 +9,8 @@ from bot.analytics.api_audience import _AnalyticsAudienceMixin
 from bot.analytics.api_insights import _AnalyticsInsightsMixin
 from bot.analytics.api_overview import _AnalyticsOverviewMixin
 from bot.analytics.api_raids import _AnalyticsRaidsMixin
+from bot.analytics.raid_metrics import raid_identity_key
+from bot.analytics.api_viewers import _AnalyticsViewersMixin
 from bot.analytics.api_v2 import AnalyticsV2Mixin
 
 
@@ -144,6 +146,14 @@ class _DummyOverview(_AnalyticsOverviewMixin):
         return None
 
 
+class _DummyViewers(_AnalyticsViewersMixin):
+    def _require_v2_auth(self, request):
+        return None
+
+    def _require_extended_plan(self, request):
+        return None
+
+
 class _DummyV2(AnalyticsV2Mixin):
     def _require_v2_auth(self, request):
         return None
@@ -173,7 +183,7 @@ class RaidAnalyticsRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         def _fake_metrics(_conn, raids):
             return {
-                int(raid["raid_id"]): {
+                raid_identity_key(raid["raid_id"], raid["executed_at"]): {
                     "plus5m": 10,
                     "plus15m": 20,
                     "plus30m": 50,
@@ -227,7 +237,7 @@ class RaidAnalyticsRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         def _fake_metrics(_conn, raids):
             return {
-                int(raid["raid_id"]): {
+                raid_identity_key(raid["raid_id"], raid["executed_at"]): {
                     "plus5m": 0,
                     "plus15m": 0,
                     "plus30m": 0,
@@ -288,8 +298,10 @@ class RaidAnalyticsRegressionTests(unittest.IsolatedAsyncioTestCase):
             result = {}
             for raid in raids:
                 raid_id = int(raid["raid_id"])
+                raid_key = raid_identity_key(raid["raid_id"], raid["executed_at"])
+                assert raid_key is not None
                 if raid_id == 1:
-                    result[raid_id] = {
+                    result[raid_key] = {
                         "plus5m": 20,
                         "plus15m": 35,
                         "plus30m": 50,
@@ -297,7 +309,7 @@ class RaidAnalyticsRegressionTests(unittest.IsolatedAsyncioTestCase):
                         "new_chatters": 12,
                     }
                 else:
-                    result[raid_id] = {
+                    result[raid_key] = {
                         "plus5m": 0,
                         "plus15m": 0,
                         "plus30m": 0,
@@ -327,6 +339,68 @@ class RaidAnalyticsRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["per_source"][0]["avg_retention_30m"], 0.5)
         self.assertEqual(payload["per_source"][0]["known_audience_overlap"], 0.2)
 
+    async def test_duplicate_raid_ids_keep_retention_curves_split_by_executed_at(self) -> None:
+        full_rows = [
+            {
+                "raid_id": 7,
+                "from_broadcaster_login": "raider_a",
+                "viewer_count_sent": 10,
+                "executed_at": "2026-02-02T12:00:00+00:00",
+                "target_session_id": 1001,
+                "to_broadcaster_login": "target",
+            },
+            {
+                "raid_id": 7,
+                "from_broadcaster_login": "raider_a",
+                "viewer_count_sent": 10,
+                "executed_at": "2026-02-01T12:00:00+00:00",
+                "target_session_id": 1000,
+                "to_broadcaster_login": "target",
+            },
+        ]
+
+        def _fake_metrics(_conn, _raids):
+            return {
+                raid_identity_key(7, "2026-02-02T12:00:00+00:00"): {
+                    "plus5m": 2,
+                    "plus15m": 4,
+                    "plus30m": 8,
+                    "known_from_raider": 1,
+                    "new_chatters": 5,
+                },
+                raid_identity_key(7, "2026-02-01T12:00:00+00:00"): {
+                    "plus5m": 1,
+                    "plus15m": 2,
+                    "plus30m": 6,
+                    "known_from_raider": 3,
+                    "new_chatters": 2,
+                },
+            }
+
+        handler = _DummyRaids()
+        request = SimpleNamespace(query={"streamer": "target", "days": "90"})
+        with (
+            patch(
+                "bot.analytics.api_raids.storage.get_conn",
+                return_value=_ConnContext(_RaidAnalyticsConn(full_rows, list(full_rows), [])),
+            ),
+            patch(
+                "bot.analytics.api_raids.recalculate_raid_chat_metrics",
+                side_effect=_fake_metrics,
+            ),
+        ):
+            response = await handler._api_v2_raid_analytics(request)
+
+        payload = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(response.status, 200)
+        self.assertEqual(len(payload["retention_curves"]), 2)
+        self.assertEqual(payload["retention_curves"][0]["raid_id"], 7)
+        self.assertEqual(payload["retention_curves"][0]["new_chatters"], 5)
+        self.assertEqual(payload["retention_curves"][0]["retention_curve"]["plus30m"], 0.8)
+        self.assertEqual(payload["retention_curves"][1]["raid_id"], 7)
+        self.assertEqual(payload["retention_curves"][1]["new_chatters"], 2)
+        self.assertEqual(payload["retention_curves"][1]["retention_curve"]["plus30m"], 0.6)
+
     async def test_raid_analytics_recalculates_in_batches_for_large_windows(self) -> None:
         total_raids = 1201
         full_rows = [
@@ -346,7 +420,7 @@ class RaidAnalyticsRegressionTests(unittest.IsolatedAsyncioTestCase):
         def _fake_metrics(_conn, raids):
             batch_sizes.append(len(raids))
             return {
-                int(raid["raid_id"]): {
+                raid_identity_key(raid["raid_id"], raid["executed_at"]): {
                     "plus5m": 1,
                     "plus15m": 2,
                     "plus30m": 3,
@@ -415,9 +489,22 @@ class InsightsSqlRegressionTests(unittest.IsolatedAsyncioTestCase):
         handler = _DummyInsights()
         request = SimpleNamespace(query={"streamer": "target", "days": "30", "timezone": "UTC"})
         conn = _ChatAnalyticsSqlGuardConn()
-        with patch(
-            "bot.analytics.api_insights.storage.get_conn",
-            return_value=_ConnContext(conn),
+        with (
+            patch(
+                "bot.analytics.api_insights.storage.get_conn",
+                return_value=_ConnContext(conn),
+            ),
+            patch(
+                "bot.analytics.api_insights.build_raw_chat_status",
+                return_value={
+                    "available": False,
+                    "lastMessageAt": None,
+                    "gapStart": None,
+                    "suspectedIngestionIssue": False,
+                    "backfillState": "not_needed",
+                    "note": None,
+                },
+            ),
         ):
             response = await handler._api_v2_chat_analytics(request)
 
@@ -425,6 +512,243 @@ class InsightsSqlRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertTrue(conn.checked_first_time_cast)
         self.assertTrue(payload["dataQuality"]["botFilterApplied"])
+
+
+class ViewerDirectoryGapRegressionTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _setup_tables(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE twitch_chatter_rollup (
+                streamer_login TEXT,
+                chatter_login TEXT,
+                total_sessions INTEGER,
+                total_messages INTEGER,
+                first_seen_at TEXT,
+                last_seen_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE twitch_stream_sessions (
+                id INTEGER PRIMARY KEY,
+                streamer_login TEXT,
+                started_at TEXT,
+                ended_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE twitch_session_chatters (
+                session_id INTEGER,
+                streamer_login TEXT,
+                chatter_login TEXT,
+                messages INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE twitch_chat_messages (
+                session_id INTEGER,
+                streamer_login TEXT,
+                chatter_login TEXT,
+                message_ts TEXT,
+                content TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE twitch_raw_chat_ingest_health (
+                streamer_login TEXT,
+                last_raw_chat_message_at TEXT,
+                last_raw_chat_insert_ok_at TEXT,
+                last_raw_chat_insert_error_at TEXT,
+                last_raw_chat_error TEXT
+            )
+            """
+        )
+
+    async def test_viewer_directory_flags_presence_only_gap_with_raw_chat_status(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        self._setup_tables(conn)
+        conn.execute(
+            """
+            INSERT INTO twitch_stream_sessions (id, streamer_login, started_at, ended_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                1,
+                "target",
+                "2026-02-25T20:00:00+00:00",
+                "2026-02-25T22:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO twitch_session_chatters (
+                session_id, streamer_login, chatter_login, messages
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (1, "target", "purebacon_", 0),
+        )
+        conn.execute(
+            """
+            INSERT INTO twitch_chatter_rollup (
+                streamer_login, chatter_login, total_sessions, total_messages, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "target",
+                "purebacon_",
+                1,
+                0,
+                "2026-02-25T20:00:00+00:00",
+                "2026-02-25T20:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO twitch_raw_chat_ingest_health (
+                streamer_login, last_raw_chat_message_at, last_raw_chat_insert_ok_at,
+                last_raw_chat_insert_error_at, last_raw_chat_error
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "target",
+                "2026-02-25T20:05:00+00:00",
+                None,
+                "2026-02-25T20:05:00+00:00",
+                "insert timeout",
+            ),
+        )
+        conn.commit()
+
+        handler = _DummyViewers()
+        request = SimpleNamespace(query={"streamer": "target", "days": "30"})
+        try:
+            with patch("bot.analytics.api_viewers.storage.get_conn", return_value=_ConnContext(conn)):
+                response = await handler._api_v2_viewer_directory(request)
+        finally:
+            conn.close()
+
+        payload = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(response.status, 200)
+        self.assertTrue(payload["rawChatStatus"]["suspectedIngestionIssue"])
+        self.assertEqual(payload["viewers"][0]["login"], "purebacon_")
+        self.assertTrue(payload["viewers"][0]["presenceOnlyInWindow"])
+        self.assertFalse(payload["viewers"][0]["hasRawMessages"])
+        self.assertTrue(payload["viewers"][0]["messageGapNote"])
+
+    async def test_viewer_directory_uses_selected_window_for_core_counts(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        self._setup_tables(conn)
+        conn.executemany(
+            """
+            INSERT INTO twitch_stream_sessions (id, streamer_login, started_at, ended_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (1, "target", "2026-02-20T20:00:00+00:00", "2026-02-20T22:00:00+00:00"),
+                (2, "target", "2025-12-15T20:00:00+00:00", "2025-12-15T22:00:00+00:00"),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO twitch_session_chatters (
+                session_id, streamer_login, chatter_login, messages
+            ) VALUES (?, ?, ?, ?)
+            """,
+            [
+                (1, "target", "window_user", 3),
+                (2, "target", "window_user", 5),
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO twitch_chatter_rollup (
+                streamer_login, chatter_login, total_sessions, total_messages, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "target",
+                "window_user",
+                99,
+                999,
+                "2025-12-15T20:00:00+00:00",
+                "2026-02-20T22:00:00+00:00",
+            ),
+        )
+        conn.commit()
+
+        handler = _DummyViewers()
+        request = SimpleNamespace(query={"streamer": "target", "days": "30"})
+        try:
+            with patch("bot.analytics.api_viewers.storage.get_conn", return_value=_ConnContext(conn)):
+                response = await handler._api_v2_viewer_directory(request)
+        finally:
+            conn.close()
+
+        payload = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["days"], 30)
+        self.assertEqual(payload["viewers"][0]["login"], "window_user")
+        self.assertEqual(payload["viewers"][0]["totalSessions"], 1)
+        self.assertEqual(payload["viewers"][0]["totalMessages"], 3)
+
+    async def test_viewer_segments_respects_selected_window(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        self._setup_tables(conn)
+        conn.executemany(
+            """
+            INSERT INTO twitch_stream_sessions (id, streamer_login, started_at, ended_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (1, "target", "2026-02-21T20:00:00+00:00", "2026-02-21T22:00:00+00:00"),
+                (2, "target", "2025-12-10T20:00:00+00:00", "2025-12-10T22:00:00+00:00"),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO twitch_session_chatters (
+                session_id, streamer_login, chatter_login, messages
+            ) VALUES (?, ?, ?, ?)
+            """,
+            [
+                (1, "target", "recent_user", 1),
+                (2, "target", "old_user", 4),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO twitch_chatter_rollup (
+                streamer_login, chatter_login, total_sessions, total_messages, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("target", "recent_user", 5, 10, "2025-11-01T20:00:00+00:00", "2026-02-21T22:00:00+00:00"),
+                ("target", "old_user", 7, 20, "2025-10-01T20:00:00+00:00", "2025-12-10T22:00:00+00:00"),
+            ],
+        )
+        conn.commit()
+
+        handler = _DummyViewers()
+        request = SimpleNamespace(query={"streamer": "target", "days": "30"})
+        try:
+            with patch("bot.analytics.api_viewers.storage.get_conn", return_value=_ConnContext(conn)):
+                response = await handler._api_v2_viewer_segments(request)
+        finally:
+            conn.close()
+
+        payload = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["days"], 30)
+        total_segment_viewers = sum(item["count"] for item in payload["segments"].values())
+        self.assertEqual(total_segment_viewers, 1)
 
 
 class SessionDetailRegressionTests(unittest.IsolatedAsyncioTestCase):
@@ -839,7 +1163,7 @@ class OverviewRaidRetentionRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         def _fake_metrics(_conn, raids):
             return {
-                int(raid["raid_id"]): {
+                raid_identity_key(raid["raid_id"], raid["executed_at"]): {
                     "plus5m": 0,
                     "plus15m": 0,
                     "plus30m": 0,
@@ -875,6 +1199,68 @@ class OverviewRaidRetentionRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["dataQuality"]["raidMetricSource"], "recalculated")
         self.assertEqual(payload["dataQuality"]["recalculatedRaidCount"], 1)
         self.assertEqual(payload["dataQuality"]["storedFallbackRaidCount"], 0)
+
+    async def test_raid_retention_keeps_duplicate_raid_ids_split_by_executed_at(self) -> None:
+        rows = [
+            (
+                9,
+                "source_channel",
+                "target_channel",
+                10,
+                "2026-02-02T12:00:00+00:00",
+                1001,
+            ),
+            (
+                9,
+                "source_channel",
+                "target_channel",
+                10,
+                "2026-02-01T12:00:00+00:00",
+                1000,
+            ),
+        ]
+
+        def _fake_metrics(_conn, _raids):
+            return {
+                raid_identity_key(9, "2026-02-02T12:00:00+00:00"): {
+                    "plus5m": 1,
+                    "plus15m": 3,
+                    "plus30m": 7,
+                    "known_from_raider": 2,
+                    "new_chatters": 4,
+                },
+                raid_identity_key(9, "2026-02-01T12:00:00+00:00"): {
+                    "plus5m": 2,
+                    "plus15m": 4,
+                    "plus30m": 5,
+                    "known_from_raider": 1,
+                    "new_chatters": 1,
+                },
+            }
+
+        handler = _DummyOverview()
+        request = SimpleNamespace(query={"streamer": "source_channel", "days": "90"})
+        with (
+            patch(
+                "bot.analytics.api_overview.storage.get_conn",
+                return_value=_ConnContext(_OverviewRaidRetentionConn(rows)),
+            ),
+            patch(
+                "bot.analytics.api_overview.recalculate_raid_chat_metrics",
+                side_effect=_fake_metrics,
+            ),
+        ):
+            response = await handler._api_v2_raid_retention(request)
+
+        payload = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(response.status, 200)
+        self.assertEqual(len(payload["raids"]), 2)
+        self.assertEqual(payload["raids"][0]["raidId"], 9)
+        self.assertEqual(payload["raids"][0]["executedAt"], "2026-02-02T12:00:00+00:00")
+        self.assertEqual(payload["raids"][0]["chattersAt30m"], 7)
+        self.assertEqual(payload["raids"][1]["raidId"], 9)
+        self.assertEqual(payload["raids"][1]["executedAt"], "2026-02-01T12:00:00+00:00")
+        self.assertEqual(payload["raids"][1]["chattersAt30m"], 5)
 
     async def test_raid_retention_uses_stored_metrics_when_target_session_missing(self) -> None:
         rows = [
@@ -997,12 +1383,84 @@ class RaidMetricsSqlRegressionTests(unittest.TestCase):
                 ],
             )
 
-        self.assertIn(9001, metrics)
-        self.assertEqual(metrics[9001]["plus5m"], 1)
-        self.assertEqual(metrics[9001]["plus15m"], 3)
-        self.assertEqual(metrics[9001]["plus30m"], 4)
-        self.assertEqual(metrics[9001]["known_from_raider"], 2)
-        self.assertEqual(metrics[9001]["new_chatters"], 3)
+        raid_key = raid_identity_key(9001, "2026-02-01T12:00:00+00:00")
+        assert raid_key is not None
+        self.assertIn(raid_key, metrics)
+        self.assertEqual(metrics[raid_key]["plus5m"], 1)
+        self.assertEqual(metrics[raid_key]["plus15m"], 3)
+        self.assertEqual(metrics[raid_key]["plus30m"], 4)
+        self.assertEqual(metrics[raid_key]["known_from_raider"], 2)
+        self.assertEqual(metrics[raid_key]["new_chatters"], 3)
+
+    def test_recalculate_raid_chat_metrics_keeps_duplicate_raid_ids_split_by_executed_at(self) -> None:
+        from bot.analytics.raid_metrics import recalculate_raid_chat_metrics
+        from bot.storage import pg as storage_pg
+
+        with storage_pg.get_conn() as conn:
+            conn.execute(
+                """
+                CREATE TEMP TABLE twitch_session_chatters (
+                    session_id BIGINT NOT NULL,
+                    chatter_login TEXT,
+                    chatter_id TEXT,
+                    first_message_at TIMESTAMPTZ NOT NULL,
+                    messages INTEGER NOT NULL DEFAULT 0,
+                    last_seen_at TIMESTAMPTZ
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TEMP TABLE twitch_chatter_rollup (
+                    streamer_login TEXT NOT NULL,
+                    chatter_login TEXT NOT NULL,
+                    first_seen_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+            conn.executemany(
+                """
+                INSERT INTO twitch_session_chatters (
+                    session_id, chatter_login, chatter_id, first_message_at, messages, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (42, "viewer_a", "id_a", "2026-02-01T12:01:00+00:00", 1, "2026-02-01T12:04:00+00:00"),
+                    (42, "viewer_b", "id_b", "2026-02-01T12:06:00+00:00", 1, "2026-02-01T12:20:00+00:00"),
+                    (43, "viewer_c", "id_c", "2026-02-02T12:03:00+00:00", 1, "2026-02-02T12:06:00+00:00"),
+                    (43, "viewer_d", "id_d", "2026-02-02T12:07:00+00:00", 1, "2026-02-02T12:18:00+00:00"),
+                ],
+            )
+            metrics = recalculate_raid_chat_metrics(
+                conn,
+                [
+                    {
+                        "raid_id": 9002,
+                        "target_session_id": 42,
+                        "executed_at": "2026-02-01T12:00:00+00:00",
+                        "from_login": "raider_x",
+                        "to_login": "target_y",
+                    },
+                    {
+                        "raid_id": 9002,
+                        "target_session_id": 43,
+                        "executed_at": "2026-02-02T12:00:00+00:00",
+                        "from_login": "raider_x",
+                        "to_login": "target_y",
+                    },
+                ],
+            )
+
+        older_key = raid_identity_key(9002, "2026-02-01T12:00:00+00:00")
+        newer_key = raid_identity_key(9002, "2026-02-02T12:00:00+00:00")
+        assert older_key is not None
+        assert newer_key is not None
+        self.assertIn(older_key, metrics)
+        self.assertIn(newer_key, metrics)
+        self.assertEqual(metrics[older_key]["plus30m"], 2)
+        self.assertEqual(metrics[newer_key]["plus30m"], 2)
+        self.assertEqual(metrics[older_key]["plus5m"], 1)
+        self.assertEqual(metrics[newer_key]["plus5m"], 1)
 
 
 if __name__ == "__main__":

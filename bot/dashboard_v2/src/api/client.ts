@@ -126,6 +126,15 @@ function sanitizeInternalHomeOauthUrl(
   return sanitized;
 }
 
+function withPartnerHeaders(headers: HeadersInit = {}): Headers {
+  const resolved = new Headers(headers);
+  const token = getPartnerToken();
+  if (token) {
+    resolved.set('X-Partner-Token', token);
+  }
+  return resolved;
+}
+
 // Helper to build URL with params
 function buildUrl(endpoint: string, params: Record<string, string | number | boolean> = {}): string {
   const url = new URL(`${API_BASE}${endpoint}`, window.location.origin);
@@ -157,7 +166,7 @@ async function fetchApi<T>(endpoint: string, params: Record<string, string | num
   const timer = abortCtrl ? setTimeout(() => abortCtrl.abort(), timeoutMs!) : null;
 
   const response = await fetch(url, {
-    headers: { 'Accept': 'application/json' },
+    headers: withPartnerHeaders({ 'Accept': 'application/json' }),
     signal: abortCtrl?.signal,
   }).finally(() => {
     if (timer) clearTimeout(timer);
@@ -301,12 +310,22 @@ export interface AuthStatus {
   canViewAllStreamers: boolean;
   twitchLogin?: string | null;
   displayName?: string | null;
+  csrfToken?: string | null;
+  csrf_token?: string | null;
   permissions: {
     viewAllStreamers: boolean;
     viewComparison: boolean;
     viewChatAnalytics: boolean;
     viewOverlap: boolean;
   };
+  plan?: {
+    planId: string | null;
+    planName: string | null;
+    tier: import('../types/billing').PlanTier;
+    isExtended: boolean;
+    expiresAt: string | null;
+    source: string | null;
+  } | null;
 }
 
 export async function fetchAuthStatus(): Promise<AuthStatus> {
@@ -1042,6 +1061,7 @@ export async function fetchAudienceSharing(
 // Viewer Directory (paginated, filtered, sorted)
 export async function fetchViewerDirectory(
   streamer: string | null,
+  days: TimeRange,
   sort: ViewerSortField = 'sessions',
   order: 'asc' | 'desc' = 'desc',
   filter: ViewerFilterType = 'all',
@@ -1051,6 +1071,7 @@ export async function fetchViewerDirectory(
 ): Promise<ViewerDirectory> {
   return fetchApi<ViewerDirectory>('/viewer-directory', {
     streamer: streamer || '',
+    days,
     sort,
     order,
     filter,
@@ -1063,20 +1084,24 @@ export async function fetchViewerDirectory(
 // Viewer Detail (single viewer deep-dive)
 export async function fetchViewerDetail(
   streamer: string | null,
-  login: string
+  login: string,
+  days: TimeRange
 ): Promise<ViewerDetail> {
   return fetchApi<ViewerDetail>('/viewer-detail', {
     streamer: streamer || '',
     login,
+    days,
   });
 }
 
 // Viewer Segments (segmentation + churn risk)
 export async function fetchViewerSegments(
-  streamer: string | null
+  streamer: string | null,
+  days: TimeRange
 ): Promise<ViewerSegments> {
   return fetchApi<ViewerSegments>('/viewer-segments', {
     streamer: streamer || '',
+    days,
   });
 }
 
@@ -1197,4 +1222,170 @@ export interface RoadmapData {
 
 export async function fetchRoadmap(): Promise<RoadmapData> {
   return fetchApi<RoadmapData>('/roadmap');
+}
+
+// ── Billing ────────────────────────────────────────
+export type { CatalogPlan } from '../types/billing';
+import type { CatalogPlan } from '../types/billing';
+
+export async function fetchBillingCatalog(): Promise<{ plans: CatalogPlan[] }> {
+  return fetchApi<{ plans: CatalogPlan[] }>('/billing/catalog');
+}
+
+// ── Admin Affiliates ───────────────────────────────
+export interface Affiliate {
+  login: string;
+  display_name: string;
+  active: boolean;
+  total_claims: number;
+  total_provision: number;
+  created_at: string;
+  last_claim_at: string | null;
+}
+
+export interface AffiliateStats {
+  total_affiliates: number;
+  active_affiliates: number;
+  total_claims: number;
+  total_provision: number;
+  this_month_claims: number;
+  this_month_provision: number;
+}
+
+export interface AffiliateDetail {
+  affiliate: { login: string; display_name: string; active: boolean; created_at: string };
+  claims: Array<{
+    id: number;
+    customer_login: string;
+    claimed_at: string;
+    commission_cents: number;
+    commission_count: number;
+  }>;
+  stats: { total_claims: number; total_provision: number; avg_provision: number; active_customers: number };
+}
+
+export interface AffiliatePortalData {
+  affiliate: { login: string; display_name: string; active: boolean; referral_code: string; referral_url: string };
+  stats: { total_claims: number; total_provision: number; this_month_claims: number; this_month_provision: number; pending_payout: number };
+  recent_claims: Array<{ customer_display_name: string; plan_name: string | null; amount: number; created_at: string }>;
+}
+
+async function fetchAdminApi<T>(path: string): Promise<T> {
+  const url = new URL(`/twitch/api/admin${path}`, window.location.origin);
+  const token = getPartnerToken();
+  if (token) {
+    url.searchParams.set('partner_token', token);
+  }
+
+  const response = await fetch(url.toString(), {
+    headers: withPartnerHeaders({ 'Accept': 'application/json' }),
+  });
+
+  if (response.status === 401) {
+    const unauthorized = await response.json().catch(() => null) as
+      | { error?: string; loginUrl?: string }
+      | null;
+    if (unauthorized?.loginUrl) {
+      window.location.href = sanitizeInternalRedirectUrl(
+        unauthorized.loginUrl,
+        DASHBOARD_V2_LOGIN_FALLBACK
+      );
+      throw new Error('Redirecting to Twitch login');
+    }
+    throw new Error(unauthorized?.error || 'Unauthorized');
+  }
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.error || `Server-Fehler (HTTP ${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function fetchAdminAffiliates(): Promise<{ affiliates: Affiliate[] }> {
+  return fetchAdminApi<{ affiliates: Affiliate[] }>('/affiliates');
+}
+
+export async function fetchAdminAffiliateStats(): Promise<AffiliateStats> {
+  return fetchAdminApi<AffiliateStats>('/affiliates/stats');
+}
+
+export async function fetchAdminAffiliateDetail(login: string): Promise<AffiliateDetail> {
+  return fetchAdminApi<AffiliateDetail>(`/affiliates/${login}`);
+}
+
+export async function toggleAffiliate(
+  login: string,
+  csrfToken: string | null | undefined
+): Promise<{ login: string; active: boolean }> {
+  if (!csrfToken) {
+    throw new Error('Missing CSRF token');
+  }
+  const url = new URL(`/twitch/api/admin/affiliates/${login}/toggle`, window.location.origin);
+  const token = getPartnerToken();
+  if (token) {
+    url.searchParams.set('partner_token', token);
+  }
+
+  const response = await fetch(url.toString(), {
+    method: 'POST',
+    headers: withPartnerHeaders({
+      'Accept': 'application/json',
+      'X-CSRF-Token': csrfToken,
+    }),
+  });
+
+  if (response.status === 401) {
+    const unauthorized = await response.json().catch(() => null) as
+      | { error?: string; loginUrl?: string }
+      | null;
+    if (unauthorized?.loginUrl) {
+      window.location.href = sanitizeInternalRedirectUrl(
+        unauthorized.loginUrl,
+        DASHBOARD_V2_LOGIN_FALLBACK
+      );
+      throw new Error('Redirecting to Twitch login');
+    }
+    throw new Error(unauthorized?.error || 'Unauthorized');
+  }
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.error || `Server-Fehler (HTTP ${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function fetchAffiliatePortal(): Promise<AffiliatePortalData> {
+  const url = buildUrl('/affiliate/portal');
+  const response = await fetch(url, {
+    headers: withPartnerHeaders({ 'Accept': 'application/json' }),
+  });
+
+  if (response.status === 401) {
+    const unauthorized = await response.json().catch(() => null) as
+      | { error?: string; loginUrl?: string }
+      | null;
+    if (unauthorized?.loginUrl) {
+      window.location.href = sanitizeInternalRedirectUrl(
+        unauthorized.loginUrl,
+        DASHBOARD_V2_LOGIN_FALLBACK
+      );
+      throw new Error('Redirecting to Twitch login');
+    }
+    throw new Error(unauthorized?.error || 'Unauthorized');
+  }
+
+  if (response.status === 404) {
+    throw new Error('affiliate_not_found');
+  }
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.error || `Server-Fehler (HTTP ${response.status})`);
+  }
+
+  return response.json();
 }

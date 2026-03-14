@@ -582,6 +582,89 @@ if TWITCHIO_AVAILABLE:
                 ctx.author.name,
             )
 
+        @twitchio_commands.command(
+            name="lurkersteuer_off",
+            aliases=["lurkersteuer_aus", "lurker_tax_off"],
+        )
+        async def cmd_lurkersteuer_off(self, ctx: twitchio_commands.Context):
+            """!lurkersteuer_off - Deaktiviert die Lurker Steuer für den aktuellen Channel."""
+            is_broadcaster = getattr(
+                ctx.author, "is_broadcaster", getattr(ctx.author, "broadcaster", False)
+            )
+            if not is_broadcaster:
+                await ctx.send(
+                    f"@{ctx.author.name} Nur der Broadcaster kann die Lurker Steuer dauerhaft deaktivieren."
+                )
+                return
+
+            channel_name = ctx.channel.name
+            streamer_data = self._get_streamer_by_channel(channel_name)
+            if not streamer_data:
+                await ctx.send(
+                    f"@{ctx.author.name} Dieser Kanal ist nicht als Partner registriert."
+                )
+                return
+
+            twitch_login, twitch_user_id, _ = streamer_data
+            loader = getattr(self, "_load_lurker_tax_settings", None)
+            saver = getattr(self, "_set_lurker_tax_enabled", None)
+            settings = (
+                loader(twitch_login)
+                if callable(loader)
+                else {"plan_id": "raid_free", "is_paid_plan": False, "enabled": False}
+            )
+            if not bool(settings.get("is_paid_plan")):
+                await ctx.send(
+                    f"@{ctx.author.name} Die Lurker Steuer ist nur in bezahlten Plänen verfügbar."
+                )
+                return
+
+            saved = False
+            if callable(saver):
+                saved = bool(
+                    saver(
+                        twitch_login=twitch_login,
+                        twitch_user_id=str(twitch_user_id),
+                        plan_id=str(settings.get("plan_id") or ""),
+                        enabled=False,
+                    )
+                )
+            else:
+                try:
+                    with get_conn() as conn:
+                        conn.execute(
+                            """
+                            UPDATE streamer_plans
+                               SET lurker_tax_enabled = 0
+                             WHERE LOWER(COALESCE(twitch_login, '')) = LOWER(?)
+                            """,
+                            (twitch_login,),
+                        )
+                        conn.commit()
+                    saved = True
+                except Exception:
+                    log.debug(
+                        "Lurker-Steuer disable fallback failed for %s",
+                        twitch_login,
+                        exc_info=True,
+                    )
+
+            if not saved:
+                await ctx.send(
+                    f"@{ctx.author.name} Lurker Steuer konnte gerade nicht deaktiviert werden."
+                )
+                return
+
+            if bool(settings.get("enabled")):
+                await ctx.send(
+                    f"@{ctx.author.name} Lurker Steuer deaktiviert. Im Abo-Bereich kannst du sie später wieder aktivieren."
+                )
+            else:
+                await ctx.send(
+                    f"@{ctx.author.name} Lurker Steuer ist bereits deaktiviert."
+                )
+            log.info("Disabled lurker tax for %s via chat", twitch_login)
+
         @twitchio_commands.command(name="raid", aliases=["traid"])
         async def cmd_raid(self, ctx: twitchio_commands.Context):
             """!raid / !traid - Startet sofort einen Raid auf den bestmöglichen Partner (wie Auto-Raid)."""

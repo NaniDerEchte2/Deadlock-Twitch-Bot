@@ -4,6 +4,7 @@ import { Play, Clock, Users, TrendingUp, ChevronDown, ChevronUp, MessageCircle, 
 import { useQuery } from '@tanstack/react-query';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { fetchOverview, fetchSessionDetail } from '@/api/client';
+import { PlanGateCard } from '@/components/cards/PlanGateCard';
 import type { DashboardOverview, StreamSession, TimeRange } from '@/types/analytics';
 
 interface SessionsProps {
@@ -237,59 +238,63 @@ function SessionDetails({ sessionId, session }: SessionDetailsProps) {
         </div>
 
         {/* Timeline Chart */}
-        {isLoading ? (
-          <div className="h-32 flex items-center justify-center">
-            <Loader2 className="w-5 h-5 animate-spin text-primary" />
-          </div>
-        ) : detail?.timeline && detail.timeline.length > 0 ? (
-          <div className="h-48">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={detail.timeline}>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(194, 221, 240, 0.2)" />
-                <XAxis
-                  dataKey="minute"
-                  stroke="#9ca3af"
-                  fontSize={11}
-                  tickFormatter={(val) => `${val}m`}
-                />
-                <YAxis stroke="#9ca3af" fontSize={11} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#1f2937',
-                    border: '1px solid rgba(194, 221, 240, 0.25)',
-                    borderRadius: '8px',
-                  }}
-                  labelFormatter={(val) => `Minute ${val}`}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="viewers"
-                  name="Viewer"
-                  stroke="var(--color-primary)"
-                  strokeWidth={2}
-                  dot={false}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        ) : null}
+        <PlanGateCard featureId="stream_timeline_detail" title="Stream-Timeline Detail">
+          {isLoading ? (
+            <div className="h-32 flex items-center justify-center">
+              <Loader2 className="w-5 h-5 animate-spin text-primary" />
+            </div>
+          ) : detail?.timeline && detail.timeline.length > 0 ? (
+            <div className="h-48">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={detail.timeline}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(194, 221, 240, 0.2)" />
+                  <XAxis
+                    dataKey="minute"
+                    stroke="#9ca3af"
+                    fontSize={11}
+                    tickFormatter={(val) => `${val}m`}
+                  />
+                  <YAxis stroke="#9ca3af" fontSize={11} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#1f2937',
+                      border: '1px solid rgba(194, 221, 240, 0.25)',
+                      borderRadius: '8px',
+                    }}
+                    labelFormatter={(val) => `Minute ${val}`}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="viewers"
+                    name="Viewer"
+                    stroke="var(--color-primary)"
+                    strokeWidth={2}
+                    dot={false}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          ) : null}
+        </PlanGateCard>
 
         {/* Top Chatters */}
-        {detail?.chatters && detail.chatters.length > 0 && (
-          <div>
-            <div className="text-sm font-medium text-text-secondary mb-2">Top Chatter dieser Session</div>
-            <div className="flex flex-wrap gap-2">
-              {detail.chatters.slice(0, 10).map((c: { login: string; messages: number }) => (
-                <span
-                  key={c.login}
-                  className="px-2 py-1 text-xs bg-background rounded-full text-text-secondary"
-                >
-                  {c.login} ({c.messages})
-                </span>
-              ))}
+        <PlanGateCard featureId="chatter_list" title="Chatter-Liste">
+          {detail?.chatters && detail.chatters.length > 0 && (
+            <div>
+              <div className="text-sm font-medium text-text-secondary mb-2">Top Chatter dieser Session</div>
+              <div className="flex flex-wrap gap-2">
+                {detail.chatters.slice(0, 10).map((c: { login: string; messages: number }) => (
+                  <span
+                    key={c.login}
+                    className="px-2 py-1 text-xs bg-background rounded-full text-text-secondary"
+                  >
+                    {c.login} ({c.messages})
+                  </span>
+                ))}
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </PlanGateCard>
       </div>
     </motion.div>
   );

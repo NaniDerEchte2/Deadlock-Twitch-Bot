@@ -21,6 +21,10 @@
 
 - [Admin Surfaces](architecture/dashboard/ADMIN.md)
 - [Streamer Surfaces](architecture/dashboard/STREAMER.md)
+- [Streamer Guide (current)](streamer/README.md)
+- [Streamer Dashboard and Pages](streamer/DASHBOARD.md)
+- [Streamer Commands](streamer/COMMANDS.md)
+- [Streamer Features](streamer/FEATURES.md)
 
 ## Existing Audits
 

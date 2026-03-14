@@ -14,6 +14,7 @@ def render_abbo_page(
     status_notice_html: str,
     plans_html: str,
     csrf_token: str = "",
+    lurker_tax_card_html: str = "",
     is_bundle: bool = False,
     promo_disabled: bool = False,
     promo_message: str = "",
@@ -353,6 +354,7 @@ def render_abbo_page(
         "</div>"
         "</section>"
 
+        f"{lurker_tax_card_html}"
         f"{bundle_toggle_html}"
         f"{promo_message_html}"
 

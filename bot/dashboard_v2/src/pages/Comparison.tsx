@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { fetchCategoryComparison, fetchViewerOverlap } from '@/api/client';
 import { useAudienceSharing } from '@/hooks/useAnalytics';
 import { AudienceSharing } from '@/components/charts/AudienceSharing';
+import { PlanGateCard } from '@/components/cards/PlanGateCard';
 import type { CategoryComparison, ViewerOverlap } from '@/types/analytics';
 
 import type { TimeRange } from '@/types/analytics';
@@ -110,92 +111,96 @@ export function Comparison({ streamer, days }: ComparisonProps) {
         )}
 
         {/* Percentile Ranking */}
-        {comparison && comparison.percentiles.avgViewers > 0 && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.3 }}
-            className="mt-6 p-4 bg-background rounded-lg"
-          >
-            <div className="flex items-center gap-2 mb-3">
-              <Target className="w-5 h-5 text-primary" />
-              <span className="font-medium text-white">Dein Ranking</span>
-            </div>
-            <div className="text-3xl font-bold text-transparent bg-gradient-to-r from-primary to-accent bg-clip-text">
-              Top {100 - comparison.percentiles.avgViewers}%
-            </div>
-            <p className="text-sm text-text-secondary mt-1">
-              aller Deadlock-Streamer nach Ø Viewern
-            </p>
-          </motion.div>
-        )}
+        <PlanGateCard featureId="rankings_extended" title="Erweiterte Rankings">
+          {comparison && comparison.percentiles.avgViewers > 0 && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.3 }}
+              className="mt-6 p-4 bg-background rounded-lg"
+            >
+              <div className="flex items-center gap-2 mb-3">
+                <Target className="w-5 h-5 text-primary" />
+                <span className="font-medium text-white">Dein Ranking</span>
+              </div>
+              <div className="text-3xl font-bold text-transparent bg-gradient-to-r from-primary to-accent bg-clip-text">
+                Top {100 - comparison.percentiles.avgViewers}%
+              </div>
+              <p className="text-sm text-text-secondary mt-1">
+                aller Deadlock-Streamer nach Ø Viewern
+              </p>
+            </motion.div>
+          )}
+        </PlanGateCard>
       </motion.div>
 
       {/* Viewer Overlap Section */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.2 }}
-        className="bg-card rounded-xl border border-border p-6"
-      >
-        <div className="flex items-center gap-3 mb-6">
-          <Users className="w-6 h-6 text-accent" />
-          <h2 className="text-xl font-bold text-white">Viewer-Überschneidung</h2>
-        </div>
-
-        {overlap && overlap.length > 0 ? (
-          <div className="space-y-3">
-            {overlap.slice(0, 10).map((item, i) => (
-              <OverlapBar
-                key={item.streamerB}
-                rank={i + 1}
-                streamer={item.streamerB}
-                sharedChatters={item.sharedChatters}
-                percentage={
-                  item.overlapPercentage
-                  ?? item.jaccard
-                  ?? item.overlapAtoB
-                  ?? item.overlapBtoA
-                  ?? 0
-                }
-              />
-            ))}
+      <PlanGateCard featureId="viewer_overlap" title="Viewer-Overlap">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.2 }}
+          className="bg-card rounded-xl border border-border p-6"
+        >
+          <div className="flex items-center gap-3 mb-6">
+            <Users className="w-6 h-6 text-accent" />
+            <h2 className="text-xl font-bold text-white">Viewer-Überschneidung</h2>
           </div>
-        ) : (
-          <div className="text-center py-8 text-text-secondary">
-            <Users className="w-12 h-12 mx-auto mb-3 opacity-50" />
-            <p>Keine Überschneidungsdaten vorhanden</p>
-            <p className="text-sm mt-1">Sammle mehr Chat-Daten</p>
-          </div>
-        )}
 
-        {overlap && overlap.length > 0 && (
-          <div className="mt-6 p-4 bg-gradient-to-r from-accent/10 to-primary/10 rounded-lg border border-accent/20">
-            <div className="flex items-center gap-2 mb-2">
-              <TrendingUp className="w-5 h-5 text-accent" />
-              <span className="font-medium text-white">Raid-Empfehlung</span>
+          {overlap && overlap.length > 0 ? (
+            <div className="space-y-3">
+              {overlap.slice(0, 10).map((item, i) => (
+                <OverlapBar
+                  key={item.streamerB}
+                  rank={i + 1}
+                  streamer={item.streamerB}
+                  sharedChatters={item.sharedChatters}
+                  percentage={
+                    item.overlapPercentage
+                    ?? item.jaccard
+                    ?? item.overlapAtoB
+                    ?? item.overlapBtoA
+                    ?? 0
+                  }
+                />
+              ))}
             </div>
-            {(() => {
-              const top = overlap[0];
-              const topPct = top
-                ? top.overlapPercentage
-                  ?? top.jaccard
-                  ?? top.overlapAtoB
-                  ?? top.overlapBtoA
-                  ?? 0
-                : 0;
+          ) : (
+            <div className="text-center py-8 text-text-secondary">
+              <Users className="w-12 h-12 mx-auto mb-3 opacity-50" />
+              <p>Keine Überschneidungsdaten vorhanden</p>
+              <p className="text-sm mt-1">Sammle mehr Chat-Daten</p>
+            </div>
+          )}
 
-              return (
-                <p className="text-text-secondary text-sm">
-                  <span className="text-white font-medium">{top?.streamerB}</span> hat die höchste
-                  Viewer-Überschneidung ({topPct.toFixed(1)}%).
-                  Ein Raid könnte für beide Communities wertvoll sein!
-                </p>
-              );
-            })()}
-          </div>
-        )}
-      </motion.div>
+          {overlap && overlap.length > 0 && (
+            <div className="mt-6 p-4 bg-gradient-to-r from-accent/10 to-primary/10 rounded-lg border border-accent/20">
+              <div className="flex items-center gap-2 mb-2">
+                <TrendingUp className="w-5 h-5 text-accent" />
+                <span className="font-medium text-white">Raid-Empfehlung</span>
+              </div>
+              {(() => {
+                const top = overlap[0];
+                const topPct = top
+                  ? top.overlapPercentage
+                    ?? top.jaccard
+                    ?? top.overlapAtoB
+                    ?? top.overlapBtoA
+                    ?? 0
+                  : 0;
+
+                return (
+                  <p className="text-text-secondary text-sm">
+                    <span className="text-white font-medium">{top?.streamerB}</span> hat die höchste
+                    Viewer-Überschneidung ({topPct.toFixed(1)}%).
+                    Ein Raid könnte für beide Communities wertvoll sein!
+                  </p>
+                );
+              })()}
+            </div>
+          )}
+        </motion.div>
+      </PlanGateCard>
 
       {/* Zuschauer-Netzwerk */}
       <motion.div

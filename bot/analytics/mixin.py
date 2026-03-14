@@ -905,8 +905,8 @@ class TwitchAnalyticsMixin:
     async def compute_raid_retention(self):
         """Hourly: compute retention metrics for recent outgoing raids into twitch_raid_retention."""
         try:
-            with storage_oauth.get_conn() as conn_oauth:
-                raids = conn_oauth.execute(
+            with storage.get_conn() as analytics_conn:
+                raids = analytics_conn.execute(
                     """
                     SELECT id, from_broadcaster_login, to_broadcaster_login,
                            viewer_count, executed_at
@@ -916,7 +916,7 @@ class TwitchAnalyticsMixin:
                     """
                 ).fetchall()
         except Exception:
-            log.exception("compute_raid_retention: failed to load raids from SQLite")
+            log.exception("compute_raid_retention: failed to load raids from analytics storage")
             return
 
         if not raids:
@@ -952,8 +952,13 @@ class TwitchAnalyticsMixin:
 
                 with storage.get_conn() as pg:
                     existing = pg.execute(
-                        "SELECT raid_id FROM twitch_raid_retention WHERE raid_id = %s",
-                        (raid_id,),
+                        """
+                        SELECT raid_id
+                        FROM twitch_raid_retention
+                        WHERE raid_id = %s
+                          AND executed_at = %s
+                        """,
+                        (raid_id, executed_at),
                     ).fetchone()
                     if existing:
                         continue
@@ -1093,7 +1098,7 @@ class TwitchAnalyticsMixin:
                              chatters_at_plus5m, chatters_at_plus15m, chatters_at_plus30m,
                              known_from_raider, new_to_target, new_chatters)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        ON CONFLICT (raid_id) DO NOTHING
+                        ON CONFLICT (raid_id, executed_at) DO NOTHING
                         """,
                         (
                             raid_id,

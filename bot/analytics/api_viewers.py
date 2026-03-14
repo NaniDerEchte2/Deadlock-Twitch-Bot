@@ -15,8 +15,28 @@ from aiohttp import web
 
 from ..core.chat_bots import build_known_chat_bot_not_in_clause, is_known_chat_bot
 from ..storage import pg as storage
+from .raw_chat_status import build_raw_chat_status, build_viewer_window_metadata
 
 log = logging.getLogger("TwitchStreams.AnalyticsV2")
+
+
+def _coerce_utc_datetime(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        normalized = f"{text[:-1]}+00:00" if text.endswith("Z") else text
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _classify_viewer(total_sessions: int, total_messages: int, first_seen_at, last_seen_at, days_since_last: int) -> str:
@@ -63,6 +83,47 @@ def _classify_viewer(total_sessions: int, total_messages: int, first_seen_at, la
     return "casual"
 
 
+def _fetch_window_viewer_rows(conn, *, streamer: str, since_date: str):
+    rollup_bot_clause, rollup_bot_params = build_known_chat_bot_not_in_clause(
+        column_expr="sc.chatter_login"
+    )
+    return conn.execute(
+        f"""
+        SELECT
+            LOWER(sc.chatter_login) AS chatter_login,
+            COUNT(DISTINCT sc.session_id) AS total_sessions,
+            COALESCE(SUM(sc.messages), 0) AS total_messages,
+            MIN(s.started_at) AS first_seen_at,
+            MAX(COALESCE(s.ended_at, s.started_at)) AS last_seen_at
+        FROM twitch_session_chatters sc
+        JOIN twitch_stream_sessions s ON s.id = sc.session_id
+        WHERE LOWER(sc.streamer_login) = ?
+          AND s.started_at >= ?
+          AND {rollup_bot_clause}
+        GROUP BY LOWER(sc.chatter_login)
+        """,
+        [streamer, since_date, *rollup_bot_params],
+    ).fetchall()
+
+
+def _fetch_window_viewer_row(conn, *, streamer: str, login: str, since_date: str):
+    return conn.execute(
+        """
+        SELECT
+            COUNT(DISTINCT sc.session_id) AS total_sessions,
+            COALESCE(SUM(sc.messages), 0) AS total_messages,
+            MIN(s.started_at) AS first_seen_at,
+            MAX(COALESCE(s.ended_at, s.started_at)) AS last_seen_at
+        FROM twitch_session_chatters sc
+        JOIN twitch_stream_sessions s ON s.id = sc.session_id
+        WHERE LOWER(sc.streamer_login) = ?
+          AND LOWER(sc.chatter_login) = ?
+          AND s.started_at >= ?
+        """,
+        [streamer, login, since_date],
+    ).fetchone()
+
+
 class _AnalyticsViewersMixin:
     """Mixin providing individual viewer analytics endpoints."""
 
@@ -81,6 +142,7 @@ class _AnalyticsViewersMixin:
         search = request.query.get("search", "").strip().lower()
         page = max(1, int(request.query.get("page", "1")))
         per_page = min(100, max(10, int(request.query.get("per_page", "50"))))
+        days = min(365, max(1, int(request.query.get("days", "30"))))
 
         # Validate sort/order
         allowed_sorts = {"sessions", "messages", "last_seen", "other_channels", "first_seen"}
@@ -90,30 +152,24 @@ class _AnalyticsViewersMixin:
             order = "desc"
 
         now = datetime.now(UTC)
+        since_date = (now - timedelta(days=days)).isoformat()
 
         try:
             with storage.get_conn() as conn:
-                rollup_bot_clause_cr, rollup_bot_params_cr = build_known_chat_bot_not_in_clause(
-                    column_expr="cr.chatter_login"
+                raw_chat_status = build_raw_chat_status(
+                    conn,
+                    streamer,
+                    since_date=since_date,
                 )
                 rollup_bot_clause, rollup_bot_params = build_known_chat_bot_not_in_clause(
                     column_expr="chatter_login"
                 )
                 # ── Core viewer data ──
-                rows = conn.execute(
-                    f"""
-                    SELECT
-                        cr.chatter_login,
-                        cr.total_sessions,
-                        cr.total_messages,
-                        cr.first_seen_at,
-                        cr.last_seen_at
-                    FROM twitch_chatter_rollup cr
-                    WHERE LOWER(cr.streamer_login) = ?
-                      AND {rollup_bot_clause_cr}
-                    """,
-                    [streamer, *rollup_bot_params_cr],
-                ).fetchall()
+                rows = _fetch_window_viewer_rows(
+                    conn,
+                    streamer=streamer,
+                    since_date=since_date,
+                )
 
                 if not rows:
                     return web.json_response({
@@ -121,6 +177,7 @@ class _AnalyticsViewersMixin:
                         "total": 0,
                         "page": page,
                         "perPage": per_page,
+                        "days": days,
                         "summary": {
                             "totalViewers": 0,
                             "activeViewers": 0,
@@ -130,12 +187,19 @@ class _AnalyticsViewersMixin:
                             "avgSessionsPerViewer": 0,
                             "avgOtherChannels": 0,
                         },
+                        "rawChatStatus": raw_chat_status,
                     })
 
                 # ── Cross-channel counts (batch) ──
                 all_logins = [r[0] for r in rows]
                 cross_channel = {}
                 top_channels = {}
+                window_metadata = build_viewer_window_metadata(
+                    conn,
+                    streamer,
+                    all_logins,
+                    since_date=since_date,
+                )
 
                 # Build cross-channel data in batches
                 batch_size = 200
@@ -146,13 +210,17 @@ class _AnalyticsViewersMixin:
                     # Count other channels per viewer
                     cc_rows = conn.execute(
                         f"""
-                        SELECT chatter_login, COUNT(DISTINCT streamer_login) - 1 AS other_count
-                        FROM twitch_chatter_rollup
-                        WHERE LOWER(chatter_login) IN ({placeholders})
+                        SELECT
+                            LOWER(sc.chatter_login) AS chatter_login,
+                            COUNT(DISTINCT LOWER(sc.streamer_login)) - 1 AS other_count
+                        FROM twitch_session_chatters sc
+                        JOIN twitch_stream_sessions s ON s.id = sc.session_id
+                        WHERE LOWER(sc.chatter_login) IN ({placeholders})
+                          AND s.started_at >= ?
                           AND {rollup_bot_clause}
-                        GROUP BY chatter_login
+                        GROUP BY LOWER(sc.chatter_login)
                         """,
-                        [login.lower() for login in batch] + [*rollup_bot_params],
+                        [login.lower() for login in batch] + [since_date, *rollup_bot_params],
                     ).fetchall()
                     for r in cc_rows:
                         cross_channel[r[0].lower()] = r[1]
@@ -160,14 +228,20 @@ class _AnalyticsViewersMixin:
                     # Top 3 other channels per viewer
                     tc_rows = conn.execute(
                         f"""
-                        SELECT chatter_login, streamer_login, total_sessions
-                        FROM twitch_chatter_rollup
-                        WHERE LOWER(chatter_login) IN ({placeholders})
+                        SELECT
+                            LOWER(sc.chatter_login) AS chatter_login,
+                            LOWER(sc.streamer_login) AS streamer_login,
+                            COUNT(DISTINCT sc.session_id) AS total_sessions
+                        FROM twitch_session_chatters sc
+                        JOIN twitch_stream_sessions s ON s.id = sc.session_id
+                        WHERE LOWER(sc.chatter_login) IN ({placeholders})
+                          AND s.started_at >= ?
                           AND {rollup_bot_clause}
-                          AND LOWER(streamer_login) != ?
+                          AND LOWER(sc.streamer_login) != ?
+                        GROUP BY LOWER(sc.chatter_login), LOWER(sc.streamer_login)
                         ORDER BY chatter_login, total_sessions DESC
                         """,
-                        [login.lower() for login in batch] + [*rollup_bot_params, streamer],
+                        [login.lower() for login in batch] + [since_date, *rollup_bot_params, streamer],
                     ).fetchall()
                     current_login = None
                     current_channels = []
@@ -195,15 +269,12 @@ class _AnalyticsViewersMixin:
                     login = r[0]
                     total_sessions = r[1] or 0
                     total_messages = r[2] or 0
-                    first_seen = r[3]
-                    last_seen = r[4]
+                    first_seen = _coerce_utc_datetime(r[3]) or r[3]
+                    last_seen = _coerce_utc_datetime(r[4]) or r[4]
 
                     # Calculate days since last seen
-                    if last_seen:
-                        if hasattr(last_seen, "tzinfo") and last_seen.tzinfo is None:
-                            last_seen_aware = last_seen.replace(tzinfo=UTC)
-                        else:
-                            last_seen_aware = last_seen
+                    last_seen_aware = _coerce_utc_datetime(last_seen)
+                    if last_seen_aware is not None:
                         days_since = (now - last_seen_aware).days
                     else:
                         days_since = 9999
@@ -227,6 +298,7 @@ class _AnalyticsViewersMixin:
                     if days_since <= 14:
                         total_active += 1
 
+                    viewer_window_meta = window_metadata.get(login.lower(), {})
                     viewer = {
                         "login": login,
                         "totalSessions": total_sessions,
@@ -239,6 +311,20 @@ class _AnalyticsViewersMixin:
                         "category": category,
                         "avgMessagesPerSession": avg_msg,
                         "isLurker": is_lurker,
+                        "windowPresenceSessions": int(
+                            viewer_window_meta.get("windowPresenceSessions") or 0
+                        ),
+                        "windowPresenceMessages": int(
+                            viewer_window_meta.get("windowPresenceMessages") or 0
+                        ),
+                        "windowRawMessages": int(
+                            viewer_window_meta.get("windowRawMessages") or 0
+                        ),
+                        "hasRawMessages": bool(viewer_window_meta.get("hasRawMessages")),
+                        "presenceOnlyInWindow": bool(
+                            viewer_window_meta.get("presenceOnlyInWindow")
+                        ),
+                        "messageGapNote": viewer_window_meta.get("messageGapNote"),
                     }
                     viewers.append(viewer)
 
@@ -289,6 +375,7 @@ class _AnalyticsViewersMixin:
                     "total": filtered_total,
                     "page": page,
                     "perPage": per_page,
+                    "days": days,
                     "summary": {
                         "totalViewers": total_viewers,
                         "activeViewers": total_active,
@@ -298,6 +385,7 @@ class _AnalyticsViewersMixin:
                         "avgSessionsPerViewer": avg_sessions,
                         "avgOtherChannels": avg_other,
                     },
+                    "rawChatStatus": raw_chat_status,
                 })
 
         except Exception as exc:
@@ -315,38 +403,47 @@ class _AnalyticsViewersMixin:
             return web.json_response({"error": "streamer and login required"}, status=400)
         if is_known_chat_bot(login):
             return web.json_response({"error": "Viewer not found"}, status=404)
+        days = min(365, max(1, int(request.query.get("days", "30"))))
 
         now = datetime.now(UTC)
+        cutoff_window = (now - timedelta(days=days)).isoformat()
 
         try:
             with storage.get_conn() as conn:
+                raw_chat_status = build_raw_chat_status(
+                    conn,
+                    streamer,
+                    since_date=cutoff_window,
+                )
                 # ── Overview from rollup ──
-                row = conn.execute(
-                    """
-                    SELECT total_sessions, total_messages, first_seen_at, last_seen_at
-                    FROM twitch_chatter_rollup
-                    WHERE LOWER(streamer_login) = ? AND LOWER(chatter_login) = ?
-                    """,
-                    [streamer, login],
-                ).fetchone()
+                row = _fetch_window_viewer_row(
+                    conn,
+                    streamer=streamer,
+                    login=login,
+                    since_date=cutoff_window,
+                )
 
-                if not row:
+                if not row or int(row[0] or 0) <= 0:
                     return web.json_response({"error": "Viewer not found"}, status=404)
 
                 total_sessions = row[0] or 0
                 total_messages = row[1] or 0
-                first_seen = row[2]
-                last_seen = row[3]
+                first_seen = _coerce_utc_datetime(row[2]) or row[2]
+                last_seen = _coerce_utc_datetime(row[3]) or row[3]
 
-                if last_seen and hasattr(last_seen, "tzinfo") and last_seen.tzinfo is None:
-                    last_seen = last_seen.replace(tzinfo=UTC)
-                days_since = (now - last_seen).days if last_seen else 9999
+                parsed_last_seen = _coerce_utc_datetime(last_seen)
+                days_since = (now - parsed_last_seen).days if parsed_last_seen else 9999
 
                 category = _classify_viewer(total_sessions, total_messages, first_seen, last_seen, days_since)
                 is_lurker = total_messages == 0
+                viewer_window_meta = build_viewer_window_metadata(
+                    conn,
+                    streamer,
+                    [login],
+                    since_date=cutoff_window,
+                ).get(login, {})
 
-                # ── Activity Timeline (per-session data, last 90 days) ──
-                cutoff_90d = (now - timedelta(days=90)).isoformat()
+                # ── Activity Timeline (per-session data, current window) ──
                 session_rows = conn.execute(
                     """
                     SELECT
@@ -361,7 +458,7 @@ class _AnalyticsViewersMixin:
                     GROUP BY DATE(s.started_at)
                     ORDER BY session_date
                     """,
-                    [streamer, login, cutoff_90d],
+                    [streamer, login, cutoff_window],
                 ).fetchall()
 
                 activity_timeline = [
@@ -373,18 +470,21 @@ class _AnalyticsViewersMixin:
                 cc_rows = conn.execute(
                     """
                     SELECT
-                        streamer_login,
-                        total_sessions,
-                        total_messages,
-                        first_seen_at,
-                        last_seen_at
-                    FROM twitch_chatter_rollup
-                    WHERE LOWER(chatter_login) = ?
-                      AND LOWER(streamer_login) != ?
+                        LOWER(s.streamer_login) AS streamer_login,
+                        COUNT(DISTINCT sc.session_id) AS total_sessions,
+                        COALESCE(SUM(sc.messages), 0) AS total_messages,
+                        MIN(s.started_at) AS first_seen_at,
+                        MAX(COALESCE(s.ended_at, s.started_at)) AS last_seen_at
+                    FROM twitch_session_chatters sc
+                    JOIN twitch_stream_sessions s ON s.id = sc.session_id
+                    WHERE LOWER(sc.chatter_login) = ?
+                      AND LOWER(s.streamer_login) != ?
+                      AND s.started_at >= ?
+                    GROUP BY LOWER(s.streamer_login)
                     ORDER BY total_sessions DESC
                     LIMIT 15
                     """,
-                    [login, streamer],
+                    [login, streamer, cutoff_window],
                 ).fetchall()
 
                 cross_channel = []
@@ -422,7 +522,7 @@ class _AnalyticsViewersMixin:
                       AND message_ts >= ?
                     GROUP BY EXTRACT(HOUR FROM message_ts), EXTRACT(DOW FROM message_ts)
                     """,
-                    [login, streamer, cutoff_90d],
+                    [login, streamer, cutoff_window],
                 ).fetchall()
 
                 hour_counts: dict[int, int] = {}
@@ -440,7 +540,6 @@ class _AnalyticsViewersMixin:
 
                 # ── Personality: classify messages into types ──
                 personality = None
-                personality_cutoff = (now - timedelta(days=90)).isoformat()
                 personality_bot_clause, personality_bot_params = build_known_chat_bot_not_in_clause(
                     column_expr="m.chatter_login"
                 )
@@ -455,7 +554,7 @@ class _AnalyticsViewersMixin:
                       AND {personality_bot_clause}
                     LIMIT 2000
                     """,
-                    [streamer, login, personality_cutoff, *personality_bot_params],
+                    [streamer, login, cutoff_window, *personality_bot_params],
                 ).fetchall()
 
                 if msg_rows:
@@ -489,6 +588,7 @@ class _AnalyticsViewersMixin:
 
                 return web.json_response({
                     "login": login,
+                    "days": days,
                     "overview": {
                         "totalSessions": total_sessions,
                         "totalMessages": total_messages,
@@ -496,6 +596,20 @@ class _AnalyticsViewersMixin:
                         "lastSeen": last_seen.isoformat() if hasattr(last_seen, "isoformat") else last_seen,
                         "category": category,
                         "isLurker": is_lurker,
+                        "windowPresenceSessions": int(
+                            viewer_window_meta.get("windowPresenceSessions") or 0
+                        ),
+                        "windowPresenceMessages": int(
+                            viewer_window_meta.get("windowPresenceMessages") or 0
+                        ),
+                        "windowRawMessages": int(
+                            viewer_window_meta.get("windowRawMessages") or 0
+                        ),
+                        "hasRawMessages": bool(viewer_window_meta.get("hasRawMessages")),
+                        "presenceOnlyInWindow": bool(
+                            viewer_window_meta.get("presenceOnlyInWindow")
+                        ),
+                        "messageGapNote": viewer_window_meta.get("messageGapNote"),
                     },
                     "activityTimeline": activity_timeline,
                     "crossChannelPresence": cross_channel,
@@ -505,6 +619,7 @@ class _AnalyticsViewersMixin:
                         "mostActiveDay": most_active_day,
                         "messagesTrend": trend,
                     },
+                    "rawChatStatus": raw_chat_status,
                     **({"personality": personality} if personality else {}),
                 })
 
@@ -522,32 +637,23 @@ class _AnalyticsViewersMixin:
             return web.json_response({"error": "Streamer required"}, status=400)
 
         now = datetime.now(UTC)
+        days = min(365, max(1, int(request.query.get("days", "30"))))
+        since_date = (now - timedelta(days=days)).isoformat()
 
         try:
             with storage.get_conn() as conn:
-                rollup_bot_clause_cr, rollup_bot_params_cr = build_known_chat_bot_not_in_clause(
-                    column_expr="cr.chatter_login"
-                )
                 rollup_bot_clause, rollup_bot_params = build_known_chat_bot_not_in_clause(
                     column_expr="chatter_login"
                 )
-                rows = conn.execute(
-                    f"""
-                    SELECT
-                        cr.chatter_login,
-                        cr.total_sessions,
-                        cr.total_messages,
-                        cr.first_seen_at,
-                        cr.last_seen_at
-                    FROM twitch_chatter_rollup cr
-                    WHERE LOWER(cr.streamer_login) = ?
-                      AND {rollup_bot_clause_cr}
-                    """,
-                    [streamer, *rollup_bot_params_cr],
-                ).fetchall()
+                rows = _fetch_window_viewer_rows(
+                    conn,
+                    streamer=streamer,
+                    since_date=since_date,
+                )
 
                 if not rows:
                     return web.json_response({
+                        "days": days,
                         "segments": {},
                         "churnRisk": {"atRisk": 0, "recentlyChurned": 0, "atRiskViewers": []},
                         "crossChannelStats": {
@@ -572,13 +678,12 @@ class _AnalyticsViewersMixin:
                     login = r[0]
                     ts = r[1] or 0
                     tm = r[2] or 0
-                    fs = r[3]
-                    ls = r[4]
+                    fs = _coerce_utc_datetime(r[3]) or r[3]
+                    ls = _coerce_utc_datetime(r[4]) or r[4]
 
-                    if ls:
-                        if hasattr(ls, "tzinfo") and ls.tzinfo is None:
-                            ls = ls.replace(tzinfo=UTC)
-                        ds = (now - ls).days
+                    parsed_last_seen = _coerce_utc_datetime(ls)
+                    if parsed_last_seen is not None:
+                        ds = (now - parsed_last_seen).days
                     else:
                         ds = 9999
 
@@ -671,13 +776,17 @@ class _AnalyticsViewersMixin:
                     placeholders = ",".join("?" for _ in batch)
                     cc_rows = conn.execute(
                         f"""
-                        SELECT chatter_login, COUNT(DISTINCT streamer_login) AS ch_count
-                        FROM twitch_chatter_rollup
-                        WHERE LOWER(chatter_login) IN ({placeholders})
+                        SELECT
+                            LOWER(sc.chatter_login) AS chatter_login,
+                            COUNT(DISTINCT LOWER(sc.streamer_login)) AS ch_count
+                        FROM twitch_session_chatters sc
+                        JOIN twitch_stream_sessions s ON s.id = sc.session_id
+                        WHERE LOWER(sc.chatter_login) IN ({placeholders})
+                          AND s.started_at >= ?
                           AND {rollup_bot_clause}
-                        GROUP BY chatter_login
+                        GROUP BY LOWER(sc.chatter_login)
                         """,
-                        [login.lower() for login in batch] + [*rollup_bot_params],
+                        [login.lower() for login in batch] + [since_date, *rollup_bot_params],
                     ).fetchall()
                     for cr in cc_rows:
                         ch_count = cr[1]
@@ -690,22 +799,27 @@ class _AnalyticsViewersMixin:
 
                 # Top shared channels
                 rollup_bot_clause_cr1, rollup_bot_params_cr1 = build_known_chat_bot_not_in_clause(
-                    column_expr="cr1.chatter_login"
+                    column_expr="sc1.chatter_login"
                 )
                 shared_rows = conn.execute(
                     f"""
-                    SELECT cr2.streamer_login, COUNT(DISTINCT cr2.chatter_login) AS shared_count
-                    FROM twitch_chatter_rollup cr1
-                    JOIN twitch_chatter_rollup cr2
-                      ON LOWER(cr1.chatter_login) = LOWER(cr2.chatter_login)
-                    WHERE LOWER(cr1.streamer_login) = ?
-                      AND LOWER(cr2.streamer_login) != ?
+                    SELECT LOWER(sc2.streamer_login) AS streamer_login,
+                           COUNT(DISTINCT LOWER(sc2.chatter_login)) AS shared_count
+                    FROM twitch_session_chatters sc1
+                    JOIN twitch_stream_sessions s1 ON s1.id = sc1.session_id
+                    JOIN twitch_session_chatters sc2
+                      ON LOWER(sc1.chatter_login) = LOWER(sc2.chatter_login)
+                    JOIN twitch_stream_sessions s2 ON s2.id = sc2.session_id
+                    WHERE LOWER(sc1.streamer_login) = ?
+                      AND s1.started_at >= ?
+                      AND LOWER(sc2.streamer_login) != ?
+                      AND s2.started_at >= ?
                       AND {rollup_bot_clause_cr1}
-                    GROUP BY cr2.streamer_login
+                    GROUP BY LOWER(sc2.streamer_login)
                     ORDER BY shared_count DESC
                     LIMIT 10
                     """,
-                    [streamer, streamer, *rollup_bot_params_cr1],
+                    [streamer, since_date, streamer, since_date, *rollup_bot_params_cr1],
                 ).fetchall()
 
                 top_shared = []
@@ -718,6 +832,7 @@ class _AnalyticsViewersMixin:
                     })
 
                 return web.json_response({
+                    "days": days,
                     "segments": segment_stats,
                     "churnRisk": {
                         "atRisk": len(at_risk_detailed),

@@ -8,6 +8,14 @@ from typing import Any
 
 from aiohttp import web
 
+from ..app_keys import (
+    ANALYTICS_DB_FINGERPRINT_DETAILS_KEY,
+    ANALYTICS_DB_FINGERPRINT_ERROR_KEY,
+    ANALYTICS_DB_FINGERPRINT_KEY,
+    ANALYTICS_DB_FINGERPRINT_MISMATCH_KEY,
+    BOT_API_CLIENT_KEY,
+    INTERNAL_API_ANALYTICS_DB_FINGERPRINT_KEY,
+)
 from ..core.constants import (
     TWITCH_DASHBOARD_HOST,
     TWITCH_DASHBOARD_NOAUTH,
@@ -23,6 +31,7 @@ from ..runtime_mode import (
     enforce_dashboard_service_runtime,
 )
 from ..secret_store import load_secret_value
+from ..storage import analytics_db_fingerprint_details
 from .client import BotApiClient, BotApiClientError
 
 
@@ -164,6 +173,15 @@ def build_dashboard_service_app(
         legacy_stats_url
         if legacy_stats_url is not None
         else (os.getenv("TWITCH_LEGACY_STATS_URL") or "").strip() or None
+    )
+    local_analytics_db = analytics_db_fingerprint_details()
+    local_analytics_fingerprint = str(local_analytics_db.get("fingerprint") or "").strip() or None
+    log.info(
+        "Dashboard service analytics DB fingerprint=%s host_hash=%s db_hash=%s port_hash=%s",
+        local_analytics_db.get("fingerprint"),
+        local_analytics_db.get("hostHash"),
+        local_analytics_db.get("databaseHash"),
+        local_analytics_db.get("portHash"),
     )
     degraded_startup_reasons: list[str] = []
     if not resolved_internal_token:
@@ -381,7 +399,43 @@ def build_dashboard_service_app(
             return
         await client.close()
 
-    app["bot_api_client"] = client
+    async def _verify_internal_analytics_fingerprint(app: web.Application) -> None:
+        app[INTERNAL_API_ANALYTICS_DB_FINGERPRINT_KEY] = None
+        app[ANALYTICS_DB_FINGERPRINT_MISMATCH_KEY] = False
+        app[ANALYTICS_DB_FINGERPRINT_ERROR_KEY] = None
+        if client is None:
+            return
+        try:
+            payload = await client.healthz()
+        except BotApiClientError as exc:
+            app[ANALYTICS_DB_FINGERPRINT_ERROR_KEY] = str(exc)
+            log.warning("Dashboard fingerprint check against internal API failed: %s", exc)
+            return
+
+        upstream_fingerprint = str(payload.get("analyticsDbFingerprint") or "").strip() or None
+        app[INTERNAL_API_ANALYTICS_DB_FINGERPRINT_KEY] = upstream_fingerprint
+        if (
+            local_analytics_fingerprint
+            and upstream_fingerprint
+            and local_analytics_fingerprint != upstream_fingerprint
+        ):
+            app[ANALYTICS_DB_FINGERPRINT_MISMATCH_KEY] = True
+            app[ANALYTICS_DB_FINGERPRINT_ERROR_KEY] = (
+                "Dashboard and internal API use different analytics databases."
+            )
+            log.error(
+                "Analytics DB fingerprint mismatch dashboard=%s internal_api=%s",
+                local_analytics_fingerprint,
+                upstream_fingerprint,
+            )
+
+    app[BOT_API_CLIENT_KEY] = client
+    app[ANALYTICS_DB_FINGERPRINT_KEY] = local_analytics_fingerprint
+    app[ANALYTICS_DB_FINGERPRINT_DETAILS_KEY] = local_analytics_db
+    app[INTERNAL_API_ANALYTICS_DB_FINGERPRINT_KEY] = None
+    app[ANALYTICS_DB_FINGERPRINT_MISMATCH_KEY] = False
+    app[ANALYTICS_DB_FINGERPRINT_ERROR_KEY] = None
+    app.on_startup.append(_verify_internal_analytics_fingerprint)
     app.on_cleanup.append(_close_client)
     return app
 

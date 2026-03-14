@@ -161,6 +161,7 @@ class _DashboardBillingMixin:
                 expires_at TEXT,
                 notes TEXT,
                 raid_boost_enabled INTEGER NOT NULL DEFAULT 0,
+                lurker_tax_enabled INTEGER NOT NULL DEFAULT 0,
                 promo_message TEXT,
                 manual_plan_id TEXT,
                 manual_plan_expires_at TEXT,
@@ -174,6 +175,7 @@ class _DashboardBillingMixin:
         )
         for column_sql in (
             "raid_boost_enabled INTEGER NOT NULL DEFAULT 0",
+            "lurker_tax_enabled INTEGER NOT NULL DEFAULT 0",
             "promo_message TEXT",
             "manual_plan_id TEXT",
             "manual_plan_expires_at TEXT",

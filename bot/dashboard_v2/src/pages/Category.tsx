@@ -8,6 +8,7 @@ import { useQuery } from '@tanstack/react-query';
 import { fetchCategoryLeaderboard } from '@/api/client';
 import { useCategoryActivitySeries } from '@/hooks/useAnalytics';
 import { CategoryTimingsChart } from '@/components/charts/CategoryTimingsChart';
+import { PlanGateCard } from '@/components/cards/PlanGateCard';
 import type { TimeRange, TabId } from '@/types/analytics';
 
 interface CategoryProps {
@@ -145,15 +146,17 @@ export function Category({ streamer, days, onStreamerSelect, onNavigate }: Categ
       </div>
 
       {/* Timings Charts */}
-      {activitySeries && (
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="bg-card border border-border rounded-xl p-5"
-        >
-          <CategoryTimingsChart data={activitySeries} />
-        </motion.div>
-      )}
+      <PlanGateCard featureId="category_timings" title="Kategorie-Timings">
+        {activitySeries && (
+          <motion.div
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-card border border-border rounded-xl p-5"
+          >
+            <CategoryTimingsChart data={activitySeries} />
+          </motion.div>
+        )}
+      </PlanGateCard>
 
       {/* Top Partner Streamer */}
       {!loadingCat && topPartners.length > 0 && (

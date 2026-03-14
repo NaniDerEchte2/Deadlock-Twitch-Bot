@@ -12,6 +12,7 @@ import { CalendarHeatmap } from '@/components/heatmaps/CalendarHeatmap';
 import { InsightsPanel } from '@/components/cards/InsightsPanel';
 import { CategoryRankBadge } from '@/components/cards/CategoryRankBadge';
 import { formatNumber, formatPercent, formatHours } from '@/utils/formatters';
+import { PlanGateCard } from '@/components/cards/PlanGateCard';
 import type { TimeRange } from '@/types/analytics';
 
 interface OverviewProps {
@@ -60,7 +61,9 @@ export function Overview({ streamer, days, onSessionClick }: OverviewProps) {
     <div className="space-y-8">
       {/* Top KPIs */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-        <HealthScoreCard scores={scores} />
+        <PlanGateCard featureId="health_scores" title="Health Scores">
+          <HealthScoreCard scores={scores} />
+        </PlanGateCard>
 
         <KpiCard
           title="Ø Viewers"
@@ -112,9 +115,11 @@ export function Overview({ streamer, days, onSessionClick }: OverviewProps) {
       )}
 
       {/* Insights */}
-      {findings && findings.length > 0 && (
-        <InsightsPanel findings={findings} actions={actions} />
-      )}
+      <PlanGateCard featureId="insights_panel" title="Insights">
+        {findings && findings.length > 0 && (
+          <InsightsPanel findings={findings} actions={actions} />
+        )}
+      </PlanGateCard>
 
       {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -133,7 +138,9 @@ export function Overview({ streamer, days, onSessionClick }: OverviewProps) {
       {/* Heatmaps Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {hourlyData && <HourlyHeatmap data={hourlyData} />}
-        {calendarData && <CalendarHeatmap data={calendarData} />}
+        <PlanGateCard featureId="calendar_heatmap" title="Kalender-Heatmap">
+          {calendarData && <CalendarHeatmap data={calendarData} />}
+        </PlanGateCard>
       </div>
 
       {/* Score Gauges & Network */}

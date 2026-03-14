@@ -16,6 +16,7 @@ from aiohttp import web
 
 from ..core.chat_bots import build_known_chat_bot_not_in_clause
 from ..storage import pg as storage
+from .raw_chat_status import build_raw_chat_status
 
 log = logging.getLogger("TwitchStreams.AnalyticsV2")
 
@@ -636,6 +637,11 @@ class _AnalyticsChatDeepMixin:
                         "avgMPM": round(rs_avg, 1),
                         "peakMPM": 0,  # Would need full scan, skip for perf
                     })
+                raw_chat_status = build_raw_chat_status(
+                    conn,
+                    streamer,
+                    session_ids=[int(session_id)],
+                )
 
                 return web.json_response({
                     "sessionId": session_id,
@@ -653,6 +659,7 @@ class _AnalyticsChatDeepMixin:
                         "lagMinutes": lag_minutes,
                     },
                     "recentSessions": recent_sessions,
+                    "rawChatStatus": raw_chat_status,
                 })
 
         except web.HTTPException:
@@ -887,6 +894,11 @@ class _AnalyticsChatDeepMixin:
 
                 # Backseat percentage
                 backseat_pct = round(backseat_count / max(1, total_analyzed) * 100, 1)
+                raw_chat_status = build_raw_chat_status(
+                    conn,
+                    streamer,
+                    since_date=cutoff,
+                )
 
                 return web.json_response({
                     "heroMentions": hero_mentions[:25],
@@ -917,6 +929,7 @@ class _AnalyticsChatDeepMixin:
                             sum(len(r[1].split()) for r in rows) / max(1, len(rows)), 1
                         ),
                     },
+                    "rawChatStatus": raw_chat_status,
                 })
 
         except web.HTTPException:
@@ -1022,6 +1035,11 @@ class _AnalyticsChatDeepMixin:
                 mentioned_once = sum(1 for c in recv_counts if c == 1)
                 mentioned_2to5 = sum(1 for c in recv_counts if 2 <= c <= 5)
                 mentioned_5plus = sum(1 for c in recv_counts if c > 5)
+                raw_chat_status = build_raw_chat_status(
+                    conn,
+                    streamer,
+                    since_date=cutoff,
+                )
 
                 return web.json_response({
                     "totalMentions": total_mentions,
@@ -1034,6 +1052,7 @@ class _AnalyticsChatDeepMixin:
                         "mentioned2to5": mentioned_2to5,
                         "mentioned5plus": mentioned_5plus,
                     },
+                    "rawChatStatus": raw_chat_status,
                 })
 
         except web.HTTPException:

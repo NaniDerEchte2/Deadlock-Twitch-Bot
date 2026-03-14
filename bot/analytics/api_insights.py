@@ -18,6 +18,7 @@ from aiohttp import web
 
 from ..core.chat_bots import build_known_chat_bot_not_in_clause
 from ..storage import pg as storage
+from .raw_chat_status import build_raw_chat_status
 from .coaching_engine import CoachingEngine
 from .engagement_metrics import EngagementInputs, calculate_engagement
 
@@ -603,6 +604,11 @@ class _AnalyticsInsightsMixin:
                     """,
                     [since_date, streamer_login, *msg_bot_params],
                 ).fetchall()
+                raw_chat_status = build_raw_chat_status(
+                    conn,
+                    streamer_login,
+                    since_date=since_date,
+                )
 
                 return web.json_response(
                     {
@@ -684,6 +690,7 @@ class _AnalyticsInsightsMixin:
                             ),
                             "botFilterApplied": True,
                         },
+                        "rawChatStatus": raw_chat_status,
                     }
                 )
         except Exception as exc:

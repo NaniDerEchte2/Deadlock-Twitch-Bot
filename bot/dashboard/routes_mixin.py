@@ -26,6 +26,7 @@ from .billing.billing_plans import (
     build_billing_catalog as _build_billing_catalog,
     billing_cycle_label as _billing_cycle_label,
     billing_is_paid_plan as _billing_is_paid_plan,
+    billing_is_paid_plan_id as _billing_is_paid_plan_id,
     format_eur_cents as _format_eur_cents,
     normalize_billing_cycle as _normalize_billing_cycle,
 )
@@ -67,6 +68,147 @@ class _DashboardRoutesMixin:
         else:
             pairs.append((prefix, str(payload)))
         return pairs
+
+    @staticmethod
+    def _form_checkbox_enabled(payload: Any, field_name: str) -> bool:
+        truthy_values = {"1", "true", "on", "yes"}
+        values: list[Any] = []
+        getall = getattr(payload, "getall", None)
+        if callable(getall):
+            try:
+                values = list(getall(field_name))
+            except KeyError:
+                values = []
+        if not values:
+            getter = getattr(payload, "get", None)
+            raw_value = getter(field_name) if callable(getter) else None
+            if isinstance(raw_value, (list, tuple, set)):
+                values = list(raw_value)
+            elif raw_value is not None:
+                values = [raw_value]
+        return any(str(value or "").strip().lower() in truthy_values for value in values)
+
+    def _abbo_scope_state(
+        self,
+        *,
+        twitch_login: str,
+        twitch_user_id: str = "",
+    ) -> dict[str, Any]:
+        login_value = str(twitch_login or "").strip()
+        user_id_value = str(twitch_user_id or "").strip()
+        if not login_value and not user_id_value:
+            return {
+                "scopes": set(),
+                "has_moderator_read_chatters": False,
+            }
+
+        try:
+            with storage.get_conn() as conn:
+                if user_id_value:
+                    row = conn.execute(
+                        """
+                        SELECT scopes
+                          FROM twitch_raid_auth
+                         WHERE TRIM(COALESCE(twitch_user_id, '')) = ?
+                            OR LOWER(COALESCE(twitch_login, '')) = LOWER(?)
+                         ORDER BY
+                            CASE WHEN TRIM(COALESCE(twitch_user_id, '')) = ? THEN 0 ELSE 1 END
+                         LIMIT 1
+                        """,
+                        (user_id_value, login_value, user_id_value),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        """
+                        SELECT scopes
+                          FROM twitch_raid_auth
+                         WHERE LOWER(COALESCE(twitch_login, '')) = LOWER(?)
+                         LIMIT 1
+                        """,
+                        (login_value,),
+                    ).fetchone()
+        except Exception:
+            log.debug("abbo scope lookup failed for %s", login_value or user_id_value, exc_info=True)
+            row = None
+
+        scopes = {
+            scope.strip().lower()
+            for scope in str((row[0] if row else "") or "").split()
+            if scope.strip()
+        }
+        return {
+            "scopes": scopes,
+            "has_moderator_read_chatters": "moderator:read:chatters" in scopes,
+        }
+
+    def _abbo_upsert_lurker_tax_setting(
+        self,
+        *,
+        twitch_login: str,
+        twitch_user_id: str = "",
+        plan_id: str = "",
+        enabled: bool,
+    ) -> bool:
+        login_value = str(twitch_login or "").strip()
+        user_id_value = str(twitch_user_id or "").strip()
+        plan_name_resolver = getattr(self, "_billing_plan_name_from_id", None)
+        plan_name = (
+            str(plan_name_resolver(plan_id)).strip()
+            if callable(plan_name_resolver)
+            else "free"
+        )
+
+        with storage.get_conn() as conn:
+            ensure_cols = getattr(self, "_billing_ensure_streamer_plan_columns", None)
+            if callable(ensure_cols):
+                ensure_cols(conn)
+
+            if user_id_value:
+                conn.execute(
+                    """
+                    INSERT INTO streamer_plans (
+                        twitch_user_id,
+                        twitch_login,
+                        plan_name,
+                        lurker_tax_enabled
+                    )
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT (twitch_user_id) DO UPDATE SET
+                        twitch_login = COALESCE(NULLIF(EXCLUDED.twitch_login, ''), streamer_plans.twitch_login),
+                        plan_name = COALESCE(NULLIF(EXCLUDED.plan_name, ''), streamer_plans.plan_name),
+                        lurker_tax_enabled = EXCLUDED.lurker_tax_enabled
+                    """,
+                    (
+                        user_id_value,
+                        login_value,
+                        plan_name,
+                        1 if enabled else 0,
+                    ),
+                )
+            else:
+                existing_row = conn.execute(
+                    """
+                    SELECT 1
+                      FROM streamer_plans
+                     WHERE LOWER(COALESCE(twitch_login, '')) = LOWER(?)
+                     LIMIT 1
+                    """,
+                    (login_value,),
+                ).fetchone()
+                if not existing_row:
+                    return False
+                conn.execute(
+                    """
+                    UPDATE streamer_plans
+                       SET lurker_tax_enabled = ?
+                     WHERE LOWER(COALESCE(twitch_login, '')) = LOWER(?)
+                    """,
+                    (1 if enabled else 0, login_value),
+                )
+            commit = getattr(conn, "commit", None)
+            if callable(commit):
+                commit()
+        return True
 
     @classmethod
     def _billing_create_checkout_session_rest(
@@ -730,6 +872,15 @@ class _DashboardRoutesMixin:
             notices.append(
                 "<div class='notice notice-error'>Rechnungsdaten konnten nicht gespeichert werden.</div>"
             )
+        lurker_tax_state = str(request.query.get("lurker_tax") or "").strip().lower()
+        if lurker_tax_state == "saved":
+            notices.append(
+                "<div class='notice notice-ok'>Lurker Steuer Einstellung gespeichert.</div>"
+            )
+        elif lurker_tax_state == "error":
+            notices.append(
+                "<div class='notice notice-error'>Lurker Steuer Einstellung konnte nicht gespeichert werden.</div>"
+            )
         if stripe_imported_fields:
             notices.append(
                 "<div class='notice notice-warn'>Rechnungsdaten wurden aus Stripe vorbefüllt. Bitte prüfen und speichern.</div>"
@@ -899,26 +1050,109 @@ class _DashboardRoutesMixin:
             )
         plans_html = "".join(plan_cards)
 
-        # --- Bundle toggle + promo message data ---
+        # --- Feature cards / saved settings ---
         is_bundle = current_plan_id == "bundle_analysis_raid_boost"
         promo_disabled = False
         promo_message = ""
+        lurker_tax_enabled = False
 
         session = self._get_dashboard_auth_session(request)
-        twitch_login = (session or {}).get("twitch_login", "")
+        twitch_login = str((session or {}).get("twitch_login", "") or "").strip()
+        twitch_user_id = str((session or {}).get("twitch_user_id", "") or "").strip()
 
-        if twitch_login:
+        if twitch_login or twitch_user_id:
             try:
                 with storage.get_conn() as conn:
-                    row = conn.execute(
-                        "SELECT promo_disabled, promo_message FROM streamer_plans WHERE LOWER(twitch_login) = LOWER(?)",
-                        (twitch_login,),
-                    ).fetchone()
+                    ensure_cols = getattr(self, "_billing_ensure_streamer_plan_columns", None)
+                    if callable(ensure_cols):
+                        ensure_cols(conn)
+                    if twitch_user_id:
+                        row = conn.execute(
+                            """
+                            SELECT promo_disabled, promo_message, lurker_tax_enabled
+                              FROM streamer_plans
+                             WHERE TRIM(COALESCE(twitch_user_id, '')) = ?
+                                OR LOWER(COALESCE(twitch_login, '')) = LOWER(?)
+                             ORDER BY
+                                CASE WHEN TRIM(COALESCE(twitch_user_id, '')) = ? THEN 0 ELSE 1 END
+                             LIMIT 1
+                            """,
+                            (twitch_user_id, twitch_login, twitch_user_id),
+                        ).fetchone()
+                    else:
+                        row = conn.execute(
+                            """
+                            SELECT promo_disabled, promo_message, lurker_tax_enabled
+                              FROM streamer_plans
+                             WHERE LOWER(COALESCE(twitch_login, '')) = LOWER(?)
+                             LIMIT 1
+                            """,
+                            (twitch_login,),
+                        ).fetchone()
                     if row:
                         promo_disabled = bool(row[0])
                         promo_message = str(row[1] or "")
+                        lurker_tax_enabled = bool(row[2])
             except Exception:
-                pass
+                log.debug("abbo settings lookup failed for %s", twitch_login or twitch_user_id, exc_info=True)
+
+        scope_state = self._abbo_scope_state(
+            twitch_login=twitch_login,
+            twitch_user_id=twitch_user_id,
+        )
+        has_chatters_scope = bool(scope_state.get("has_moderator_read_chatters"))
+        current_plan_is_paid = _billing_is_paid_plan_id(current_plan_id)
+        lurker_tax_card_html = ""
+        if current_plan_id == "raid_free":
+            lurker_tax_card_html = (
+                "<section class='card'>"
+                "<strong style='font-size:14px;color:#e2e8f0;'>Lurker Steuer</strong>"
+                "<div class='notice notice-warn' style='margin-top:12px;'>"
+                "Verfügbar in Raid Boost, Analyse Dashboard und im Bundle."
+                "</div>"
+                "<p class='muted' style='margin:10px 0 0;'>"
+                "Erinnert bekannte aktuell anwesende Lurker höchstens einmal pro Stunde sanft im Chat. "
+                "Upgrade im oberen Planbereich, um den Toggle freizuschalten."
+                "</p>"
+                "</section>"
+            )
+        elif current_plan_is_paid:
+            readiness_notice_html = ""
+            if not has_chatters_scope:
+                readiness_notice_html = (
+                    "<div class='notice notice-warn' style='margin-bottom:10px;'>"
+                    "Readiness-Hinweis: <code>moderator:read:chatters</code> fehlt. "
+                    "Solange der Scope fehlt, feuert die Lurker Steuer nicht."
+                    "</div>"
+                )
+            toggle_checked = " checked" if lurker_tax_enabled else ""
+            status_label = "Aktiv" if lurker_tax_enabled else "Inaktiv"
+            lurker_tax_card_html = (
+                "<section class='card'>"
+                "<strong style='font-size:14px;color:#e2e8f0;'>Lurker Steuer</strong>"
+                f"<p class='muted' style='margin:8px 0 12px;'>Status: {html.escape(status_label)}. "
+                "Bekannte aktuell anwesende Lurker werden höchstens einmal pro Stunde weich erinnert. "
+                "Im aktiven Stream werden maximal zwei User direkt erwähnt.</p>"
+                f"{readiness_notice_html}"
+                "<form method='post' action='/twitch/abbo/lurker-tax-settings'>"
+                f"<input type='hidden' name='csrf_token' value='{html.escape(csrf_token, quote=True)}'>"
+                "<label class='toggle-label'>"
+                "<input type='hidden' name='lurker_tax_enabled' value='0'>"
+                f"<input type='checkbox' name='lurker_tax_enabled' value='1'{toggle_checked}>"
+                "<span>Lurker Steuer aktivieren"
+                "<span class='muted'>"
+                "Benötigt eine Live-Session, frische Präsenzdaten und den Scope "
+                "<code>moderator:read:chatters</code>."
+                "</span>"
+                "</span>"
+                "</label>"
+                "<button type='submit' class='profile-save-btn'>Speichern</button>"
+                "</form>"
+                "<small class='muted'>"
+                "Optional im Chat deaktivierbar, falls du den Reminder spontan abstellen willst."
+                "</small>"
+                "</section>"
+            )
 
         promo_error = str(request.query.get("promo_error") or "").strip()
         promo_saved = str(request.query.get("promo_saved") or "").strip() == "1"
@@ -931,6 +1165,7 @@ class _DashboardRoutesMixin:
             status_notice_html=status_notice_html,
             plans_html=plans_html,
             csrf_token=csrf_token,
+            lurker_tax_card_html=lurker_tax_card_html,
             is_bundle=is_bundle,
             promo_disabled=promo_disabled,
             promo_message=promo_message,
@@ -3009,6 +3244,55 @@ class _DashboardRoutesMixin:
 
         raise web.HTTPFound("/twitch/abbo?profile=saved")
 
+    async def abbo_lurker_tax_settings(self, request: web.Request) -> web.StreamResponse:
+        """POST /twitch/abbo/lurker-tax-settings — toggle Lurker Steuer for paid plans."""
+        if not self._check_v2_auth(request):
+            login_url = (
+                TWITCH_ABBO_DISCORD_LOGIN_URL
+                if self._should_use_discord_admin_login(request)
+                else TWITCH_ABBO_LOGIN_URL
+            )
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/abbo",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
+
+        current_plan = self._billing_current_plan_for_request(request)
+        current_plan_id = str(current_plan.get("plan_id") or "").strip()
+        if not _billing_is_paid_plan_id(current_plan_id):
+            raise web.HTTPFound("/twitch/abbo")
+
+        data = await request.post()
+        csrf_token = str(data.get("csrf_token") or "").strip()
+        if not self._csrf_verify_token(request, csrf_token):
+            return web.json_response({"error": "csrf_token_invalid"}, status=403)
+        lurker_tax_enabled = self._form_checkbox_enabled(data, "lurker_tax_enabled")
+
+        session = self._get_dashboard_auth_session(request)
+        twitch_login = str((session or {}).get("twitch_login", "") or "").strip()
+        twitch_user_id = str((session or {}).get("twitch_user_id", "") or "").strip()
+        if not twitch_login and not twitch_user_id:
+            raise web.HTTPFound("/twitch/abbo")
+
+        try:
+            saved = self._abbo_upsert_lurker_tax_setting(
+                twitch_login=twitch_login,
+                twitch_user_id=twitch_user_id,
+                plan_id=current_plan_id,
+                enabled=lurker_tax_enabled,
+            )
+        except Exception:
+            log.exception("lurker_tax_enabled update failed for %s", twitch_login or twitch_user_id)
+            raise web.HTTPFound("/twitch/abbo?lurker_tax=error")
+        if not saved:
+            raise web.HTTPFound("/twitch/abbo?lurker_tax=error")
+
+        raise web.HTTPFound("/twitch/abbo?lurker_tax=saved")
+
     async def abbo_promo_message(self, request: web.Request) -> web.StreamResponse:
         """POST /twitch/abbo/promo-message — set custom promo message."""
         if not self._check_v2_auth(request):
@@ -3272,6 +3556,7 @@ loadRoadmap();
                 web.get("/twitch/abbo/rechnungen", self.abbo_invoices),
                 web.get("/twitch/abbo/stripe-settings", self.abbo_stripe_settings),
                 web.post("/twitch/abbo/promo-settings", self.abbo_promo_settings),
+                web.post("/twitch/abbo/lurker-tax-settings", self.abbo_lurker_tax_settings),
                 web.post("/twitch/abbo/promo-message", self.abbo_promo_message),
                 web.get("/twitch/abbo/rechnung", self.abbo_invoice),
                 web.get("/twitch/impressum", self.abbo_impressum),

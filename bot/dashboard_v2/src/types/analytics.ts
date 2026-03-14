@@ -81,6 +81,26 @@ export interface CalendarHeatmapData {
   hoursWatched: number;
 }
 
+export interface RawChatStatus {
+  available: boolean;
+  lastMessageAt: string | null;
+  gapStart: string | null;
+  suspectedIngestionIssue: boolean;
+  backfillState: string;
+  note: string | null;
+  lastInsertOkAt?: string | null;
+  lastInsertErrorAt?: string | null;
+}
+
+export interface ViewerWindowMetadata {
+  windowPresenceSessions?: number;
+  windowPresenceMessages?: number;
+  windowRawMessages?: number;
+  hasRawMessages?: boolean;
+  presenceOnlyInWindow?: boolean;
+  messageGapNote?: string | null;
+}
+
 export interface ChatAnalytics {
   totalMessages: number;
   totalChatterSessions: number;
@@ -123,6 +143,7 @@ export interface ChatAnalytics {
   topChatters: ChatterStats[];
   messageTypes: MessageTypeStat[];
   hourlyActivity: HourlyActivityStat[];
+  rawChatStatus?: RawChatStatus;
 }
 
 export interface ChatterStats {
@@ -841,6 +862,8 @@ export interface ViewerEntry {
   isLurker: boolean;
 }
 
+export interface ViewerEntry extends ViewerWindowMetadata {}
+
 export interface ViewerDirectorySummary {
   totalViewers: number;
   activeViewers: number;
@@ -856,7 +879,9 @@ export interface ViewerDirectory {
   total: number;
   page: number;
   perPage: number;
+  days?: number;
   summary: ViewerDirectorySummary;
+  rawChatStatus?: RawChatStatus;
 }
 
 export type ViewerSortField = 'sessions' | 'messages' | 'last_seen' | 'other_channels' | 'first_seen';
@@ -870,6 +895,8 @@ export interface ViewerDetailOverview {
   category: string;
   isLurker: boolean;
 }
+
+export interface ViewerDetailOverview extends ViewerWindowMetadata {}
 
 export interface ViewerActivityDay {
   date: string;
@@ -895,11 +922,13 @@ export interface ViewerChatPatterns {
 
 export interface ViewerDetail {
   login: string;
+  days?: number;
   overview: ViewerDetailOverview;
   activityTimeline: ViewerActivityDay[];
   crossChannelPresence: ViewerCrossChannel[];
   chatPatterns: ViewerChatPatterns;
   personality?: ViewerPersonality;
+  rawChatStatus?: RawChatStatus;
 }
 
 export interface SegmentData {
@@ -937,6 +966,7 @@ export interface CrossChannelStats {
 }
 
 export interface ViewerSegments {
+  days: number;
   segments: Record<string, SegmentData>;
   churnRisk: ChurnRisk;
   crossChannelStats: CrossChannelStats;
@@ -984,6 +1014,7 @@ export interface ChatHypeTimeline {
   spikes: HypeSpike[];
   correlation: HypeCorrelation;
   recentSessions: HypeRecentSession[];
+  rawChatStatus?: RawChatStatus;
 }
 
 export interface HeroMention {
@@ -1032,6 +1063,7 @@ export interface ChatContentAnalysis {
   overallSentiment: OverallSentiment;
   backseat: BackseatData;
   engagementDepth: EngagementDepth;
+  rawChatStatus?: RawChatStatus;
 }
 
 export interface SocialHub {
@@ -1060,6 +1092,7 @@ export interface ChatSocialGraph {
   hubs: SocialHub[];
   topPairs: SocialPair[];
   mentionDistribution: MentionDistribution;
+  rawChatStatus?: RawChatStatus;
 }
 
 export interface ViewerPersonality {

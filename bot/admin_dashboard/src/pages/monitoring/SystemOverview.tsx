@@ -5,14 +5,27 @@ import { StatusBadge } from '@/components/shared/StatusBadge';
 import { useEventSubStatus, useSystemHealth } from '@/hooks/useAdmin';
 import { formatBytes, formatDuration, formatRelativeTime } from '@/utils/formatters';
 
+function formatFingerprint(value?: string) {
+  const normalized = String(value || '').trim();
+  if (!normalized) {
+    return '—';
+  }
+  return normalized.length > 18 ? `${normalized.slice(0, 18)}…` : normalized;
+}
+
 export function SystemOverview() {
   const healthQuery = useSystemHealth();
   const eventSubQuery = useEventSubStatus();
   const warningRows = healthQuery.data?.serviceWarnings ?? [];
+  const hasSystemWarning =
+    Boolean(healthQuery.data?.analyticsDbFingerprintMismatch) ||
+    Boolean(healthQuery.data?.rawChatLastError) ||
+    warningRows.length > 0;
   const chartRows = [
     { name: 'Memory', value: Number(healthQuery.data?.memoryBytes ?? healthQuery.data?.memoryRssBytes ?? 0) / (1024 * 1024) },
     { name: 'Subs', value: eventSubQuery.data?.activeSubscriptionCount ?? 0 },
     { name: 'LastTickAge', value: healthQuery.data?.lastTickAgeSeconds ?? 0 },
+    { name: 'RawChatLag', value: healthQuery.data?.rawChatLagSeconds ?? 0 },
   ];
 
   return (
@@ -23,15 +36,29 @@ export function SystemOverview() {
             <p className="text-xs font-semibold uppercase tracking-[0.28em] text-text-secondary">System Monitoring</p>
             <h1 className="mt-3 text-3xl font-semibold text-white">Bot Health und Runtime-Signale</h1>
           </div>
-          <StatusBadge status={healthQuery.isSuccess ? 'active' : 'warning'} />
+          <StatusBadge status={hasSystemWarning ? 'warning' : healthQuery.isSuccess ? 'active' : 'warning'} />
         </div>
       </header>
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         <KpiCard title="Uptime" value={formatDuration(healthQuery.data?.uptimeSeconds)} hint="Prozesslaufzeit" />
         <KpiCard title="Memory" value={formatBytes(healthQuery.data?.memoryBytes ?? healthQuery.data?.memoryRssBytes)} hint="RSS / Process memory" tone="primary" />
         <KpiCard title="Last Tick" value={formatRelativeTime(healthQuery.data?.lastTickAt)} hint="vom Backend gemeldet" tone="accent" />
         <KpiCard title="EventSub Subs" value={String(eventSubQuery.data?.activeSubscriptionCount ?? 0)} hint="aktive Twitch-Subscriptions" />
+        <KpiCard
+          title="Raw Chat Lag"
+          value={
+            healthQuery.data?.rawChatLagSeconds != null
+              ? formatDuration(healthQuery.data.rawChatLagSeconds)
+              : '—'
+          }
+          hint={
+            healthQuery.data?.rawChatLagStreamer
+              ? `betroffen: ${healthQuery.data.rawChatLagStreamer}`
+              : 'kein live Kanal im Snapshot'
+          }
+          tone={healthQuery.data?.rawChatLastError ? 'accent' : 'neutral'}
+        />
       </div>
 
       <section className="grid gap-5 xl:grid-cols-[1.1fr_0.9fr]">
@@ -51,7 +78,17 @@ export function SystemOverview() {
         </article>
 
         <article className="panel-card rounded-[1.8rem] p-6">
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-text-secondary">Warnings</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-text-secondary">Warnings & DB</p>
+          <div className="mt-4 rounded-[1.2rem] border border-white/10 bg-white/[0.03] p-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-text-secondary">Analytics DB</p>
+            <p className="mt-2 font-medium text-white">{formatFingerprint(healthQuery.data?.analyticsDbFingerprint)}</p>
+            <p className="mt-1 text-sm text-text-secondary">
+              Internal API: {formatFingerprint(healthQuery.data?.internalAnalyticsDbFingerprint)}
+            </p>
+            {healthQuery.data?.analyticsDbFingerprintMismatch ? (
+              <p className="mt-2 text-sm text-warning">Fingerprint-Mismatch zwischen Dashboard und Bot-Service.</p>
+            ) : null}
+          </div>
           <div className="mt-4 space-y-3">
             {warningRows.length ? (
               warningRows.slice(0, 6).map((warning, index) => (

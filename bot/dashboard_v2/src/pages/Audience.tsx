@@ -6,6 +6,7 @@ import { FollowerFunnel } from '@/components/charts/FollowerFunnel';
 import { TagPerformanceChart } from '@/components/charts/TagPerformance';
 import { AudienceDemographics } from '@/components/charts/AudienceDemographics';
 import { LurkerAnalysis } from '@/components/charts/LurkerAnalysis';
+import { PlanGateCard } from '@/components/cards/PlanGateCard';
 import type { TimeRange } from '@/types/analytics';
 
 interface AudienceProps {
@@ -190,10 +191,12 @@ export function Audience({ streamer, days }: AudienceProps) {
           {demographicsData && <AudienceDemographics data={demographicsData} />}
 
           {/* Lurker Analysis */}
-          <div>
-            <h2 className="text-lg font-semibold text-white mb-4">Lurker-Analyse</h2>
-            <LurkerAnalysis data={lurkerData} />
-          </div>
+          <PlanGateCard featureId="lurker_analysis" title="Lurker-Analyse">
+            <div>
+              <h2 className="text-lg font-semibold text-white mb-4">Lurker-Analyse</h2>
+              <LurkerAnalysis data={lurkerData} />
+            </div>
+          </PlanGateCard>
 
           {/* Audience Insights Summary */}
           {(watchTimeData || funnelData || (tagData && tagData.length > 0)) && (

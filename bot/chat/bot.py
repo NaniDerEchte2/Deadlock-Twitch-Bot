@@ -885,7 +885,7 @@ if TWITCHIO_AVAILABLE:
                 try:
                     await self._track_chat_health(message)
                 except Exception:
-                    log.debug("Konnte Chat-Health nicht loggen", exc_info=True)
+                    log.exception("Chat-Health-Tracking fuer Whitelist-Bot fehlgeschlagen")
                 await self.process_commands(message)
                 return
 
@@ -914,10 +914,7 @@ if TWITCHIO_AVAILABLE:
                 try:
                     await self._track_chat_health(message)
                 except Exception:
-                    log.debug(
-                        "Konnte Chat-Health für Non-Partner nicht loggen",
-                        exc_info=True,
-                    )
+                    log.exception("Chat-Health-Tracking fuer Non-Partner fehlgeschlagen")
                 return
             # ---------------------------------------------------------------
 
@@ -1024,16 +1021,7 @@ if TWITCHIO_AVAILABLE:
             try:
                 await self._track_chat_health(message)
             except Exception:
-                log.debug("Konnte Chat-Health nicht loggen", exc_info=True)
-
-            try:
-                login_for_raw = self._normalize_channel_login_safe(
-                    getattr(message, "channel", None)
-                )
-                if login_for_raw:
-                    self._record_raw_chat_message(login_for_raw)
-            except Exception:
-                log.debug("Raw-Chat-Activity konnte nicht erfasst werden", exc_info=True)
+                log.exception("Chat-Health-Tracking fehlgeschlagen")
 
             sent_invite = False
             if is_deadlock_live:

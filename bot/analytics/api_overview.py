@@ -14,7 +14,7 @@ from aiohttp import web
 
 from ..core.chat_bots import build_known_chat_bot_not_in_clause
 from ..dashboard.live import DashboardLiveMixin
-from .raid_metrics import recalculate_raid_chat_metrics
+from .raid_metrics import raid_identity_key, recalculate_raid_chat_metrics
 from ..storage import pg as storage
 
 log = logging.getLogger("TwitchStreams.AnalyticsV2")
@@ -24,6 +24,12 @@ DASHBOARD_V2_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fdashboard-v2"
 DASHBOARD_V2_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard-v2"
 DASHBOARD_VERWALTUNG_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fverwaltung"
 DASHBOARD_VERWALTUNG_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fverwaltung"
+DASHBOARD_PRICING_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Fpricing"
+DASHBOARD_PRICING_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fpricing"
+DASHBOARD_AFFILIATE_PORTAL_LOGIN_URL = "/twitch/auth/login?next=%2Ftwitch%2Faffiliate%2Fportal"
+DASHBOARD_AFFILIATE_PORTAL_DISCORD_LOGIN_URL = (
+    "/twitch/auth/discord/login?next=%2Ftwitch%2Faffiliate%2Fportal"
+)
 ADMIN_DASHBOARD_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fadmin"
 
 
@@ -99,11 +105,16 @@ class _AnalyticsOverviewMixin:
         router.add_post("/twitch/api/v2/roadmap", self._api_v2_roadmap_create)
         router.add_patch("/twitch/api/v2/roadmap/{id}", self._api_v2_roadmap_update)
         router.add_delete("/twitch/api/v2/roadmap/{id}", self._api_v2_roadmap_delete)
+        # Billing catalog
+        router.add_get("/twitch/api/v2/billing/catalog", self._api_v2_billing_catalog)
+        router.add_get("/twitch/api/v2/affiliate/portal", self._api_v2_affiliate_portal)
         # Serve the dashboard
         router.add_get("/twitch/dashboard", self._serve_dashboard)
         router.add_get("/twitch/dashboard-v2", self._serve_dashboard_v2)
         router.add_get("/twitch/dashboard-v2/{path:.*}", self._serve_dashboard_v2_assets)
         router.add_get("/twitch/verwaltung", self._serve_verwaltung)
+        router.add_get("/twitch/pricing", self._serve_pricing)
+        router.add_get("/twitch/affiliate/portal", self._serve_affiliate_portal)
         router.add_get("/twitch/admin/", self._serve_admin_dashboard)
         router.add_get("/twitch/admin/assets/{path:.*}", self._serve_admin_dashboard_assets)
         router.add_get("/twitch/admin/{path:.*}", self._serve_admin_dashboard_path)
@@ -529,6 +540,62 @@ class _AnalyticsOverviewMixin:
             response = self._dashboard_auth_redirect_or_unavailable(
                 request,
                 next_path="/twitch/verwaltung",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
+        import pathlib
+
+        dist_path = pathlib.Path(__file__).parent / "dashboard_v2" / "dist" / "index.html"
+        if dist_path.exists():
+            return web.FileResponse(dist_path)
+        return web.Response(
+            text="Dashboard not built. Run npm run build in dashboard_v2/", status=404
+        )
+
+    async def _serve_pricing(self, request: web.Request) -> web.Response:
+        """Serve the pricing page."""
+        gate_response = self._admin_dashboard_host_page_gate(request)
+        if gate_response is not None:
+            return gate_response
+        if not self._check_v2_auth(request):
+            should_use_discord = getattr(self, "_should_use_discord_admin_login", None)
+            if callable(should_use_discord) and bool(should_use_discord(request)):
+                login_url = DASHBOARD_PRICING_DISCORD_LOGIN_URL
+            else:
+                login_url = DASHBOARD_PRICING_LOGIN_URL
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/pricing",
+                fallback_login_url=login_url,
+            )
+            if isinstance(response, web.HTTPException):
+                raise response
+            return response
+        import pathlib
+
+        dist_path = pathlib.Path(__file__).parent / "dashboard_v2" / "dist" / "index.html"
+        if dist_path.exists():
+            return web.FileResponse(dist_path)
+        return web.Response(
+            text="Dashboard not built. Run npm run build in dashboard_v2/", status=404
+        )
+
+    async def _serve_affiliate_portal(self, request: web.Request) -> web.Response:
+        """Serve the affiliate portal page."""
+        gate_response = self._admin_dashboard_host_page_gate(request)
+        if gate_response is not None:
+            return gate_response
+        if not self._check_v2_auth(request):
+            should_use_discord = getattr(self, "_should_use_discord_admin_login", None)
+            if callable(should_use_discord) and bool(should_use_discord(request)):
+                login_url = DASHBOARD_AFFILIATE_PORTAL_DISCORD_LOGIN_URL
+            else:
+                login_url = DASHBOARD_AFFILIATE_PORTAL_LOGIN_URL
+            response = self._dashboard_auth_redirect_or_unavailable(
+                request,
+                next_path="/twitch/affiliate/portal",
                 fallback_login_url=login_url,
             )
             if isinstance(response, web.HTTPException):
@@ -1686,7 +1753,8 @@ class _AnalyticsOverviewMixin:
 
                     raid_id = int(raid["raid_id"])
                     executed_at = raid["executed_at"]
-                    metric = raid_metrics.get(raid_id)
+                    raid_key = raid_identity_key(raid_id, executed_at)
+                    metric = raid_metrics.get(raid_key) if raid_key is not None else None
                     if metric is not None:
                         chatters_5m = int(metric.get("plus5m", 0) or 0)
                         chatters_15m = int(metric.get("plus15m", 0) or 0)

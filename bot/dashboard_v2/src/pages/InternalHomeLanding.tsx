@@ -7,25 +7,184 @@ import {
   type InternalHomeChangelogEntry,
 } from '@/api/client';
 import { useStreamerList, useAuthStatus } from '@/hooks/useAnalytics';
-import { RoadmapPanel } from '@/components/roadmap/RoadmapPanel';
+import { formatNumber, formatDuration } from '@/utils/formatters';
 import {
   ArrowRight,
   BarChart3,
-  CalendarClock,
-  CheckCircle2,
-  CreditCard,
-  Gauge,
-  Key,
+  FileText,
+  Heart,
   Loader2,
   MessageSquare,
-  RadioTower,
-  Settings2,
-  ShieldAlert,
-  ShieldCheck,
+  Settings,
   Sparkles,
-  Twitch,
+  TrendingUp,
+  Users,
   type LucideIcon,
 } from 'lucide-react';
+
+// ---------------------------------------------------------------------------
+// Types for the new backend fields (health_score, last_stream_summary, week_comparison)
+// These come from the raw API response but are not yet mapped by fetchInternalHome.
+// We fetch them via a lightweight raw query.
+// ---------------------------------------------------------------------------
+
+interface HealthScoreData {
+  overall: number;
+  trend: number;
+  sub_scores: {
+    growth: number;
+    retention: number;
+    engagement: number;
+    community: number;
+  };
+}
+
+interface LastStreamSummary {
+  started_at: string | null;
+  ended_at: string | null;
+  duration_seconds: number | null;
+  avg_viewers: number | null;
+  peak_viewers: number | null;
+  follower_delta: number | null;
+  chat_messages: number | null;
+}
+
+interface WeekComparisonData {
+  current_week: {
+    avg_viewers: number | null;
+    total_followers: number | null;
+    chat_activity: number | null;
+    stream_hours: number | null;
+  };
+  previous_week: {
+    avg_viewers: number | null;
+    total_followers: number | null;
+    chat_activity: number | null;
+    stream_hours: number | null;
+  };
+  changes: {
+    avg_viewers_pct: number | null;
+    followers_pct: number | null;
+    chat_activity_pct: number | null;
+    stream_hours_pct: number | null;
+  };
+}
+
+interface RawInternalHomeExtras {
+  health_score?: HealthScoreData | null;
+  last_stream_summary?: LastStreamSummary | null;
+  week_comparison?: WeekComparisonData | null;
+}
+
+// ---------------------------------------------------------------------------
+// Small fetch helper (mirrors client.ts buildUrl logic without importing private fn)
+// ---------------------------------------------------------------------------
+
+function getPartnerToken(): string | null {
+  const urlParams = new URLSearchParams(window.location.search);
+  const token = urlParams.get('partner_token');
+  if (token) {
+    localStorage.setItem('partner_token', token);
+    return token;
+  }
+  return localStorage.getItem('partner_token');
+}
+
+async function fetchInternalHomeExtras(streamer?: string | null): Promise<RawInternalHomeExtras> {
+  const url = new URL('/twitch/api/v2/internal-home', window.location.origin);
+  const token = getPartnerToken();
+  if (token) url.searchParams.set('partner_token', token);
+  if (streamer) url.searchParams.set('streamer', streamer);
+
+  const res = await fetch(url.toString(), { headers: { Accept: 'application/json' } });
+  if (!res.ok) return {};
+  const raw = await res.json();
+  return {
+    health_score: raw.health_score ?? null,
+    last_stream_summary: raw.last_stream_summary ?? null,
+    week_comparison: raw.week_comparison ?? null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Inline helper components
+// ---------------------------------------------------------------------------
+
+function MiniStat({ label, value, prefix = '', icon: Icon, accent = 'primary' }: {
+  label: string;
+  value: number | null | undefined;
+  prefix?: string;
+  icon?: LucideIcon;
+  accent?: 'primary' | 'accent' | 'success' | 'warning';
+}) {
+  const accentColor = {
+    primary: 'bg-primary/15 border-primary/25 text-primary',
+    accent: 'bg-accent/15 border-accent/25 text-accent',
+    success: 'bg-success/15 border-success/25 text-success',
+    warning: 'bg-warning/15 border-warning/25 text-warning',
+  }[accent];
+  return (
+    <div className="bg-background/50 rounded-xl border border-border p-3">
+      {Icon && (
+        <div className={`w-7 h-7 rounded-lg border flex items-center justify-center mb-2 ${accentColor}`}>
+          <Icon className="w-3.5 h-3.5" />
+        </div>
+      )}
+      <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">{label}</div>
+      <div className="text-xl font-bold text-white mt-0.5">
+        {value != null ? `${prefix}${formatNumber(value)}` : '\u2013'}
+      </div>
+    </div>
+  );
+}
+
+const WEEK_KPI_META: Record<string, { icon: LucideIcon }> = {
+  '\u00D8 Viewer': { icon: Users },
+  'Follower': { icon: TrendingUp },
+  'Chat-Aktivitaet': { icon: MessageSquare },
+  'Stream-Stunden': { icon: BarChart3 },
+};
+
+function WeekKpi({ label, current, change, suffix = '' }: { label: string; current: number | null | undefined; change: number | null | undefined; suffix?: string }) {
+  const meta = WEEK_KPI_META[label];
+  const Icon = meta?.icon ?? BarChart3;
+  return (
+    <div className="panel-card soft-elevate rounded-xl p-4 internal-home-kpi">
+      <div className="flex items-center gap-2.5 mb-3">
+        <div className="w-8 h-8 rounded-lg gradient-accent flex items-center justify-center shrink-0">
+          <Icon className="w-4 h-4 text-white" />
+        </div>
+        <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">{label}</div>
+      </div>
+      <div className="text-2xl font-bold text-white">
+        {current != null ? `${formatNumber(current)}${suffix}` : '\u2013'}
+      </div>
+      {change != null && (
+        <div className={`text-xs mt-1.5 font-semibold ${change >= 0 ? 'text-success' : 'text-danger'}`}>
+          {change >= 0 ? '\u2191' : '\u2193'} {Math.abs(change).toFixed(1)}% vs. Vorwoche
+        </div>
+      )}
+    </div>
+  );
+}
+
+function QuickAction({ href, icon: Icon, label, primary = false }: { href: string; icon: LucideIcon; label: string; primary?: boolean }) {
+  return (
+    <a
+      href={href}
+      className="panel-card soft-elevate inline-flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold text-white no-underline internal-home-quick-action"
+    >
+      <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${primary ? 'gradient-accent' : 'bg-white/8 border border-white/10'}`}>
+        <Icon className="w-4 h-4 text-white" />
+      </div>
+      {label}
+    </a>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Existing helper functions (kept from original)
+// ---------------------------------------------------------------------------
 
 const INTERNAL_HOME_BOT_MODERATOR_LOGIN = 'deutschedeadlockcommunity';
 
@@ -47,6 +206,18 @@ function formatCalendarDate(value: string | null | undefined): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return 'Unbekannt';
   return date.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+function formatDateWithTime(iso: string | null | undefined): string {
+  if (!iso) return '\u2013';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '\u2013';
+  return date.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function formatDurationFromSeconds(seconds: number | null | undefined): string {
+  if (!seconds) return '\u2013';
+  return formatDuration(seconds);
 }
 
 function actionLogTone(entry: InternalHomeActionEntry): {
@@ -75,72 +246,27 @@ function formatActionUser(entry: InternalHomeActionEntry): string {
 }
 
 function isBanAction(entry: InternalHomeActionEntry): boolean {
-  const haystack = [
-    entry.eventType,
-    entry.statusLabel,
-    entry.title,
-    entry.summary,
-    entry.reason,
-    entry.description,
-  ]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase();
-
+  const haystack = [entry.eventType, entry.statusLabel, entry.title, entry.summary, entry.reason, entry.description]
+    .filter(Boolean).join(' ').toLowerCase();
   return haystack.includes('ban') || haystack.includes('banned') || haystack.includes('gebannt');
 }
 
 function isServicePitchWarningAction(entry: InternalHomeActionEntry): boolean {
-  const haystack = [
-    entry.eventType,
-    entry.statusLabel,
-    entry.title,
-    entry.summary,
-    entry.reason,
-    entry.description,
-  ]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase();
-
+  const haystack = [entry.eventType, entry.statusLabel, entry.title, entry.summary, entry.reason, entry.description]
+    .filter(Boolean).join(' ').toLowerCase();
   return (
-    haystack.includes('service_pitch_warning')
-    || haystack.includes('service-pitch')
-    || haystack.includes('service pitch')
-    || haystack.includes('pitch warn')
+    haystack.includes('service_pitch_warning') || haystack.includes('service-pitch') ||
+    haystack.includes('service pitch') || haystack.includes('pitch warn')
   );
 }
 
 function stripActionNoise(value: string): string {
-  const cleaned = value
+  return value
     .replace(/auto[_\s-]*raid[_\s-]*on[_\s-]*offline/gi, '')
     .replace(/auto[_\s-]*offline[_\s-]*raid/gi, '')
     .replace(/\s{2,}/g, ' ')
     .replace(/\s+([,.;:!?])/g, '$1')
     .trim();
-  return cleaned;
-}
-
-function actionKey(entry: InternalHomeActionEntry, index: number): string {
-  if (entry.id !== null && entry.id !== undefined) return String(entry.id);
-  return `action-${index}`;
-}
-
-function changelogKey(entry: InternalHomeChangelogEntry, index: number): string {
-  if (entry.id !== null && entry.id !== undefined) return String(entry.id);
-  return `changelog-${index}`;
-}
-
-function splitActionDetailSegments(value: string | null | undefined): string[] {
-  if (!value) return [];
-  return value
-    .split('|')
-    .map((segment) => stripActionNoise(segment.trim()))
-    .filter(Boolean);
-}
-
-function normalizeActionEventType(entry: InternalHomeActionEntry): string {
-  return String(entry.eventType || '').trim().toLowerCase();
 }
 
 function stripActionModeratorSegment(value: string): string {
@@ -152,19 +278,20 @@ function stripActionModeratorSegment(value: string): string {
     .trim();
 }
 
-function isVisibleChannelAction(
-  entry: InternalHomeActionEntry,
-  channelLogin: string
-): boolean {
+function splitActionDetailSegments(value: string | null | undefined): string[] {
+  if (!value) return [];
+  return value.split('|').map((s) => stripActionNoise(s.trim())).filter(Boolean);
+}
+
+function normalizeActionEventType(entry: InternalHomeActionEntry): string {
+  return String(entry.eventType || '').trim().toLowerCase();
+}
+
+function isVisibleChannelAction(entry: InternalHomeActionEntry, channelLogin: string): boolean {
   const eventType = normalizeActionEventType(entry);
   if (!eventType) return false;
-
-  if (eventType === 'ban' || eventType === 'ban_keyword_hit' || eventType === 'unban') {
-    return true;
-  }
-  if (eventType === 'raid' || eventType === 'raid_history') {
-    return true;
-  }
+  if (eventType === 'ban' || eventType === 'ban_keyword_hit' || eventType === 'unban') return true;
+  if (eventType === 'raid' || eventType === 'raid_history') return true;
   if (eventType === 'service_pitch_warning') {
     if (!channelLogin) return true;
     const actorLogin = String(entry.actorLogin || '').trim().toLowerCase();
@@ -174,17 +301,13 @@ function isVisibleChannelAction(
   return false;
 }
 
-function buildPriorityActionDetails(
-  entry: InternalHomeActionEntry,
-  isServicePitchWarning: boolean
-): string[] {
+function buildPriorityActionDetails(entry: InternalHomeActionEntry, isServicePitchWarning: boolean): string[] {
   const detailLines: string[] = [];
   const summary = stripActionNoise(stripActionModeratorSegment(entry.summary?.trim() || ''));
   const targetLogin = entry.targetLogin?.trim() || '';
   const actorLogin = entry.actorLogin?.trim() || '';
   const metric = stripActionNoise(entry.metric?.trim() || '');
   const reason = stripActionNoise(entry.reason?.trim() || '');
-
   if (summary) detailLines.push(summary);
   if (targetLogin) detailLines.push(`Nutzer: @${targetLogin}`);
   if (isServicePitchWarning) {
@@ -195,7 +318,6 @@ function buildPriorityActionDetails(
   if (metric) detailLines.push(`Metrik: ${metric}`);
   if (reason) detailLines.push(`Grund: ${reason}`);
   detailLines.push(...splitActionDetailSegments(entry.description));
-
   const seen = new Set<string>();
   return detailLines.filter((line) => {
     const normalized = line.trim().toLowerCase();
@@ -209,20 +331,28 @@ function sortActionLogByTimeline(entries: InternalHomeActionEntry[], limit: numb
   if (limit <= 0 || entries.length === 0) return [];
   const withMeta = entries.map((entry, index) => {
     const parsedTimestamp = Date.parse(entry.timestamp || '');
-    return {
-      entry,
-      index,
-      timestampMs: Number.isFinite(parsedTimestamp) ? parsedTimestamp : Number.NEGATIVE_INFINITY,
-    };
+    return { entry, index, timestampMs: Number.isFinite(parsedTimestamp) ? parsedTimestamp : Number.NEGATIVE_INFINITY };
   });
-
   withMeta.sort((left, right) => {
     if (left.timestampMs === right.timestampMs) return left.index - right.index;
     return right.timestampMs - left.timestampMs;
   });
-
   return withMeta.slice(0, limit).map(({ entry }) => entry);
 }
+
+function actionKey(entry: InternalHomeActionEntry, index: number): string {
+  if (entry.id !== null && entry.id !== undefined) return String(entry.id);
+  return `action-${index}`;
+}
+
+function changelogKey(entry: InternalHomeChangelogEntry, index: number): string {
+  if (entry.id !== null && entry.id !== undefined) return String(entry.id);
+  return `changelog-${index}`;
+}
+
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
 
 export function InternalHomeLanding() {
   const { data: authStatus, isLoading: loadingAuth } = useAuthStatus();
@@ -232,15 +362,17 @@ export function InternalHomeLanding() {
   const partnerStreamers = useMemo(
     () =>
       streamers
-        .map((candidate) => ({ ...candidate, login: candidate.login?.trim().toLowerCase() || '' }))
-        .filter((candidate) => candidate.isPartner && candidate.login),
+        .map((c) => ({ ...c, login: c.login?.trim().toLowerCase() || '' }))
+        .filter((c) => c.isPartner && c.login),
     [streamers]
   );
-  const partnerLoginSet = useMemo(() => new Set(partnerStreamers.map((candidate) => candidate.login)), [partnerStreamers]);
+  const partnerLoginSet = useMemo(() => new Set(partnerStreamers.map((c) => c.login)), [partnerStreamers]);
   const isAdminView = Boolean(authStatus?.isAdmin || authStatus?.isLocalhost);
   const streamerOverride = isAdminView ? normalizedSelectedStreamer : null;
   const hasValidAdminSelection = streamerOverride !== null && partnerLoginSet.has(streamerOverride);
   const canRequestInternalHome = !loadingAuth && (!isAdminView || hasValidAdminSelection);
+
+  // Core internal-home query (mapped data)
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ['internal-home', streamerOverride],
     queryFn: () => fetchInternalHome(streamerOverride),
@@ -248,6 +380,17 @@ export function InternalHomeLanding() {
     enabled: canRequestInternalHome,
   });
 
+  // Extras query (raw fields: health_score, last_stream_summary, week_comparison)
+  const { data: extras } = useQuery({
+    queryKey: ['internal-home-extras', streamerOverride],
+    queryFn: () => fetchInternalHomeExtras(streamerOverride),
+    staleTime: Number.POSITIVE_INFINITY,
+    enabled: canRequestInternalHome,
+  });
+
+  const planName = authStatus?.plan?.planName || 'Free';
+
+  // Admin streamer fallback
   useEffect(() => {
     if (loadingAuth || !isAdminView || loadingStreamers) return;
     if (normalizedSelectedStreamer && partnerLoginSet.has(normalizedSelectedStreamer)) return;
@@ -256,6 +399,7 @@ export function InternalHomeLanding() {
     if (fallbackStreamer !== normalizedSelectedStreamer) setSelectedStreamer(fallbackStreamer);
   }, [authStatus?.twitchLogin, isAdminView, loadingAuth, loadingStreamers, normalizedSelectedStreamer, partnerLoginSet, partnerStreamers]);
 
+  // URL sync
   useEffect(() => {
     if (loadingAuth) return;
     const params = new URLSearchParams(window.location.search);
@@ -269,6 +413,8 @@ export function InternalHomeLanding() {
     if (nextUrl !== currentUrl) window.history.replaceState({}, '', nextUrl);
   }, [isAdminView, loadingAuth, normalizedSelectedStreamer]);
 
+  // ---- Early returns ----
+
   if (!canRequestInternalHome) {
     const emptyAdminState = !loadingAuth && isAdminView && !loadingStreamers && partnerStreamers.length === 0;
     return (
@@ -277,7 +423,7 @@ export function InternalHomeLanding() {
           <div className="panel-card rounded-2xl p-6 md:p-8">
             {emptyAdminState ? (
               <div className="space-y-2">
-                <h2 className="text-xl font-bold text-white">Kein Partner auswählbar</h2>
+                <h2 className="text-xl font-bold text-white">Kein Partner auswaehlbar</h2>
                 <p className="text-sm text-text-secondary">In der Admin-Ansicht werden nur aktive Partner-Profile angezeigt.</p>
               </div>
             ) : (
@@ -292,84 +438,15 @@ export function InternalHomeLanding() {
     );
   }
 
-  const home = data ?? {};
-  const twitchLogin = home.twitchLogin?.trim() || '';
-  const displayName = home.displayName?.trim() || twitchLogin || 'Creator';
-  const grantedScopes = home.oauth?.grantedScopes ?? [];
-  const missingScopes = home.oauth?.missingScopes ?? [];
-  const missingScopeCount = missingScopes.length;
-  const hasScopeIssue = missingScopeCount > 0 || home.oauth?.status === 'partial' || home.oauth?.status === 'missing';
-  const oauthStatus = home.oauth?.status || (home.oauth?.connected ? 'connected' : hasScopeIssue ? 'missing' : 'partial');
-  const oauthBannerText = oauthStatus === 'connected' ? 'OAuth verbunden' : oauthStatus === 'error' ? 'OAuth Fehler' : hasScopeIssue ? 'Scopes fehlen' : 'OAuth prüfen';
-  const oauthBannerClass = oauthStatus === 'connected' ? 'border-success/35 bg-success/10 text-success' : oauthStatus === 'error' || hasScopeIssue ? 'border-error/35 bg-error/10 text-error' : 'border-accent/35 bg-accent/10 text-accent';
-  const needsOauthReconnect = oauthStatus !== 'connected' || hasScopeIssue;
-  const oauthCardStatusText = !needsOauthReconnect ? 'Verbunden' : missingScopeCount > 1 ? 'Re-Auth nötig' : 'Unvollständig';
-  const oauthCardStatusClass = !needsOauthReconnect ? 'text-success' : missingScopeCount === 1 ? 'text-error' : 'text-warning';
-  const oauthCardHintText = !needsOauthReconnect
-    ? 'Verbindung steht und ist nutzbar.'
-    : missingScopeCount > 1
-      ? `${missingScopeCount} Scopes fehlen. Bitte neu autorisieren.`
-      : '1 Scope fehlt. Kritisch unvollständig.';
-  const scopeCardStatusText = missingScopeCount === 0 ? 'Vollständig' : missingScopeCount === 1 ? 'Kritisch unvollständig' : 'Re-Auth nötig';
-  const scopeCardStatusClass = missingScopeCount === 0 ? 'text-success' : missingScopeCount === 1 ? 'text-error' : 'text-warning';
-  const scopeCardHintText = missingScopeCount === 0
-    ? `${grantedScopes.length} erwartete Scopes aktiv.`
-    : missingScopeCount === 1
-      ? 'Genau 1 Scope fehlt.'
-      : `${missingScopeCount} Scopes fehlen.`;
-  const discordConnected = Boolean(home.discord?.connected);
-  const discordCardStatusText = discordConnected ? 'Verbunden' : 'Nicht verbunden';
-  const discordCardStatusClass = discordConnected ? 'text-success' : 'text-warning';
-  const discordCardHintText = discordConnected
-    ? 'Discord-Verknüpfung erkannt.'
-    : 'Noch kein Discord-Profil verknüpft.';
-  const liveAnnouncementTarget = normalizedSelectedStreamer || twitchLogin;
-  const liveAnnouncementHref = liveAnnouncementTarget ? `/twitch/live-announcement?streamer=${encodeURIComponent(liveAnnouncementTarget)}` : '/twitch/live-announcement';
-  const rawActionLog = home.actionLog ?? [];
-  const activityFeedNote = rawActionLog.find((entry) => String(entry.id || '').trim() === 'impact-note')?.summary?.trim() || '';
-  const channelScopeLogin = (normalizedSelectedStreamer || twitchLogin || '').trim().toLowerCase();
-  const baseActionLog = rawActionLog
-    .filter((entry) => String(entry.id || '').trim() !== 'impact-note')
-    .filter((entry) => isVisibleChannelAction(entry, channelScopeLogin));
-  const actionLog = sortActionLogByTimeline(baseActionLog, 8);
-  const changelogEntries = (home.changelog?.entries ?? []).slice(0, 3);
-  const quickActions: Array<{ id: string; title: string; description: string; href: string; icon: LucideIcon }> = [
-    {
-      id: 'verwaltung',
-      title: 'Konto verwalten',
-      description: 'OAuth, Discord-Verbindung und Profil-Details einsehen.',
-      href: '/twitch/verwaltung',
-      icon: Settings2,
-    },
-    {
-      id: 'analysis-v2',
-      title: 'Analytics v2',
-      description: 'Vollstaendiges Analyse-Dashboard mit allen Tabs',
-      href: '/twitch/dashboard-v2',
-      icon: BarChart3,
-    },
-    {
-      id: 'live-announcement',
-      title: 'Live Message Builder',
-      description: 'Go-Live Text, Embed und Buttons konfigurieren',
-      href: liveAnnouncementHref,
-      icon: RadioTower,
-    },
-    {
-      id: 'billing',
-      title: 'Abo / Billing',
-      description: 'Subscription, Rechnungen und Checkout verwalten',
-      href: '/twitch/abbo',
-      icon: Gauge,
-    },
-  ];
-
   if (isLoading) {
     return (
       <div className="min-h-screen relative px-3 py-4 md:px-7 md:py-8">
         <div className="relative max-w-[1280px] mx-auto space-y-4 md:space-y-5">
           <div className="panel-card rounded-2xl p-6 md:p-8">
-            <div className="flex items-center gap-3 text-text-secondary"><Loader2 className="h-5 w-5 animate-spin text-primary" /><span>Interne Startseite wird geladen ...</span></div>
+            <div className="flex items-center gap-3 text-text-secondary">
+              <Loader2 className="h-5 w-5 animate-spin text-primary" />
+              <span>Startseite wird geladen ...</span>
+            </div>
           </div>
         </div>
       </div>
@@ -382,7 +459,7 @@ export function InternalHomeLanding() {
       <div className="min-h-screen relative px-3 py-4 md:px-7 md:py-8">
         <div className="relative max-w-[1280px] mx-auto">
           <div className="panel-card rounded-2xl p-6 md:p-8">
-            <h2 className="text-xl font-bold text-white">Internal Home nicht verfügbar</h2>
+            <h2 className="text-xl font-bold text-white">Startseite nicht verfuegbar</h2>
             <p className="mt-1 text-sm text-text-secondary">{errorMessage}</p>
             <button onClick={() => void refetch()} className="mt-4 inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-sm font-semibold text-white transition-colors hover:border-border-hover hover:bg-card-hover">
               <ArrowRight className="h-4 w-4" />
@@ -394,6 +471,32 @@ export function InternalHomeLanding() {
     );
   }
 
+  // ---- Data extraction ----
+
+  const home = data ?? {};
+  const twitchLogin = home.twitchLogin?.trim() || '';
+  const displayName = home.displayName?.trim() || twitchLogin || 'Creator';
+
+  const healthScore = extras?.health_score ?? null;
+  const lastStream = extras?.last_stream_summary ?? null;
+  const weekComp = extras?.week_comparison ?? null;
+
+  const score = healthScore?.overall ?? 0;
+  const sub_scores = healthScore?.sub_scores ?? { growth: 0, retention: 0, engagement: 0, community: 0 };
+
+  // Action log (last 5)
+  const rawActionLog = home.actionLog ?? [];
+  const channelScopeLogin = (normalizedSelectedStreamer || twitchLogin || '').trim().toLowerCase();
+  const baseActionLog = rawActionLog
+    .filter((entry) => String(entry.id || '').trim() !== 'impact-note')
+    .filter((entry) => isVisibleChannelAction(entry, channelScopeLogin));
+  const actionLog = sortActionLogByTimeline(baseActionLog, 5);
+
+  // Changelog (last 3)
+  const changelogEntries = (home.changelog?.entries ?? []).slice(0, 3);
+
+  // ---- Render ----
+
   return (
     <div className="internal-home-vibe min-h-screen relative px-3 py-4 md:px-7 md:py-8">
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
@@ -404,77 +507,55 @@ export function InternalHomeLanding() {
 
       <div className="relative max-w-[1280px] mx-auto space-y-4 md:space-y-5">
 
-        {/* Hero Section */}
+        {/* ===== 1. Welcome Header + Admin Selector ===== */}
         <motion.section
-          className="panel-card rounded-2xl p-5 md:p-8"
+          className="panel-card rounded-2xl p-5 md:p-6"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.32 }}
         >
-          <div className="internal-home-landing-shell">
-            <div className="space-y-4">
-              <div className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-4 py-1.5 text-sm font-medium text-text-secondary">
-                <Sparkles className="h-3.5 w-3.5 text-primary" />
-                Internal Home
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-4">
+              <div className="w-14 h-14 rounded-full gradient-accent flex items-center justify-center text-2xl font-bold text-white shrink-0 shadow-lg shadow-primary/20">
+                {displayName?.[0]?.toUpperCase() ?? '?'}
               </div>
-              <div className="space-y-2">
-                <h1 className="display-font text-4xl font-bold leading-tight md:text-5xl">
-                  Willkommen zurück,{' '}
-                  <span className="bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
-                    {displayName}
-                  </span>
-                </h1>
-                <p className="max-w-2xl text-sm text-text-secondary md:text-base">
-                  Deine Landing-Übersicht für Auth, letzte Aktionen und direkte Wege in die wichtigsten Bereiche.
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className={`internal-home-pill ${oauthBannerClass}`}>
-                  {oauthStatus === 'connected' ? <ShieldCheck className="h-3.5 w-3.5" /> : <ShieldAlert className="h-3.5 w-3.5" />}
-                  {oauthBannerText}
-                </span>
-                <span className="internal-home-pill border-border/80 bg-background/70 text-text-secondary">
-                  <Twitch className="h-3.5 w-3.5 text-primary" />
-                  {twitchLogin ? `@${twitchLogin}` : 'Nicht verbunden'}
-                </span>
-                <span className="internal-home-pill border-border/80 bg-background/70 text-text-secondary">
-                  <CheckCircle2 className={`h-3.5 w-3.5 ${hasScopeIssue ? 'text-error' : 'text-accent'}`} />
-                  {grantedScopes.length} Scopes ok{missingScopes.length > 0 ? ` · ${missingScopes.length} offen` : ''}
-                </span>
-                <span className="internal-home-pill border-border/80 bg-background/70 text-text-secondary">
-                  <CalendarClock className="h-3.5 w-3.5 text-accent" />
-                  Aktualisiert: {formatDateTime(home.generatedAt)}
-                </span>
+              <div>
+                <div className="inline-flex items-center gap-1.5 rounded-full border border-border bg-black/20 px-3 py-1 text-[11px] uppercase tracking-[0.16em] text-text-secondary mb-1.5">
+                  <Sparkles className="w-3 h-3 text-accent" />
+                  {planName}
+                </div>
+                <h1 className="text-2xl font-bold text-white">Willkommen, {displayName}!</h1>
+                <p className="text-sm text-text-secondary">Dein Kanal auf einen Blick</p>
               </div>
             </div>
 
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
-              {isAdminView ? (
-                <div className="rounded-xl border border-border bg-background/65 p-3 sm:min-w-[260px]">
-                  <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-text-secondary" htmlFor="internal-home-streamer-switch">
-                    Partner-Profil
+            <div className="flex items-center gap-3">
+              {isAdminView && (
+                <div className="rounded-xl border border-border bg-background/65 p-2 sm:min-w-[220px]">
+                  <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-text-secondary" htmlFor="internal-home-streamer-switch">
+                    Partner
                   </label>
                   <select
                     id="internal-home-streamer-switch"
                     value={normalizedSelectedStreamer || ''}
-                    onChange={(event) => setSelectedStreamer(event.target.value || null)}
+                    onChange={(e) => setSelectedStreamer(e.target.value || null)}
                     disabled={loadingStreamers || partnerStreamers.length === 0}
-                    className="w-full rounded-lg border border-border bg-background/80 px-3 py-2 text-sm font-medium text-white outline-none transition-colors focus:border-border-hover disabled:cursor-not-allowed disabled:opacity-60"
+                    className="w-full rounded-lg border border-border bg-background/80 px-2 py-1.5 text-sm font-medium text-white outline-none transition-colors focus:border-border-hover disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {partnerStreamers.length === 0 ? (
-                      <option value="">Keine Partner verfügbar</option>
+                      <option value="">Keine Partner</option>
                     ) : (
-                      partnerStreamers.map((candidate) => (
-                        <option key={candidate.login} value={candidate.login}>{candidate.login}</option>
+                      partnerStreamers.map((c) => (
+                        <option key={c.login} value={c.login}>{c.login}</option>
                       ))
                     )}
                   </select>
                 </div>
-              ) : null}
+              )}
               <button
                 onClick={() => void refetch()}
                 disabled={isFetching}
-                className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-sm font-semibold text-white transition-colors hover:border-border-hover hover:bg-card-hover disabled:cursor-not-allowed disabled:opacity-70"
+                className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-semibold text-white transition-colors hover:border-border-hover hover:bg-card-hover disabled:cursor-not-allowed disabled:opacity-70"
               >
                 {isFetching ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
                 Neu laden
@@ -483,111 +564,153 @@ export function InternalHomeLanding() {
           </div>
         </motion.section>
 
-        {/* Status Cards */}
+        {/* ===== 2. Kanal-Gesundheitscheck ===== */}
+        {healthScore && (
+          <motion.section
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.32, delay: 0.04 }}
+          >
+            <div className="panel-card rounded-xl p-5">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-8 h-8 rounded-lg gradient-accent flex items-center justify-center shrink-0">
+                  <Heart className="w-4 h-4 text-white" />
+                </div>
+                <h2 className="text-lg font-semibold text-white">Kanal-Gesundheit</h2>
+              </div>
+              <div className="flex flex-col sm:flex-row items-center gap-8">
+                {/* Circular gauge */}
+                <div className="relative w-32 h-32 shrink-0">
+                  <svg viewBox="0 0 100 100" className="w-full h-full -rotate-90">
+                    <circle cx="50" cy="50" r="42" fill="none" stroke="currentColor" strokeWidth="8" className="text-white/5" />
+                    <circle
+                      cx="50" cy="50" r="42" fill="none" strokeWidth="8" strokeLinecap="round"
+                      strokeDasharray={`${(score / 100) * 264} 264`}
+                      className={score >= 70 ? 'text-emerald-400' : score >= 40 ? 'text-amber-400' : 'text-red-400'}
+                    />
+                  </svg>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center">
+                    <span className={`text-3xl font-bold ${score >= 70 ? 'text-emerald-400' : score >= 40 ? 'text-amber-400' : 'text-red-400'}`}>
+                      {score}
+                    </span>
+                    <span className="text-xs text-white/40">/ 100</span>
+                  </div>
+                </div>
+                {/* Sub-scores */}
+                <div className="flex-1 grid grid-cols-2 gap-3 w-full">
+                  {([
+                    { label: 'Wachstum', value: sub_scores.growth, icon: TrendingUp, accent: 'text-primary bg-primary/15 border-primary/25' },
+                    { label: 'Retention', value: sub_scores.retention, icon: Users, accent: 'text-accent bg-accent/15 border-accent/25' },
+                    { label: 'Engagement', value: sub_scores.engagement, icon: MessageSquare, accent: 'text-warning bg-warning/15 border-warning/25' },
+                    { label: 'Community', value: sub_scores.community, icon: Heart, accent: 'text-success bg-success/15 border-success/25' },
+                  ] as const).map((item) => (
+                    <div key={item.label} className="flex items-center gap-2.5">
+                      <div className={`w-7 h-7 rounded-lg border flex items-center justify-center shrink-0 ${item.accent}`}>
+                        <item.icon className="w-3.5 h-3.5" />
+                      </div>
+                      <div className="min-w-[60px]">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">{item.label}</div>
+                        <div className="text-sm font-bold text-white">{item.value}</div>
+                      </div>
+                      <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full ${item.value >= 70 ? 'bg-success' : item.value >= 40 ? 'bg-warning' : 'bg-danger'}`}
+                          style={{ width: `${item.value}%` }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              {/* Trend line */}
+              {healthScore.trend != null && (
+                <div className={`mt-3 text-sm ${healthScore.trend >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {healthScore.trend >= 0 ? '\u2191' : '\u2193'} {Math.abs(healthScore.trend)}% vs. Vorwoche
+                </div>
+              )}
+            </div>
+          </motion.section>
+        )}
+
+        {/* ===== 3. Letzter Stream Zusammenfassung ===== */}
         <motion.section
-          className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"
           initial={{ opacity: 0, y: 16 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true }}
-          transition={{ duration: 0.32, delay: 0.04 }}
-        >
-          <article className="internal-home-status-card soft-elevate rounded-xl border border-border bg-background/60 p-4">
-            <div className="w-10 h-10 rounded-lg gradient-accent flex items-center justify-center mb-3">
-              <ShieldCheck className="h-5 w-5 text-white" />
-            </div>
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">OAuth Verbindung</div>
-            <p className={`mt-2 text-base font-bold ${oauthCardStatusClass}`}>{oauthCardStatusText}</p>
-            <p className="mt-1 text-xs text-text-secondary">{oauthCardHintText}</p>
-          </article>
-
-          <article className="internal-home-status-card soft-elevate rounded-xl border border-border bg-background/60 p-4">
-            <div className="w-10 h-10 rounded-lg gradient-accent flex items-center justify-center mb-3">
-              <Key className="h-5 w-5 text-white" />
-            </div>
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">Scopes</div>
-            <p className={`mt-2 text-base font-bold ${scopeCardStatusClass}`}>{scopeCardStatusText}</p>
-            <p className="mt-1 text-xs text-text-secondary">{scopeCardHintText}</p>
-          </article>
-
-          <article className="internal-home-status-card soft-elevate rounded-xl border border-border bg-background/60 p-4">
-            <div className="w-10 h-10 rounded-lg gradient-accent flex items-center justify-center mb-3">
-              <MessageSquare className="h-5 w-5 text-white" />
-            </div>
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">Discord verbunden</div>
-            <p className={`mt-2 text-base font-bold ${discordCardStatusClass}`}>{discordCardStatusText}</p>
-            <p className="mt-1 text-xs text-text-secondary">{discordCardHintText}</p>
-          </article>
-
-          <article className="internal-home-status-card soft-elevate rounded-xl border border-border bg-background/60 p-4">
-            <div className="w-10 h-10 rounded-lg gradient-accent flex items-center justify-center mb-3">
-              <CreditCard className="h-5 w-5 text-white" />
-            </div>
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">Abo</div>
-            <p className="mt-2 text-base font-bold text-white">Free</p>
-            <p className="mt-1 text-xs text-text-secondary">Platzhalter für spätere Abo-Details.</p>
-          </article>
-        </motion.section>
-
-        {/* Quick Actions */}
-        <motion.section
-          className="panel-card rounded-2xl p-5 md:p-6"
-          initial={{ opacity: 0, y: 16 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true }}
+          animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.32, delay: 0.08 }}
         >
-          <div className="mb-5">
-            <p className="text-sm uppercase tracking-wider font-medium text-primary mb-1">Navigation</p>
-            <h2 className="display-font text-2xl md:text-3xl font-bold text-white mb-1">Schnellzugriff</h2>
-            <p className="text-sm text-text-secondary">Direkte Ziele ohne Umwege in die wichtigsten Bereiche.</p>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            {quickActions.map((action, index) => {
-              const Icon = action.icon;
-              return (
-                <motion.a
-                  key={action.id}
-                  href={action.href}
-                  className="internal-home-link-card group panel-card soft-elevate rounded-xl p-4"
-                  initial={{ opacity: 0, y: 12 }}
-                  whileInView={{ opacity: 1, y: 0 }}
-                  viewport={{ once: true }}
-                  transition={{ duration: 0.28, delay: index * 0.05 }}
-                >
-                  <div className="flex items-start gap-3">
-                    <div className="mt-0.5 w-9 h-9 rounded-lg gradient-accent flex items-center justify-center shrink-0">
-                      <Icon className="h-4 w-4 text-white" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-semibold text-white">{action.title}</p>
-                      <p className="mt-1 text-xs text-text-secondary">{action.description}</p>
-                    </div>
-                    <ArrowRight className="h-4 w-4 shrink-0 text-text-secondary transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-white" />
-                  </div>
-                </motion.a>
-              );
-            })}
+          <div className="panel-card rounded-xl p-5">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-8 h-8 rounded-lg gradient-accent flex items-center justify-center shrink-0">
+                <BarChart3 className="w-4 h-4 text-white" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-white">Letzter Stream</h2>
+                {lastStream?.started_at && (
+                  <p className="text-xs text-text-secondary mt-0.5">
+                    {formatDateWithTime(lastStream.started_at)} &middot; {formatDurationFromSeconds(lastStream.duration_seconds)}
+                  </p>
+                )}
+              </div>
+            </div>
+            {lastStream ? (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <MiniStat label={'\u00D8 Viewer'} value={lastStream.avg_viewers} icon={Users} accent="primary" />
+                <MiniStat label="Peak" value={lastStream.peak_viewers} icon={TrendingUp} accent="accent" />
+                <MiniStat label="Follower" value={lastStream.follower_delta} prefix="+" icon={Heart} accent="success" />
+                <MiniStat label="Chat" value={lastStream.chat_messages} icon={MessageSquare} accent="warning" />
+              </div>
+            ) : (
+              <p className="text-sm text-text-secondary">Kein Stream-Daten verfuegbar</p>
+            )}
           </div>
         </motion.section>
 
-        {/* Changelog + Action Log + Roadmap */}
+        {/* ===== 4. Wochenvergleich (4 KPI cards) ===== */}
+        {weekComp && (
+          <motion.section
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.32, delay: 0.12 }}
+          >
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <WeekKpi label={'\u00D8 Viewer'} current={weekComp.current_week.avg_viewers} change={weekComp.changes.avg_viewers_pct} />
+              <WeekKpi label="Follower" current={weekComp.current_week.total_followers} change={weekComp.changes.followers_pct} />
+              <WeekKpi label="Chat-Aktivitaet" current={weekComp.current_week.chat_activity} change={weekComp.changes.chat_activity_pct} suffix="/h" />
+              <WeekKpi label="Stream-Stunden" current={weekComp.current_week.stream_hours} change={weekComp.changes.stream_hours_pct} suffix="h" />
+            </div>
+          </motion.section>
+        )}
+
+        {/* ===== 5. Quick-Actions ===== */}
         <motion.section
-          className="internal-home-bottom-grid grid gap-4"
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.32, delay: 0.16 }}
+        >
+          <div className="flex flex-wrap gap-3">
+            <QuickAction href="/twitch/dashboard-v2" icon={BarChart3} label="Analyse Dashboard" primary />
+            <QuickAction href="/twitch/verwaltung" icon={Settings} label="Verwaltung" />
+            <QuickAction href="/twitch/pricing" icon={Sparkles} label={`Plan: ${planName}`} />
+            <QuickAction href="#changelog" icon={FileText} label="Changelog" />
+          </div>
+        </motion.section>
+
+        {/* ===== 6. Changelog + Action Log ===== */}
+        <motion.section
+          className="grid gap-4 lg:grid-cols-2"
           initial={{ opacity: 0, y: 16 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
-          transition={{ duration: 0.32, delay: 0.12 }}
+          transition={{ duration: 0.32, delay: 0.2 }}
         >
-          <aside className="panel-card rounded-2xl p-5 md:p-6">
-            <div className="mb-5">
+          {/* Changelog */}
+          <aside id="changelog" className="panel-card rounded-2xl p-5 md:p-6">
+            <div className="mb-4">
               <p className="text-sm uppercase tracking-wider font-medium text-primary mb-1">Updates</p>
-              <h2 className="display-font text-2xl font-bold text-white mb-1">Was gibt&apos;s Neues</h2>
-              <p className="text-sm text-text-secondary">Letzte interne Updates (read-only).</p>
+              <h2 className="display-font text-xl font-bold text-white">Was gibt&apos;s Neues</h2>
             </div>
-
             {changelogEntries.length === 0 ? (
-              <div className="rounded-xl border border-border bg-background/60 p-4 text-sm text-text-secondary">Keine neuen Updates verfügbar.</div>
+              <div className="rounded-xl border border-border bg-background/60 p-4 text-sm text-text-secondary">Keine neuen Updates verfuegbar.</div>
             ) : (
               <div className="space-y-2.5">
                 {changelogEntries.map((entry, index) => {
@@ -609,33 +732,31 @@ export function InternalHomeLanding() {
             )}
           </aside>
 
+          {/* Action Log (last 5) */}
           <article className="panel-card rounded-2xl p-5 md:p-6">
-            <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
               <div>
-                <p className="text-sm uppercase tracking-wider font-medium text-primary mb-1">Aktivität</p>
-                <h2 className="display-font text-2xl font-bold text-white mb-1">Letzte Aktionen</h2>
-                <p className="text-xs text-text-secondary">Kanalbezogene Aktionen (Ban/Unban/Raid/Service-Pitch).</p>
+                <p className="text-sm uppercase tracking-wider font-medium text-primary mb-1">Aktivitaet</p>
+                <h2 className="display-font text-xl font-bold text-white">Letzte Aktionen</h2>
               </div>
-              <span className="inline-flex items-center rounded-full border border-border bg-background/70 px-3 py-1 text-[11px] font-semibold tracking-wider text-text-secondary uppercase">{actionLog.length} Einträge</span>
+              <span className="inline-flex items-center rounded-full border border-border bg-background/70 px-3 py-1 text-[11px] font-semibold tracking-wider text-text-secondary uppercase">{actionLog.length} Eintraege</span>
             </div>
-
-            {activityFeedNote ? <div className="mb-4 rounded-xl border border-accent/20 bg-accent/5 p-3 text-xs text-text-secondary">{activityFeedNote}</div> : null}
             {actionLog.length === 0 ? (
               <div className="rounded-xl border border-border bg-background/60 p-4 text-sm text-text-secondary">Keine Aktionen vorhanden.</div>
             ) : (
               <ul className="space-y-2.5">
                 {actionLog.map((entry, index) => {
-                  const isBan = isBanAction(entry);
-                  const isServicePitchWarning = isServicePitchWarningAction(entry);
-                  const isPriorityWarning = isBan || isServicePitchWarning;
+                  const entryIsBan = isBanAction(entry);
+                  const isServicePitch = isServicePitchWarningAction(entry);
+                  const isPriorityWarning = entryIsBan || isServicePitch;
                   const tone = actionLogTone(entry);
                   const rawTitle = entry.title?.trim() || entry.eventType?.trim() || 'Bot Aktion';
                   const title = stripActionNoise(rawTitle) || 'Bot Aktion';
                   const rawSummary = entry.summary?.trim() || entry.description?.trim() || entry.reason?.trim() || entry.metric?.trim() || '';
                   const summaryText = stripActionNoise(rawSummary);
-                  const statusText = isBan
+                  const statusText = entryIsBan
                     ? 'BAN'
-                    : isServicePitchWarning
+                    : isServicePitch
                       ? 'SERVICE-PITCH'
                       : entry.statusLabel?.trim() || tone.label;
                   const accountText = formatActionUser(entry);
@@ -646,7 +767,7 @@ export function InternalHomeLanding() {
                     ? 'internal-home-action-item rounded-xl border border-warning/35 bg-warning/10 p-3.5'
                     : 'internal-home-action-item rounded-xl border border-border bg-background/55 p-3.5';
                   const detailLines = isPriorityWarning
-                    ? buildPriorityActionDetails(entry, isServicePitchWarning)
+                    ? buildPriorityActionDetails(entry, isServicePitch)
                     : [];
 
                   return (
@@ -671,7 +792,7 @@ export function InternalHomeLanding() {
                       ) : (
                         <p className="mt-2 text-sm leading-5 text-text-secondary">
                           <span className="font-semibold text-white">{title}</span>
-                          {summaryText ? ` · ${summaryText}` : ''}
+                          {summaryText ? ` \u00B7 ${summaryText}` : ''}
                         </p>
                       )}
                     </li>
@@ -680,8 +801,6 @@ export function InternalHomeLanding() {
               </ul>
             )}
           </article>
-
-          <RoadmapPanel />
         </motion.section>
 
       </div>

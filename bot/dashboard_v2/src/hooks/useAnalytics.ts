@@ -42,6 +42,11 @@ import {
   fetchExpGameTransitions,
   fetchExpGrowthCurves,
   fetchRoadmap,
+  fetchBillingCatalog,
+  fetchAdminAffiliates,
+  fetchAdminAffiliateStats,
+  fetchAdminAffiliateDetail,
+  fetchAffiliatePortal,
 } from '@/api/client';
 import type { TimeRange, ViewerSortField, ViewerFilterType } from '@/types/analytics';
 
@@ -315,6 +320,7 @@ export function useAudienceSharing(streamer: string | null, days: TimeRange) {
 // Viewer Directory Hook
 export function useViewerDirectory(
   streamer: string | null,
+  days: TimeRange,
   sort: ViewerSortField = 'sessions',
   order: 'asc' | 'desc' = 'desc',
   filter: ViewerFilterType = 'all',
@@ -323,28 +329,28 @@ export function useViewerDirectory(
   perPage: number = 50
 ) {
   return useQuery({
-    queryKey: ['viewer-directory', streamer, sort, order, filter, search, page, perPage],
-    queryFn: () => fetchViewerDirectory(streamer, sort, order, filter, search, page, perPage),
+    queryKey: ['viewer-directory', streamer, days, sort, order, filter, search, page, perPage],
+    queryFn: () => fetchViewerDirectory(streamer, days, sort, order, filter, search, page, perPage),
     staleTime: STALE_TIME,
     enabled: !!streamer,
   });
 }
 
 // Viewer Detail Hook
-export function useViewerDetail(streamer: string | null, login: string | null) {
+export function useViewerDetail(streamer: string | null, login: string | null, days: TimeRange) {
   return useQuery({
-    queryKey: ['viewer-detail', streamer, login],
-    queryFn: () => fetchViewerDetail(streamer, login!),
+    queryKey: ['viewer-detail', streamer, login, days],
+    queryFn: () => fetchViewerDetail(streamer, login!, days),
     staleTime: STALE_TIME,
     enabled: !!streamer && !!login,
   });
 }
 
 // Viewer Segments Hook
-export function useViewerSegments(streamer: string | null) {
+export function useViewerSegments(streamer: string | null, days: TimeRange) {
   return useQuery({
-    queryKey: ['viewer-segments', streamer],
-    queryFn: () => fetchViewerSegments(streamer),
+    queryKey: ['viewer-segments', streamer, days],
+    queryFn: () => fetchViewerSegments(streamer, days),
     staleTime: STALE_TIME,
     enabled: !!streamer,
   });
@@ -438,5 +444,46 @@ export function useRoadmap() {
     queryKey: ['roadmap'],
     queryFn: fetchRoadmap,
     staleTime: 2 * 60 * 1000, // 2 minutes
+  });
+}
+
+// ── Billing ────────────────────────────────────────
+export function useBillingCatalog() {
+  return useQuery({
+    queryKey: ['billing-catalog'],
+    queryFn: fetchBillingCatalog,
+    staleTime: STALE_TIME,
+  });
+}
+
+// ── Admin Affiliates ───────────────────────────────
+export function useAdminAffiliates() {
+  return useQuery({
+    queryKey: ['admin-affiliates'],
+    queryFn: fetchAdminAffiliates,
+  });
+}
+
+export function useAdminAffiliateStats() {
+  return useQuery({
+    queryKey: ['admin-affiliate-stats'],
+    queryFn: fetchAdminAffiliateStats,
+  });
+}
+
+export function useAdminAffiliateDetail(login: string | null) {
+  return useQuery({
+    queryKey: ['admin-affiliate-detail', login],
+    queryFn: () => fetchAdminAffiliateDetail(login!),
+    enabled: !!login,
+  });
+}
+
+// ── Affiliate Portal ───────────────────────────────
+export function useAffiliatePortal() {
+  return useQuery({
+    queryKey: ['affiliate-portal'],
+    queryFn: fetchAffiliatePortal,
+    retry: false,
   });
 }
