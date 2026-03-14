@@ -1,6 +1,39 @@
 import { useState } from 'react';
 import { Activity, ChevronDown, Search, SlidersHorizontal, Sparkles } from 'lucide-react';
 import type { TimeRange } from '@/types/analytics';
+import { usePlan } from '../../context/PlanContext';
+import { GradientText } from '@/components/ui/GradientText';
+
+function ViewToggle() {
+  const { view, setView, isPreviewMode } = usePlan();
+
+  return (
+    <div className="flex items-center gap-1 rounded-full bg-white/5 p-1 border border-white/10">
+      <button
+        onClick={() => setView('basic')}
+        className={`px-3 py-1 rounded-full text-sm font-medium transition-all ${
+          view === 'basic'
+            ? 'bg-white/15 text-white shadow-sm'
+            : 'text-white/50 hover:text-white/70'
+        }`}
+      >
+        Basic
+      </button>
+      <button
+        onClick={() => setView('extended')}
+        className={`px-3 py-1 rounded-full text-sm font-medium transition-all flex items-center gap-1 ${
+          view === 'extended'
+            ? 'bg-gradient-to-r from-purple-500/30 to-pink-500/30 text-white shadow-sm border border-purple-400/30'
+            : 'text-white/50 hover:text-white/70'
+        }`}
+      >
+        <Sparkles className="w-3 h-3" />
+        Erweitert
+        {isPreviewMode && <span className="text-[10px] opacity-60 ml-1">Preview</span>}
+      </button>
+    </div>
+  );
+}
 
 interface HeaderProps {
   streamer: string | null;
@@ -52,8 +85,8 @@ export function Header({
               <Sparkles className="w-3 h-3 text-accent" />
               Twitch Analytics
             </div>
-            <h1 className="display-font text-2xl md:text-3xl font-bold text-white flex items-center gap-2">
-              Channel Intelligence
+            <h1 className="display-font text-2xl md:text-3xl font-bold flex items-center gap-2">
+              <GradientText>Channel Intelligence</GradientText>
               {isLoading && <span className="w-2 h-2 rounded-full bg-primary animate-pulse" />}
             </h1>
             <p className="text-text-secondary text-sm md:text-base mt-1">
@@ -180,6 +213,9 @@ export function Header({
               </button>
             ))}
           </div>
+
+          {/* View Toggle (Basic / Erweitert) */}
+          <ViewToggle />
         </div>
       </div>
     </header>
