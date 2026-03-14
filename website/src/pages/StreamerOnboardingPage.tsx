@@ -71,10 +71,8 @@ export function StreamerOnboardingPage() {
                 transition={{ duration: 0.6, delay: 0.2 }}
                 className="mt-6 max-w-2xl text-lg leading-relaxed text-text-secondary md:text-xl"
               >
-                Diese Seite erklärt, wie neue Streamer in das EarlySalty-Produkt
-                reinkommen, was das Dashboard wirklich kann und welche Schritte zuerst
-                sinnvoll sind, bevor spätere Module wie Billing oder Social Media
-                dazukommen.
+                Alles, was du brauchst, um als Deadlock-Streamer durchzustarten —
+                in wenigen Minuten eingerichtet.
               </motion.p>
 
               <motion.div
@@ -130,8 +128,8 @@ export function StreamerOnboardingPage() {
                   Kurzform für neue Streamer
                 </p>
                 <p className="mt-2 text-sm leading-relaxed text-text-secondary">
-                  Erst freischalten lassen, dann mit Twitch einloggen, danach Dashboard,
-                  Live-Announcements und Raid-Bereich schrittweise aktivieren.
+                  Bot autorisieren, Dashboard entdecken, Discord beitreten, mit der
+                  Community loszocken — fertig!
                 </p>
               </div>
             </motion.aside>

@@ -1,21 +1,15 @@
 import {
   DISCORD_INVITE_URL,
-  EARLYSALTY_WEBSITE_URL,
-  TWITCH_ABBO_URL,
-  TWITCH_ADMIN_URL,
   TWITCH_AFFILIATE_URL,
   TWITCH_AGB_URL,
-  TWITCH_DASHBOARD_URL,
   TWITCH_DASHBOARD_V2_URL,
   TWITCH_DATENSCHUTZ_URL,
   TWITCH_DEMO_DASHBOARD_URL,
   TWITCH_FAQ_URL,
   TWITCH_IMPRESSUM_URL,
-  TWITCH_LIVE_ANNOUNCEMENT_URL,
   TWITCH_ONBOARDING_URL,
   TWITCH_RAID_ANALYTICS_URL,
   TWITCH_RAID_HISTORY_URL,
-  TWITCH_SOCIAL_MEDIA_URL,
   buildTwitchDashboardLoginUrl,
 } from "@/data/externalLinks";
 
@@ -69,197 +63,165 @@ export interface FaqSection {
 }
 
 export const ONBOARDING_HIGHLIGHTS: OnboardingHighlight[] = [
-  { label: "Domain", value: "twitch.earlysalty.com" },
-  { label: "Zugang", value: "Twitch Login plus Partner-Freigabe" },
-  { label: "Scope", value: "Analytics, Raids, Discord, Billing, Clips" },
+  { label: "Netzwerk", value: "30+ Deadlock-Streamer" },
+  { label: "Analytics", value: "13 Dashboard-Tabs, Echtzeit" },
+  { label: "Kostenlos starten", value: "Kein Abo nötig zum Loslegen" },
 ];
 
 export const ONBOARDING_STEPS: OnboardingStep[] = [
   {
-    eyebrow: "1. Einstieg",
-    title: "Partner werden und freigeschaltet werden",
+    eyebrow: "1. Autorisieren",
+    title: "Bot autorisieren und loslegen",
     description:
-      "Neue Streamer kommen meist über die Website, Discord oder das Netzwerk zum Bot. Bevor das Dashboard sinnvoll nutzbar ist, muss der Channel als Partner im System freigeschaltet sein.",
+      "Ein Klick auf \"Mit Twitch einloggen\", Bot autorisieren — damit hast du 90% geschafft. Kein extra Passwort, keine Bewerbung. Sofort startklar.",
     bullets: [
-      "Die Website erklärt den Produktumfang, dieses Onboarding erklärt den echten Produkt-Flow.",
-      "Partner werden im Netzwerk verifiziert, damit Dashboard, Raids und Discord-Automation auf den richtigen Channel laufen.",
-      "Nach der Freigabe führen alle streamerbezogenen Links auf dieselbe Twitch-Domain.",
-    ],
-    routeLabel: "Zur Hauptseite",
-    routeHref: EARLYSALTY_WEBSITE_URL,
-  },
-  {
-    eyebrow: "2. Login",
-    title: "Mit Twitch einloggen und die Session starten",
-    description:
-      "Der Standard-Einstieg läuft über Twitch OAuth. Danach landet der Streamer wieder auf einer internen Dashboard-Route und bekommt Zugriff auf die für ihn freigeschalteten Bereiche.",
-    bullets: [
-      "Login nutzt Twitch OAuth mit Session-Cookie.",
-      "Der Login kann auf klassische Dashboard-Flows oder auf Analytics V2 verweisen.",
-      "Discord-Auth existiert ebenfalls im System, die Standard-Route für Streamer bleibt aber Twitch.",
+      "Kein Registrierungsformular, kein Freischaltungs-Prozess — du loggst dich ein und bist dabei.",
+      "Dein Twitch-Account reicht aus, um alle Features sofort nutzen zu können.",
+      "Innerhalb von Sekunden hast du Zugriff auf dein persönliches Dashboard.",
     ],
     routeLabel: "Mit Twitch einloggen",
     routeHref: buildTwitchDashboardLoginUrl(),
   },
   {
-    eyebrow: "3. Orientierung",
-    title: "Dashboard, Analytics und Demo verstehen",
+    eyebrow: "2. Dashboard",
+    title: "Entdecke dein Dashboard",
     description:
-      "Im Produkt gibt es ein klassisches Dashboard für Kernflüsse und ein modernes Dashboard V2 für tiefe Analytics. Für öffentliche Vorschauen gibt es außerdem ein Demo-Dashboard.",
+      "Dein persönliches Analytics-Cockpit: Viewer-Trends, Heatmaps, Rankings, Session-Details und KI-gestützte Empfehlungen. Eine Demo zum Vorher-Testen ist ebenfalls verfügbar.",
     bullets: [
-      "Dashboard V1 konzentriert sich auf Einstieg, Status und server-renderte Flows.",
-      "Dashboard V2 zeigt tiefe Analytics in interaktiven Charts und Auswertungen.",
-      "Die Demo ist öffentlich und zeigt das Look-and-feel ohne Partner-Login.",
+      "13 Tabs mit Echtzeit-Daten zu deinem Stream — von Viewer-Zahlen bis Zuschauer-Segmenten.",
+      "Interaktive Charts und Heatmaps zeigen dir auf einen Blick, wann dein Stream am stärksten performt.",
+      "KI-Coaching gibt dir personalisierte Empfehlungen basierend auf deinen echten Daten.",
     ],
     routeLabel: "Demo ansehen",
     routeHref: TWITCH_DEMO_DASHBOARD_URL,
   },
   {
-    eyebrow: "4. Discord und Go-Live",
-    title: "Announcements, Live-Pings und Community-Flows aktivieren",
+    eyebrow: "3. Auto-Raid",
+    title: "Auto-Raid — dein Netzwerk arbeitet für dich",
     description:
-      "Der Bot erkennt Stream-Starts, kann Discord-Announcements bauen und pro Streamer konfigurieren, wann und wie Go-Live-Posts erscheinen.",
+      "Kein Schalter, kein Setup: Das Raid-Netzwerk ist automatisch aktiv. Wenn dein Stream endet, leitet der Bot deine Zuschauer an einen passenden Live-Partner im Deadlock-Netzwerk weiter. Deine Community bleibt in Bewegung, und du profitierst genauso von den Raids anderer.",
     bullets: [
-      "Es gibt eine eigene Live-Announcement-Seite mit Config, Preview und Test-Send.",
-      "Live-Pings können über Discord-Rollen gespielt werden.",
-      "Das System kann streamerindividuelle und globale Announcement-Modi unterscheiden.",
-    ],
-    routeLabel: "Announcements öffnen",
-    routeHref: TWITCH_LIVE_ANNOUNCEMENT_URL,
-  },
-  {
-    eyebrow: "5. Raid-Netzwerk",
-    title: "Raid-Bot autorisieren und Netzwerk-Funktionen nutzen",
-    description:
-      "Sobald der Channel freigeschaltet ist, kann der Streamer den Raid-Bot für seinen Kanal autorisieren. Danach stehen Auth, Anforderungen, Verlauf und Analytics rund um das Raid-Netzwerk bereit.",
-    bullets: [
-      "OAuth für Raids nutzt einen separaten Flow mit Callback und sicherer Token-Speicherung.",
-      "Im Dashboard gibt es Anforderungen, History und Analyse zu eigenen Raids.",
-      "Das Netzwerk kann automatisiert Partner-Raids ausführen, statt nur manuell Links zu sammeln.",
+      "Vollautomatisch — du musst nichts aktivieren oder konfigurieren.",
+      "Der Bot wählt intelligent den passenden Raid-Partner aus dem Netzwerk.",
+      "Du bekommst auch Raids von anderen Streamern, wenn diese offline gehen.",
     ],
     routeLabel: "Raid Analytics",
     routeHref: TWITCH_RAID_ANALYTICS_URL,
   },
   {
-    eyebrow: "6. Ausbau",
-    title: "Billing, Clips und spätere Erweiterungen nachziehen",
+    eyebrow: "4. Discord",
+    title: "Discord beitreten — kostenlose Reichweite mitnehmen",
     description:
-      "Nicht jeder Streamer braucht sofort jeden Bereich. Billing, Social Media und weitere Module können nach der Kern-Einrichtung schrittweise dazugeschaltet und verstanden werden.",
+      "Nicht Pflicht, aber extrem empfohlen: Im Discord wirst du als Streamer hervorgehoben und bekommst Sichtbarkeit, die du sonst nirgends bekommst.",
     bullets: [
-      "Billing deckt Pläne, Checkout, Rechnungen und Stripe-Settings ab.",
-      "Social Media sammelt Twitch-Clips und verteilt sie Richtung TikTok, YouTube und Instagram.",
-      "Die FAQ unten erklärt auch Features, die nicht jeder Partner am ersten Tag braucht.",
+      "Go-Live-Posts: Sobald du live gehst, erscheint automatisch ein Post im Discord — alle sehen, dass du streamst.",
+      "Es gibt einen eigenen Streamer-Bereich mit exklusiven Infos und direktem Austausch.",
+      "Pro-Tipp: Zock mit der Community! Wer mit anderen Deadlock-Spielern unterwegs ist, baut sich organisch eine treue Zuschauerschaft auf.",
     ],
-    routeLabel: "Bot FAQ öffnen",
+    routeLabel: "Discord beitreten",
+    routeHref: DISCORD_INVITE_URL,
+  },
+  {
+    eyebrow: "5. Entdecken",
+    title: "Weitere Features entdecken",
+    description:
+      "Affiliate-Links, Chat-Commands, Leaderboards und mehr warten darauf, von dir erkundet zu werden. Schau dich im Dashboard um — es gibt immer etwas Neues zu entdecken.",
+    bullets: [
+      "Erstelle Affiliate-Links und tracke Klicks direkt im Dashboard.",
+      "Nutze Chat-Commands wie !twl um deinen Zuschauern Live-Partner zu zeigen.",
+      "Das Viewer-Leaderboard zeigt, wer deine treuesten Zuschauer sind.",
+    ],
+    routeLabel: "Alle Features in der FAQ",
     routeHref: TWITCH_FAQ_URL,
   },
 ];
 
 export const ONBOARDING_CAPABILITIES: CapabilityCard[] = [
   {
-    title: "Analytics Dashboard",
+    title: "Echtzeit-Analytics",
     description:
-      "Von Overview-Metriken bis zu KI-Analysen zieht das Dashboard Sessions, Viewer, Tags, Titel, Retention und Audience-Signale zusammen.",
+      "Dein Cockpit für alles rund um deinen Stream: Viewer-Trends, Heatmaps, Rankings und Streamer-Vergleich.",
     bullets: [
-      "Dashboard V1 plus Dashboard V2",
-      "Overview, Heatmaps, Session-Details, Rankings",
-      "Viewer-Profile, Segmente, Demographics, AI",
+      "Live-Viewer-Tracking und Session-Details",
+      "Stunden- und Kalender-Heatmaps",
+      "Streamer-Ranking und direkter Vergleich",
     ],
   },
   {
-    title: "Discord Automation",
+    title: "Auto-Raid-Netzwerk",
     description:
-      "Der Bot verbindet Twitch-Live-Status mit Discord-Embeds, Pings und wiederverwendbaren Announcement-Konfigurationen.",
+      "Deine Zuschauer finden immer den nächsten Stream. Automatische Weiterleitung an Live-Partner wenn du offline gehst.",
     bullets: [
-      "Go-Live-Erkennung",
-      "Preview und Test-Send für Announcements",
-      "Live-Ping-Rollen und globale Modi",
+      "Vollautomatische Raid-Auswahl",
+      "Raid-History und Analytics",
+      "Das Netzwerk arbeitet in beide Richtungen",
     ],
   },
   {
-    title: "Raid Netzwerk",
+    title: "Discord-Community",
     description:
-      "Das Produkt ist nicht nur ein Dashboard, sondern auch ein aktives Raid-System mit OAuth, History, Analytics und Netzwerkregeln.",
+      "Go-Live-Posts zeigen automatisch wenn du streamst, eigener Streamer-Bereich, und eine Community die zusammen spielt und wächst.",
     bullets: [
-      "Raid OAuth für den eigenen Channel",
-      "Raid History und Raid Retention",
-      "Partner-Auswahl, Enable/Disable und Netzwerklogik",
+      "Automatische Go-Live-Benachrichtigungen",
+      "Exklusiver Streamer-Bereich",
+      "Community-Events und gemeinsames Spielen",
     ],
   },
   {
-    title: "Billing und Pläne",
+    title: "KI-Coaching",
     description:
-      "Pläne, Rechnungsdaten, Checkout, Rechnungen, Kündigungen und Stripe-Settings leben direkt im Streamerbereich.",
+      "Personalisierte Tipps basierend auf deinen Daten: Beste Streaming-Zeiten, Titel-Performance, Zuschauer-Retention.",
     bullets: [
-      "Catalog, Checkout Preview, Invoice Preview",
-      "Stripe Checkout und Stripe Settings",
-      "Promo-Messages und planabhängige Erweiterungen",
+      "Datenbasierte Empfehlungen für dein Wachstum",
+      "Tag- und Titel-Analyse",
+      "Watch-Time und Retention-Auswertung",
     ],
   },
   {
-    title: "Social Media und Clips",
+    title: "Community & Netzwerk",
     description:
-      "Clips können geholt, gefiltert, mit Templates versehen und für Uploads auf mehrere Plattformen vorbereitet werden.",
+      "Viewer-Leaderboard, Affiliate-Links, Chat-Commands und mehr — alles was dein Netzwerk stärkt.",
     bullets: [
-      "TikTok, YouTube und Instagram",
-      "Clip Queue, Batch Upload und Mark-as-uploaded",
-      "OAuth und Platform Status",
-    ],
-  },
-  {
-    title: "Community und Zusatztools",
-    description:
-      "Neben Streamer-Flows gibt es Community-Funktionen, Chat-Commands, Leaderboards und interne Admin-Tools für das Netzwerk.",
-    bullets: [
-      "!twl für Live-Partner",
-      "Viewer Leaderboard",
-      "Partner-Recruiting, Moderation und Admin-Steuerung",
+      "Viewer-Leaderboard für treue Zuschauer",
+      "Affiliate-Links mit Klick-Tracking",
+      "Chat-Commands wie !twl für Live-Partner",
     ],
   },
 ];
 
 export const START_CHECKLIST: ChecklistItem[] = [
   {
-    title: "Twitch Login testen",
+    title: "Bot autorisieren",
     description:
-      "Starte mit der normalen Login-Route, damit Session, Rollen und Partner-Freigabe korrekt greifen.",
+      "Mit Twitch einloggen — das war's. Kein Formular, kein Warten. 90% geschafft!",
     href: buildTwitchDashboardLoginUrl(),
-    label: "Login starten",
+    label: "Mit Twitch einloggen",
   },
   {
-    title: "Dashboard aufrufen",
+    title: "Dashboard erkunden",
     description:
-      "Nach dem Login zuerst das klassische Dashboard prüfen, danach für tiefe Auswertungen auf Dashboard V2 wechseln.",
-    href: TWITCH_DASHBOARD_URL,
+      "Deine Zahlen auf einen Blick: Viewer-Trends, Heatmaps, Rankings und Session-Details.",
+    href: TWITCH_DASHBOARD_V2_URL,
     label: "Dashboard öffnen",
   },
   {
-    title: "Announcements konfigurieren",
+    title: "Discord beitreten",
     description:
-      "Lege fest, wann Discord-Go-Live-Posts erscheinen, wie die Texte aussehen und ob Test-Sends funktionieren.",
-    href: TWITCH_LIVE_ANNOUNCEMENT_URL,
-    label: "Announcements",
+      "Sichtbarkeit, automatische Go-Live-Posts, Streamer-Bereich und eine aktive Community.",
+    href: DISCORD_INVITE_URL,
+    label: "Discord beitreten",
   },
   {
-    title: "Raid-Bereich verstehen",
+    title: "Mit der Community zocken",
     description:
-      "Sobald du freigeschaltet bist, sind History und Analytics die beste Kontrollstelle für das Netzwerk-Verhalten.",
-    href: TWITCH_RAID_HISTORY_URL,
-    label: "Raid History",
+      "Spiel mit anderen Deadlock-Spielern — wer zusammen spielt, baut organisch eine treue Zuschauerschaft auf.",
   },
   {
-    title: "Billing nur bei Bedarf aktivieren",
+    title: "Fragen? Ab in die FAQ",
     description:
-      "Abo, Checkout, Rechnungen und Stripe-Settings sind im Produkt vorbereitet, aber nicht jeder Streamer braucht sie direkt am ersten Tag.",
-    href: TWITCH_ABBO_URL,
-    label: "Billing ansehen",
-  },
-  {
-    title: "Komplette Funktionsliste nachlesen",
-    description:
-      "Die Bot-FAQ erklärt auch seltenere und fortgeschrittene Features wie Affiliate, Social Media, AI und Admin-Flows.",
+      "Antworten zu Analytics, Raids, Discord, Affiliate und allem rund um EarlySalty.",
     href: TWITCH_FAQ_URL,
-    label: "Zur FAQ",
+    label: "FAQ öffnen",
   },
 ];
 
@@ -267,324 +229,155 @@ export const FAQ_SECTIONS: FaqSection[] = [];
 
 FAQ_SECTIONS.push(
   {
-    id: "zugang",
-    badge: "Setup",
-    title: "Zugang, Onboarding und Einstiegsflächen",
+    id: "einstieg",
+    badge: "Einstieg",
+    title: "Erste Schritte & Zugang",
     description:
-      "Hier steht, wie neue Streamer reinkommen, wo sie starten und welche Oberflächen öffentlich oder erst nach Login verfügbar sind.",
+      "Alles was du wissen musst, um loszulegen — von der Anmeldung bis zum ersten Blick ins Dashboard.",
     items: [
       {
-        question: "Was ist das Streamer-Onboarding auf der Twitch-Domain?",
+        question: "Was ist EarlySalty?",
         answer:
-          "Das Onboarding ist die öffentliche Erklärungsseite für neue Streamer. Sie lebt absichtlich auf derselben Domain wie das Partner-Dashboard, damit Website, Login und Produkt-Flow nicht auseinanderfallen.",
+          "EarlySalty ist eine kostenlose Plattform für Deadlock-Streamer auf Twitch. Du bekommst ein Analytics-Dashboard mit Echtzeit-Daten, ein automatisches Raid-Netzwerk, Discord-Automation und KI-gestütztes Coaching — alles an einem Ort.",
         details: [
-          "Die Seite ist öffentlich und braucht keinen Login.",
-          "Sie erklärt den Partner-Flow, bevor Streamer in geschützte Dashboard-Routen springen.",
-          "Sie ersetzt den alten öffentlichen Redirect auf die allgemeine Website-Landingpage.",
+          "Über 30 Deadlock-Streamer nutzen das Netzwerk bereits.",
+          "Das Dashboard hat 13 Tabs mit detaillierten Auswertungen zu deinem Stream.",
+          "Du brauchst nur deinen Twitch-Account — keine zusätzliche Registrierung.",
         ],
-        access: "Öffentlich",
-        tags: ["onboarding", "setup", "partner", "website", "faq"],
+        access: "Alle",
+        tags: ["earlysalty", "plattform", "deadlock", "streamer", "überblick"],
         routes: [
           { label: "Onboarding", href: TWITCH_ONBOARDING_URL },
-          { label: "FAQ", href: TWITCH_FAQ_URL },
+          { label: "Demo Dashboard", href: TWITCH_DEMO_DASHBOARD_URL },
         ],
       },
       {
-        question: "Wie kommen neue Streamer ins Netzwerk?",
+        question: "Wie starte ich?",
         answer:
-          "Neue Streamer kommen typischerweise über Website, Discord oder Partner-Recruiting rein und müssen anschließend im System als Partner freigeschaltet werden.",
+          "Klick auf \"Mit Twitch einloggen\", autorisiere den Bot — fertig. Kein Bewerbungsformular, keine Wartezeit. Du bist sofort dabei und hast Zugriff auf alle Features.",
         details: [
-          "Ohne Freigabe sind viele Streamer-Routen zwar erreichbar, liefern aber keine nutzbare Partner-Funktion.",
-          "Partner-Recruiting und Streamer-Management liegen intern beim Admin-Bereich.",
-          "Die Freigabe koppelt Channel, Session, Discord und spätere Feature-Rechte zusammen.",
+          "Der gesamte Anmeldeprozess dauert weniger als 30 Sekunden.",
+          "Du brauchst nur deinen bestehenden Twitch-Account.",
+          "Nach dem Login landest du direkt in deinem persönlichen Dashboard.",
         ],
-        access: "Gemischt",
-        tags: ["recruiting", "partner", "verification", "admin"],
+        access: "Alle",
+        tags: ["start", "anmeldung", "login", "registrierung", "einloggen"],
         routes: [
-          { label: "Website", href: EARLYSALTY_WEBSITE_URL },
-          { label: "Discord", href: DISCORD_INVITE_URL },
-          { label: "Admin-Panel", href: TWITCH_ADMIN_URL },
+          { label: "Mit Twitch einloggen", href: buildTwitchDashboardLoginUrl() },
         ],
       },
       {
-        question: "Wie funktioniert der Login für Streamer?",
+        question: "Kostet EarlySalty etwas?",
         answer:
-          "Streamer loggen sich standardmäßig über Twitch OAuth ein. Nach erfolgreichem Login landet die Session wieder auf einer internen Dashboard-Route.",
+          "Nein, du kannst kostenlos loslegen. Alle Kern-Features wie Analytics, Auto-Raid und Discord-Automation sind ohne Abo nutzbar.",
         details: [
-          "Der Haupt-Flow verwendet `/twitch/auth/login` und `/twitch/auth/callback`.",
-          "Es gibt Session-Handling und Redirects über den `next`-Parameter.",
-          "Discord-Login existiert ebenfalls, wird aber vor allem für alternative oder Admin-nahe Flows genutzt.",
+          "Es gibt kein Pflicht-Abo, um die Plattform zu nutzen.",
+          "Premium-Features kannst du später im Dashboard entdecken, falls du möchtest.",
+          "Du wirst nie ungefragt in ein kostenpflichtiges Abo gesteckt.",
         ],
-        access: "Öffentlich plus Streamer",
-        tags: ["login", "oauth", "twitch", "session", "discord"],
+        access: "Alle",
+        tags: ["kosten", "kostenlos", "gratis", "preis", "abo", "bezahlen"],
+      },
+      {
+        question: "Warum sollte ich dem Discord beitreten?",
+        answer:
+          "Der Discord ist deine beste Quelle für kostenlose Reichweite. Sobald du live gehst, erscheint automatisch ein Go-Live-Post — alle Community-Mitglieder sehen, dass du streamst.",
+        details: [
+          "Go-Live-Posts werden automatisch gepostet, wenn du live gehst — ohne dass du etwas tun musst.",
+          "Es gibt einen eigenen Streamer-Bereich mit exklusiven Infos und direktem Austausch.",
+          "Pro-Tipp: Zock mit der Community! Wer mit anderen Deadlock-Spielern unterwegs ist, baut sich organisch eine treue Zuschauerschaft auf.",
+        ],
+        access: "Alle",
+        tags: ["discord", "community", "go-live", "reichweite", "netzwerk"],
         routes: [
-          { label: "Twitch Login", href: buildTwitchDashboardLoginUrl() },
-          { label: "Dashboard", href: TWITCH_DASHBOARD_URL },
+          { label: "Discord beitreten", href: DISCORD_INVITE_URL },
         ],
       },
       {
-        question: "Gibt es eine öffentliche Demo, ohne dass ich Partner bin?",
+        question: "Gibt es eine Demo?",
         answer:
-          "Ja. Das Produkt hat ein öffentliches Demo-Dashboard, damit der Look und ein Teil der Analytics vorab sichtbar sind.",
+          "Ja! Es gibt ein öffentliches Demo-Dashboard, in dem du dir alle Features anschauen kannst, bevor du dich anmeldest. Kein Login nötig.",
         details: [
-          "Die Demo nutzt Demo-Daten statt der eigenen Partnerdaten.",
-          "Sie zeigt die Oberfläche von Dashboard V2 ohne geschützten Account-Zugriff.",
-          "Sie ist ideal für Preview, Pitch und Erstverständnis.",
+          "Die Demo zeigt echte Dashboard-Funktionen mit Beispieldaten.",
+          "Du siehst alle 13 Tabs und kannst die Oberfläche frei erkunden.",
+          "Ideal, um dir ein Bild zu machen, bevor du deinen eigenen Account verbindest.",
         ],
-        access: "Öffentlich",
-        tags: ["demo", "preview", "dashboard-v2", "public"],
-        routes: [{ label: "Demo Dashboard", href: TWITCH_DEMO_DASHBOARD_URL }],
+        access: "Alle",
+        tags: ["demo", "vorschau", "testen", "preview", "ausprobieren"],
+        routes: [
+          { label: "Demo Dashboard", href: TWITCH_DEMO_DASHBOARD_URL },
+        ],
       },
     ],
   },
   {
-    id: "dashboards",
+    id: "analytics",
     badge: "Analytics",
-    title: "Dashboards und Kern-Analytics",
+    title: "Dashboard & Analytics",
     description:
-      "Diese Sektion erklärt, welche Dashboard-Flächen es gibt und welche Metriken sie für Partner sichtbar machen.",
+      "Alles über dein persönliches Analytics-Dashboard — von Viewer-Trends bis KI-Empfehlungen.",
     items: [
       {
-        question: "Wofür gibt es Dashboard V1 und Dashboard V2?",
+        question: "Was zeigt mir das Dashboard?",
         answer:
-          "Dashboard V1 ist die klassische, server-renderte Einstiegsebene. Dashboard V2 ist die moderne Analytics-Oberfläche mit interaktiven Charts und deutlich mehr Detailtiefe.",
+          "Dein Dashboard ist dein persönliches Cockpit mit 13 Tabs: Viewer-Trends, Heatmaps, Session-Details, Streamer-Rankings, Zuschauer-Segmente, Chat-Analysen und vieles mehr.",
         details: [
-          "V1 eignet sich für Status, klassische Übersichten und bestehende HTML-Flows.",
-          "V2 konzentriert sich auf Analytics und Recharts/Framer-Motion-basierte Visualisierung.",
-          "Beide Oberflächen leben auf derselben Twitch-Domain.",
+          "Die Overview zeigt dir die wichtigsten Kennzahlen auf einen Blick.",
+          "Heatmaps verraten dir, an welchen Tagen und zu welchen Uhrzeiten dein Stream am besten performt.",
+          "Session-Details schlüsseln jeden einzelnen Stream nach Viewern, Dauer und Verlauf auf.",
+          "Rankings zeigen dir, wo du im Vergleich zu anderen Deadlock-Streamern stehst.",
         ],
-        access: "Streamer",
-        tags: ["dashboard", "dashboard-v1", "dashboard-v2", "analytics"],
+        access: "Alle",
+        tags: ["dashboard", "analytics", "viewer", "heatmap", "ranking", "session"],
         routes: [
-          { label: "Dashboard", href: TWITCH_DASHBOARD_URL },
-          { label: "Dashboard V2", href: TWITCH_DASHBOARD_V2_URL },
-        ],
-      },
-      {
-        question: "Welche Kernmetriken zeigt das Analytics-System?",
-        answer:
-          "Die Basis umfasst Overview, monatliche und wöchentliche Stats, Viewer-Timelines, Rankings, Streamer-Vergleiche und Session-Details.",
-        details: [
-          "Dazu kommen stunden- und kalenderbasierte Heatmaps.",
-          "Einzelne Sessions können im Detail abgefragt werden.",
-          "Kategorien, Spiele und Timing-Muster lassen sich über mehrere Endpunkte vergleichen.",
-        ],
-        access: "Streamer",
-        tags: ["overview", "monthly", "weekly", "heatmap", "session", "ranking"],
-        routes: [
-          { label: "Dashboard V2", href: TWITCH_DASHBOARD_V2_URL },
+          { label: "Dashboard", href: TWITCH_DASHBOARD_V2_URL },
           { label: "Demo", href: TWITCH_DEMO_DASHBOARD_URL },
         ],
       },
       {
-        question: "Welche tiefen Audience- und Viewer-Funktionen gibt es?",
+        question: "Wie aktuell sind die Daten?",
         answer:
-          "Das System schaut nicht nur auf Gesamtviewer, sondern auf Verzeichnisse, Profile, Segmente, Viewer-Overlap, Audience-Sharing und Follower-Funnels.",
+          "Die Viewer-Daten werden alle 15 Sekunden aktualisiert. Dein Dashboard zeigt dir also nahezu in Echtzeit, was in deinem Stream passiert.",
         details: [
-          "Viewer-Directory und Viewer-Detail helfen bei konkreten Profilfragen.",
-          "Audience-Demographics und Audience-Insights machen Zielgruppen veränderbar sichtbar.",
-          "Lurker-Analyse und Audience-Sharing helfen bei Community-Qualität und Kollaboration.",
+          "Viewer-Zahlen werden im 15-Sekunden-Takt erfasst und gespeichert.",
+          "Session-Daten werden automatisch nach Stream-Ende zusammengefasst.",
+          "Historische Daten stehen dir dauerhaft zur Verfügung — nichts wird gelöscht.",
         ],
-        access: "Streamer",
-        tags: ["viewer", "audience", "directory", "overlap", "segments", "demographics"],
-        routes: [{ label: "Dashboard V2", href: TWITCH_DASHBOARD_V2_URL }],
-      },
-      {
-        question: "Gibt es experimentelle oder erweiterte Analytics-Endpunkte?",
-        answer:
-          "Ja. Das System hat neben den Kernmetriken auch Experimental-Endpunkte und Zusatz-Views für Growth Curves, Game Breakdown und weitere Spezialauswertungen.",
-        details: [
-          "Retention, Loyalty und Monetization sind eigene Analysebereiche.",
-          "Experimental-Endpunkte ergänzen die stabile API, ohne das Haupt-Dashboard zu ersetzen.",
-          "Roadmap-Endpunkte existieren ebenfalls und werden für Planung und interne Produktsteuerung genutzt.",
-        ],
-        access: "Streamer plus Admin",
-        tags: ["experimental", "growth", "retention", "loyalty", "roadmap", "monetization"],
+        access: "Alle",
+        tags: ["echtzeit", "aktuell", "daten", "tracking", "live"],
         routes: [
-          { label: "Dashboard V2", href: TWITCH_DASHBOARD_V2_URL },
-          { label: "Admin-Panel", href: TWITCH_ADMIN_URL },
+          { label: "Dashboard", href: TWITCH_DASHBOARD_V2_URL },
         ],
       },
-    ],
-  },
-);
-
-FAQ_SECTIONS.push(
-  {
-    id: "affiliate-social",
-    badge: "Growth",
-    title: "Affiliate, Social Media und Clip-Workflows",
-    description:
-      "Neben den Kernfunktionen gibt es Wachstums- und Vermarktungsfunktionen für Links, Clips und Plattform-Uploads.",
-    items: [
       {
-        question: "Was kann das Affiliate-System?",
+        question: "Kann ich mich mit anderen Streamern vergleichen?",
         answer:
-          "Streamer können Affiliate-Links erzeugen, Klicks tracken, Stats ansehen, Settings pflegen und Auswertungen oder Exporte abrufen.",
+          "Ja! Das Ranking-System zeigt dir, wo du im Deadlock-Streamer-Netzwerk stehst. Du kannst deine Zahlen direkt mit anderen vergleichen.",
         details: [
-          "Es gibt Links, Stats, Summary, Export und Settings.",
-          "Klicks und Redirects werden über eigene Tracking-Routen verarbeitet.",
-          "Affiliate ist ein eigenständiger Streamer-Bereich und nicht nur ein einzelner Linkgenerator.",
+          "Vergleiche Viewer-Zahlen, Stream-Dauer und Wachstum mit anderen Deadlock-Streamern.",
+          "Das Ranking wird regelmäßig aktualisiert und basiert auf echten Daten.",
+          "Du siehst auch Trends — ob du im Vergleich zum Netzwerk wächst oder stagnierst.",
         ],
-        access: "Streamer",
-        tags: ["affiliate", "links", "stats", "click tracking", "export"],
-        routes: [{ label: "Affiliate", href: TWITCH_AFFILIATE_URL }],
-      },
-      {
-        question: "Wie funktioniert der Social-Media-Clip-Manager?",
-        answer:
-          "Das System kann Twitch-Clips holen, im Dashboard listen, Uploads in eine Queue legen, Batch-Uploads anstoßen und Upload-Status manuell markieren.",
-        details: [
-          "Clips können einzeln oder gesammelt verarbeitet werden.",
-          "Es gibt Statistik-, Analytics- und Template-Endpunkte.",
-          "Der Social-Media-Bereich ist eine eigene Web-Oberfläche außerhalb der `/twitch/*`-Routen.",
-        ],
-        access: "Streamer",
-        tags: ["social media", "clips", "queue", "batch upload", "templates"],
-        routes: [{ label: "Social Media", href: TWITCH_SOCIAL_MEDIA_URL }],
-      },
-      {
-        question: "Welche Plattformen werden für Clip-Uploads unterstützt?",
-        answer:
-          "Im Code sind eigene Uploader für TikTok, YouTube und Instagram vorhanden. Dazu kommen OAuth-Start, Callback, Disconnect und Platform-Status-Flows.",
-        details: [
-          "OAuth wird pro Plattform verwaltet.",
-          "Token-Refresh läuft im Hintergrund.",
-          "Video-Verarbeitung und Upload-Worker sind als interne Module getrennt organisiert.",
-        ],
-        access: "Streamer plus Intern",
-        tags: ["tiktok", "youtube", "instagram", "oauth", "upload worker"],
-        routes: [{ label: "Social Media", href: TWITCH_SOCIAL_MEDIA_URL }],
-      },
-      {
-        question: "Gibt es Template- und Hashtag-Hilfen für Clips?",
-        answer:
-          "Ja. Das Social-Media-System kennt globale Templates, streamerindividuelle Templates, Template-Anwendung auf Clips und gespeicherte letzte Hashtags.",
-        details: [
-          "Das beschleunigt wiederkehrende Video-Beschreibungen und Upload-Texte.",
-          "Templates können pro Streamer gepflegt werden.",
-          "Der Bereich ist für Content-Produktionsroutinen gedacht, nicht nur für reinen Upload.",
-        ],
-        access: "Streamer",
-        tags: ["templates", "hashtags", "clips", "social"],
-        routes: [{ label: "Social Media", href: TWITCH_SOCIAL_MEDIA_URL }],
-      },
-    ],
-  },
-  {
-    id: "community-admin",
-    badge: "Community",
-    title: "Community, Commands und Admin-Werkzeuge",
-    description:
-      "Nicht jede Funktion ist direkt für neue Streamer sichtbar, aber der Bot deckt auch Community- und Betreiber-Werkzeuge ab.",
-    items: [
-      {
-        question: "Welche Community-Funktionen gibt es für Zuschauer und Partner?",
-        answer:
-          "Das System führt ein Viewer-Leaderboard, kennt Invite-Tracking und bietet Community-Features rund um Live-Partner und Sichtbarkeit.",
-        details: [
-          "Das Leaderboard lebt im Community-Modul.",
-          "Invite- und Partnerbeziehungen werden in der Datenbank verfolgt.",
-          "Diese Funktionen stärken das Netzwerk über den einzelnen Stream hinaus.",
-        ],
-        access: "Gemischt",
-        tags: ["community", "leaderboard", "invites", "network"],
+        access: "Alle",
+        tags: ["ranking", "vergleich", "streamer", "wettbewerb", "netzwerk"],
         routes: [
-          { label: "Discord", href: DISCORD_INVITE_URL },
-          { label: "Website", href: EARLYSALTY_WEBSITE_URL },
+          { label: "Dashboard", href: TWITCH_DASHBOARD_V2_URL },
         ],
       },
       {
-        question: "Welche Chat-Commands existieren heute schon?",
+        question: "Was ist das KI-Coaching?",
         answer:
-          "Dokumentiert ist vor allem `!twl` für aktuelle Live-Partner. Zusätzlich gibt es Admin-Commands für Reloads und Raid-Steuerung.",
+          "Das KI-Coaching analysiert deine Stream-Daten und gibt dir personalisierte Empfehlungen: Beste Streaming-Zeiten, welche Titel gut funktionieren, wie du Zuschauer länger hältst.",
         details: [
-          "`!twl` reagiert in den dafür vorgesehenen Stats-Channels.",
-          "`!raid_enable` und `!raid_disable` steuern das Raid-Netzwerk.",
-          "`!reload` beziehungsweise die Reload-Logik hilft beim Admin-Betrieb.",
+          "Die KI wertet deine historischen Daten aus und erkennt Muster.",
+          "Du bekommst konkrete Tipps, z. B. wann die besten Uhrzeiten für deinen Stream sind.",
+          "Titel-Performance zeigt dir, welche Stream-Titel mehr Zuschauer anziehen.",
+          "Retention-Analyse verrät, wie lange Zuschauer im Schnitt bleiben.",
         ],
-        access: "Gemischt",
-        tags: ["commands", "twl", "reload", "raid_enable", "raid_disable"],
-        routes: [{ label: "Discord", href: DISCORD_INVITE_URL }],
-      },
-      {
-        question: "Welche Admin-Funktionen hat das System außerhalb des Streamer-Dashboards?",
-        answer:
-          "Admins können Streamer hinzufügen, entfernen, verifizieren, archivieren, Discord-Flags setzen, Pläne manuell überschreiben und Announcement-Modi steuern.",
-        details: [
-          "Das Admin-Panel liegt absichtlich auf einer separaten Domain.",
-          "Manuelle Plan-Overrides und Markt-/Roadmap-Funktionen gehören ebenfalls dazu.",
-          "Dadurch bleiben Streamer- und Admin-Flächen sauber getrennt.",
-        ],
-        access: "Admin",
-        tags: ["admin", "verify", "archive", "manual plan", "market", "roadmap"],
-        routes: [{ label: "Admin-Panel", href: TWITCH_ADMIN_URL }],
-      },
-      {
-        question: "Was passiert intern im Hintergrund, während ich das UI sehe?",
-        answer:
-          "Monitoring, EventSub, Session-Verwaltung, Analytics-Loops, OAuth-State-Verwaltung, Token-Refresh und Storage-Layer laufen getrennt unter der UI.",
-        details: [
-          "Der Bot ist nicht nur ein Frontend, sondern ein laufendes Service-System.",
-          "Discord-Cog, Dashboard-Service und Datenbank teilen sich dieselbe Produktwelt.",
-          "Viele sichtbare Features beruhen auf diesen Hintergrunddiensten.",
-        ],
-        access: "Intern",
-        tags: ["eventsub", "monitoring", "sessions", "storage", "dashboard service"],
-      },
-    ],
-  },
-  {
-    id: "legal",
-    badge: "Support",
-    title: "Rechtliches, Support und Hilfslinks",
-    description:
-      "Zum Produkt gehören auch die öffentlichen Basis-Seiten und Hilfslinks, damit Streamer nicht auf lose Chat-Nachrichten angewiesen sind.",
-    items: [
-      {
-        question: "Wo finde ich Impressum, Datenschutz und AGB?",
-        answer:
-          "Die rechtlichen Seiten werden direkt über die Twitch-Domain ausgeliefert und sind ohne Login verfügbar.",
-        details: [
-          "Impressum, Datenschutz und AGB gehören bewusst zum öffentlichen Surface.",
-          "So können Billing, OAuth und Produktinformationen sauber verlinkt werden.",
-          "Diese Seiten bleiben von Streamer-Logins entkoppelt.",
-        ],
-        access: "Öffentlich",
-        tags: ["impressum", "datenschutz", "agb", "legal"],
+        access: "Alle",
+        tags: ["ki", "coaching", "ai", "empfehlung", "tipps", "optimierung"],
         routes: [
-          { label: "Impressum", href: TWITCH_IMPRESSUM_URL },
-          { label: "Datenschutz", href: TWITCH_DATENSCHUTZ_URL },
-          { label: "AGB", href: TWITCH_AGB_URL },
-        ],
-      },
-      {
-        question: "Was ist die ausführliche Bot-FAQ?",
-        answer:
-          "Diese FAQ ist die Sammelstelle für sämtliche dokumentierten Produktfunktionen: von Setup über Analytics bis zu Admin- und Community-Bausteinen.",
-        details: [
-          "Sie ist absichtlich viel breiter als ein klassisches Support-FAQ.",
-          "Sie soll Website, Discord und Produktdoku zusammenfassen.",
-          "Wenn neue Module hinzukommen, wird diese Fläche erweitert.",
-        ],
-        access: "Öffentlich",
-        tags: ["faq", "knowledge base", "help", "features"],
-        routes: [{ label: "FAQ", href: TWITCH_FAQ_URL }],
-      },
-      {
-        question: "Wo startet man, wenn man möglichst schnell live gehen will?",
-        answer:
-          "Am schnellsten funktioniert die Reihenfolge Onboarding, Twitch Login, Dashboard, Announcement-Setup und danach erst Raid/Billing/Social Media nach Bedarf.",
-        details: [
-          "So bleibt der Erststart simpel.",
-          "Die produktive Tiefe ist da, muss aber nicht in Minute eins komplett aktiviert werden.",
-          "Für alles Weitere gibt es das Onboarding und diese FAQ als Nachschlagewerk.",
-        ],
-        access: "Öffentlich",
-        tags: ["quick start", "support", "onboarding", "login"],
-        routes: [
-          { label: "Onboarding", href: TWITCH_ONBOARDING_URL },
-          { label: "Login", href: buildTwitchDashboardLoginUrl() },
+          { label: "Dashboard", href: TWITCH_DASHBOARD_V2_URL },
         ],
       },
     ],
@@ -594,265 +387,197 @@ FAQ_SECTIONS.push(
 FAQ_SECTIONS.push(
   {
     id: "raids",
-    badge: "Raid Netzwerk",
-    title: "Raid-Bot, History und Netzwerklogik",
+    badge: "Raids",
+    title: "Auto-Raid-Netzwerk",
     description:
-      "Das Raid-System ist ein eigener Produktbereich mit OAuth, History, Analysen und Netzwerkregeln für Partner-Raids.",
+      "Wie das automatische Raid-System funktioniert und warum es dein wichtigstes Wachstums-Tool ist.",
     items: [
       {
-        question: "Wie autorisiere ich den Raid-Bot für meinen Kanal?",
+        question: "Was ist der Auto-Raid?",
         answer:
-          "Der Streamer startet einen speziellen Raid-OAuth-Flow. Danach kann der Bot im Namen des Streamers Raids ausführen, wenn die Netzwerklogik das vorsieht.",
+          "Der Auto-Raid ist ein Kern-Feature von EarlySalty: Wenn dein Stream endet, leitet der Bot deine Zuschauer automatisch an einen passenden Live-Partner im Deadlock-Netzwerk weiter. Das passiert ohne dein Zutun — der Raid ist immer aktiv.",
         details: [
-          "Es gibt Start-, Kurz-Redirect- und Callback-Routen.",
-          "Die Tokens werden verschlüsselt gespeichert.",
-          "Ohne gültige Autorisierung bleibt der Raid-Bereich unvollständig.",
+          "Du musst den Auto-Raid nicht aktivieren oder konfigurieren — er läuft automatisch.",
+          "Der Bot wählt intelligent den besten Raid-Partner basierend auf mehreren Kriterien.",
+          "So bleiben deine Zuschauer im Deadlock-Ökosystem und du hilfst gleichzeitig anderen Streamern.",
         ],
-        access: "Streamer",
-        tags: ["raid", "oauth", "callback", "authorization"],
+        access: "Alle",
+        tags: ["auto-raid", "raid", "automatisch", "netzwerk", "weiterleitung"],
+        routes: [
+          { label: "Raid Analytics", href: TWITCH_RAID_ANALYTICS_URL },
+          { label: "Raid History", href: TWITCH_RAID_HISTORY_URL },
+        ],
+      },
+      {
+        question: "Wie funktioniert die Raid-Auswahl?",
+        answer:
+          "Der Bot berücksichtigt mehrere Faktoren: Wer ist gerade live, wie viele Viewer hat der Partner, wann wurde zuletzt dorthin geraidet, und weitere Netzwerk-Kriterien. Ziel ist immer eine sinnvolle Weiterleitung, kein Zufall.",
+        details: [
+          "Live-Status der Partner wird in Echtzeit geprüft.",
+          "Cooldowns verhindern, dass immer derselbe Streamer geraidet wird.",
+          "Das System sorgt für faire Verteilung im gesamten Netzwerk.",
+        ],
+        access: "Alle",
+        tags: ["raid-auswahl", "algorithmus", "partner", "kriterien"],
+        routes: [
+          { label: "Raid Analytics", href: TWITCH_RAID_ANALYTICS_URL },
+        ],
+      },
+      {
+        question: "Kann ich sehen, wen ich geraidet habe?",
+        answer:
+          "Ja! In der Raid History siehst du alle deine vergangenen Raids mit Details. Die Raid Analytics zeigen dir zusätzlich, wie effektiv deine Raids waren.",
+        details: [
+          "Die Raid History listet jeden einzelnen Raid mit Datum, Partner und Viewer-Anzahl.",
+          "Raid Analytics zeigen dir Trends und Muster über Zeit.",
+          "Du siehst auch, wie viele Viewer nach dem Raid beim Partner geblieben sind.",
+        ],
+        access: "Alle",
+        tags: ["raid history", "raid analytics", "verlauf", "statistik"],
         routes: [
           { label: "Raid History", href: TWITCH_RAID_HISTORY_URL },
           { label: "Raid Analytics", href: TWITCH_RAID_ANALYTICS_URL },
         ],
       },
       {
-        question: "Was sehe ich im Raid-Dashboard?",
+        question: "Profitiere ich auch von Raids anderer?",
         answer:
-          "Der Raid-Bereich bietet Anforderungen, History, Analytics und Callback-bezogene Flows für den eigenen Channel.",
+          "Ja, das Netzwerk arbeitet in beide Richtungen! Wenn andere Streamer offline gehen, können deren Zuschauer automatisch zu dir weitergeleitet werden, solange du live bist.",
         details: [
-          "History zeigt vergangene Raids und deren Ergebnis.",
-          "Raid Analytics und Raid Retention messen Wirkung und Zuschauerverhalten.",
-          "Requirement-Flows helfen bei der Aktivierung der nötigen Berechtigungen.",
+          "Je aktiver du im Netzwerk bist, desto mehr profitierst du von eingehenden Raids.",
+          "Eingehende Raids siehst du ebenfalls in deiner Raid History.",
+          "Das System sorgt dafür, dass alle Partner fair berücksichtigt werden.",
         ],
-        access: "Streamer",
-        tags: ["raid history", "raid analytics", "retention", "requirements"],
+        access: "Alle",
+        tags: ["eingehende raids", "netzwerk", "gegenseitig", "wachstum"],
         routes: [
           { label: "Raid History", href: TWITCH_RAID_HISTORY_URL },
-          { label: "Raid Analytics", href: TWITCH_RAID_ANALYTICS_URL },
         ],
-      },
-      {
-        question: "Wie entscheidet das Netzwerk, wen es raidet?",
-        answer:
-          "Unter der Haube kombiniert das System Partnerstatus, Berechtigung, Live-Status, Blacklists, Cooldowns und weitere Kriterien. Ziel ist ein verwaltetes Netzwerk statt zufälliger Linklisten.",
-        details: [
-          "Raid Enable/Disable ist administrativ steuerbar.",
-          "Partner-Auswahl und Ausführung laufen über eigene Raid-Module.",
-          "Analytics helfen später zu bewerten, ob das System wirklich Wirkung erzielt.",
-        ],
-        access: "Intern plus Admin",
-        tags: ["selection", "cooldown", "blacklist", "partner state", "auto raid"],
-        routes: [{ label: "Admin-Panel", href: TWITCH_ADMIN_URL }],
-      },
-      {
-        question: "Welche Admin-Tools gibt es rund um Raids?",
-        answer:
-          "Admins können Streamer für das Raid-Netzwerk aktivieren oder deaktivieren und die Netzwerkregeln steuern.",
-        details: [
-          "Es existieren Discord-Commands wie `!raid_enable` und `!raid_disable`.",
-          "Admin-Flows leben getrennt von öffentlichen Streamer-Routen.",
-          "So bleibt das Partner-Dashboard schlank, während das Netzwerk zentral verwaltet wird.",
-        ],
-        access: "Admin",
-        tags: ["raid_enable", "raid_disable", "commands", "admin"],
-        routes: [{ label: "Admin-Panel", href: TWITCH_ADMIN_URL }],
       },
     ],
   },
   {
-    id: "billing",
-    badge: "Billing",
-    title: "Pläne, Rechnungen und Stripe",
+    id: "community",
+    badge: "Community",
+    title: "Community, Discord & Netzwerk",
     description:
-      "Billing ist ein vollwertiger Streamer-Bereich mit Planverwaltung, Stripe-Checkout und Rechnungsfunktionen.",
+      "Discord-Automation, Chat-Commands, Affiliate-Links und alles was die Community zusammenhält.",
     items: [
       {
-        question: "Welche Billing-Flächen sind für Streamer vorhanden?",
+        question: "Wie funktionieren die Go-Live-Posts?",
         answer:
-          "Es gibt eine Abo-Übersicht, Checkout-Flows, Rechnungsdaten, Kündigung, Rechnungs-History und Stripe-Settings.",
+          "Sobald du auf Twitch live gehst, postet der Bot automatisch eine Benachrichtigung im Discord. Alle Community-Mitglieder sehen sofort, dass du streamst — ohne dass du selbst etwas tun musst.",
         details: [
-          "Die Billing-Routen leben gesammelt unter `/twitch/abbo`.",
-          "Zusatzschreibweisen wie `/twitch/abo` und `/twitch/abos` werden umgeleitet.",
-          "Damit können Pläne sauber im Produkt verwaltet werden, ohne externe Admin-Handarbeit.",
+          "Die Posts enthalten deinen Stream-Titel, das Spiel und einen direkten Link zu deinem Stream.",
+          "Du musst nichts konfigurieren — die Posts erscheinen automatisch.",
+          "Das gibt dir kostenlose Reichweite bei jedem einzelnen Stream.",
         ],
-        access: "Streamer",
-        tags: ["billing", "plans", "checkout", "invoices", "stripe"],
-        routes: [{ label: "Billing", href: TWITCH_ABBO_URL }],
-      },
-      {
-        question: "Wie weit geht die Stripe-Integration?",
-        answer:
-          "Stripe deckt Catalog, Readiness, Checkout Preview, Checkout Session, Invoice Preview und Webhook-Verarbeitung ab.",
-        details: [
-          "Checkout und Rechnungen sind in die Dashboard-Flows integriert.",
-          "Stripe Settings helfen beim späteren Account- oder Portal-Zugriff.",
-          "Readiness und Produktsync existieren zusätzlich für die Admin-Ebene.",
-        ],
-        access: "Streamer plus Admin",
-        tags: ["stripe", "checkout preview", "invoice preview", "webhook", "catalog"],
+        access: "Alle",
+        tags: ["go-live", "discord", "benachrichtigung", "automatisch", "post"],
         routes: [
-          { label: "Billing", href: TWITCH_ABBO_URL },
-          { label: "Admin-Panel", href: TWITCH_ADMIN_URL },
+          { label: "Discord beitreten", href: DISCORD_INVITE_URL },
         ],
       },
       {
-        question: "Kann ich Rechnungsdaten, Rechnungen und Kündigungen selbst verwalten?",
+        question: "Welche Chat-Commands gibt es?",
         answer:
-          "Ja. Rechnungsdaten, Rechnungshistorie, Einzelrechnungen und Kündigung sind als eigene Flows im Streamerbereich angelegt.",
+          "Der wichtigste Command ist !twl — er zeigt deinen Zuschauern, welche anderen Deadlock-Streamer gerade live sind. So können Viewer zwischen Streams wechseln und das Netzwerk wächst.",
         details: [
-          "Der Streamer muss für diese Vorgange nicht in ein externes Backoffice wechseln.",
-          "Billing bleibt damit Produktteil und nicht nur ein Payment-Anhang.",
-          "Die Rechnungs- und Vorschau-Flows sind bereits im Service vorhanden.",
+          "!twl listet alle aktuell live streamenden Partner im Deadlock-Netzwerk.",
+          "Der Command funktioniert in jedem Twitch-Chat, in dem der Bot aktiv ist.",
+          "Weitere Commands werden laufend ergänzt.",
         ],
-        access: "Streamer",
-        tags: ["invoice", "billing data", "cancel", "self service"],
-        routes: [{ label: "Billing", href: TWITCH_ABBO_URL }],
+        access: "Alle",
+        tags: ["commands", "twl", "chat", "twitch", "bot"],
       },
       {
-        question: "Was ist Promo-Mode im Billing-Kontext?",
+        question: "Was ist das Affiliate-System?",
         answer:
-          "Es gibt Promo-Settings und Promo-Messages, die plan- und regelbezogene Kommunikation beeinflussen können.",
+          "Du kannst im Dashboard eigene Affiliate-Links erstellen und deren Klicks in Echtzeit tracken. Ideal, um Produkte oder Services zu bewerben und den Erfolg direkt zu messen.",
         details: [
-          "Promo-Settings und Promo-Message sind getrennte Endpunkte.",
-          "Die Inhalte werden validiert, bevor sie akzeptiert werden.",
-          "Zusätzlich existiert ein globaler Promo-Mode für die Admin-Ebene.",
+          "Erstelle Links direkt im Dashboard — kein externes Tool nötig.",
+          "Klick-Statistiken zeigen dir, welche Links am besten performen.",
+          "Du kannst Links jederzeit bearbeiten, pausieren oder löschen.",
         ],
-        access: "Streamer plus Admin",
-        tags: ["promo", "message", "validation", "billing"],
+        access: "Alle",
+        tags: ["affiliate", "links", "klicks", "tracking", "werbung"],
         routes: [
-          { label: "Billing", href: TWITCH_ABBO_URL },
-          { label: "Admin-Panel", href: TWITCH_ADMIN_URL },
+          { label: "Affiliate", href: TWITCH_AFFILIATE_URL },
+        ],
+      },
+      {
+        question: "Was ist das Viewer-Leaderboard?",
+        answer:
+          "Das Leaderboard zeigt dir, wer deine treuesten Zuschauer sind. Es trackt, wie oft und wie lange Viewer in deinem Stream sind, und erstellt daraus ein Ranking.",
+        details: [
+          "Erkenne deine loyalsten Community-Mitglieder auf einen Blick.",
+          "Das Leaderboard basiert auf echten Viewing-Daten, nicht auf Chat-Aktivität allein.",
+          "Ein tolles Tool, um deine Community besser kennenzulernen und wertzuschätzen.",
+        ],
+        access: "Alle",
+        tags: ["leaderboard", "viewer", "community", "ranking", "treue"],
+        routes: [
+          { label: "Dashboard", href: TWITCH_DASHBOARD_V2_URL },
         ],
       },
     ],
   },
 );
 
-FAQ_SECTIONS.push(
-  {
-    id: "chat-ai",
-    badge: "Insights",
-    title: "Chat, Performance und KI-Auswertung",
-    description:
-      "Der Bot misst nicht nur Zahlen, sondern auch Chat-Dynamik, Content-Signale und KI-gestützte Empfehlungen.",
-    items: [
-      {
-        question: "Welche Chat-Analysen sind enthalten?",
-        answer:
-          "Neben einer klassischen Chat-Übersicht gibt es Hype-Timelines, Content-Analysen und Social-Graph-Auswertungen für Zuschauerinteraktion.",
-        details: [
-          "So lässt sich erkennen, wann Chat wirklich eskaliert oder abfällt.",
-          "Inhalte und Beziehungen im Chat werden nicht nur als reine Nachrichtenmenge behandelt.",
-          "Diese Tiefe ist besonders relevant für Community-Format-Optimierung.",
-        ],
-        access: "Streamer",
-        tags: ["chat", "hype", "content", "social graph", "engagement"],
-        routes: [{ label: "Dashboard V2", href: TWITCH_DASHBOARD_V2_URL }],
-      },
-      {
-        question: "Wie hilft das System bei Tags, Titeln und Watch Time?",
-        answer:
-          "Das Analytics-System bewertet Tags, Titel-Performance, Watch-Time-Verteilung und weitere Signale, damit Streamer ihren Content datengetriebener planen können.",
-        details: [
-          "Tag-Analysis und Title-Performance erklären, welche Verpackung besser zieht.",
-          "Watch-Time, Retention und Loyalty zeigen, ob Zuschauer nur klicken oder wirklich bleiben.",
-          "Die Metriken greifen auf Session- und Audience-Daten zurück.",
-        ],
-        access: "Streamer",
-        tags: ["tags", "titles", "watch time", "retention", "loyalty"],
-        routes: [{ label: "Dashboard V2", href: TWITCH_DASHBOARD_V2_URL }],
-      },
-      {
-        question: "Was macht die Coaching- und KI-Schicht?",
-        answer:
-          "Es gibt einen Coaching-Endpunkt und zusätzliche KI-Endpunkte für Analyse und Verlauf. Damit werden Muster aus den Rohdaten in konkretere Hinweise übersetzt.",
-        details: [
-          "Coaching ist kein separater Bot, sondern Teil des Analytics-Stacks.",
-          "AI Analysis und AI History ergänzen die klassischen Dashboards.",
-          "Die Hinweise bauen auf vorhandenen Leistungsdaten auf, statt losgelöst davon zu arbeiten.",
-        ],
-        access: "Streamer",
-        tags: ["coaching", "ai", "analysis", "history", "recommendations"],
-        routes: [{ label: "Dashboard V2", href: TWITCH_DASHBOARD_V2_URL }],
-      },
-      {
-        question: "Welche Zuschauer- und Community-Muster erkennt der Bot intern?",
-        answer:
-          "Unter der Haube laufen Engagement-Metriken, Lurker-Erkennung und weitere Hintergrundjobs, damit die sichtbaren Dashboards nicht nur auf simplen Counterdaten beruhen.",
-        details: [
-          "Lurker-Tracking, Engagement-Metriken und Chat-Bot-Erkennung sorgen für sauberere Daten.",
-          "Monitoring und Analytics-Loops aktualisieren die Datengrundlage laufend.",
-          "Diese internen Bausteine sind nicht immer direkt im UI sichtbar, beeinflussen aber die Produktqualitaet.",
-        ],
-        access: "Intern",
-        tags: ["lurker", "engagement", "monitoring", "chat bots", "background jobs"],
-      },
-    ],
-  },
-  {
-    id: "live-discord",
-    badge: "Automation",
-    title: "Go-Live, Discord und Announcement-Automation",
-    description:
-      "Hier geht es um alles, was der Bot zwischen Twitch-Live-Status und Discord-Community automatisch erledigt.",
-    items: [
-      {
-        question: "Wie funktionieren Go-Live-Announcements?",
-        answer:
-          "Der Bot erkennt Stream-Starts und baut daraus Discord-Embeds. Pro Streamer kann konfiguriert werden, ob, wann und wie diese Posts erscheinen.",
-        details: [
-          "Monitoring erkennt den Live-Start.",
-          "Die Template-Engine setzt Variablen wie Streamer, Titel, Game, Viewer und URL ein.",
-          "Optional können Live-Ping-Rollen mitgesendet werden.",
-        ],
-        access: "Streamer",
-        tags: ["go live", "discord", "announcement", "embeds", "template"],
-        routes: [{ label: "Announcements", href: TWITCH_LIVE_ANNOUNCEMENT_URL }],
-      },
-      {
-        question: "Welche Tools gibt es für Announcement-Konfiguration?",
-        answer:
-          "Es gibt eine eigene Config-Oberfläche plus Preview- und Test-Endpunkte. Streamer müssen also nicht blind live schalten, um ihre Texte zu prüfen.",
-        details: [
-          "Config kann geladen und gespeichert werden.",
-          "Preview erzeugt eine Vorschau des Resultats.",
-          "Test-Send prüft die effektive Discord-Auslieferung.",
-        ],
-        access: "Streamer",
-        tags: ["config", "preview", "test", "discord", "live"],
-        routes: [{ label: "Live Announcement", href: TWITCH_LIVE_ANNOUNCEMENT_URL }],
-      },
-      {
-        question: "Gibt es globale oder adminseitige Announcement-Modi?",
-        answer:
-          "Ja. Neben streamerindividueller Config existiert ein Admin-Bereich für globale Announcement- und Broadcast-Modi.",
-        details: [
-          "Der Admin kann netzwerkweite Modi und Ankündigungsregeln steuern.",
-          "Diese globale Schicht ergänzt die Streamer-Config statt sie komplett zu ersetzen.",
-          "Damit lassen sich Kampagnen oder Community-weite Broadcast-Phasen koordinieren.",
-        ],
-        access: "Admin",
-        tags: ["admin", "announcement mode", "broadcast", "global config"],
-        routes: [{ label: "Admin-Panel", href: TWITCH_ADMIN_URL }],
-      },
-      {
-        question: "Welche weiteren Discord-Verbindungen hat das System?",
-        answer:
-          "Discord ist nicht nur Ziel für Live-Posts. Das System kennt Discord-Linking, Rollen-Sync, Invite-Flows und Community-Kommandos.",
-        details: [
-          "Discord-Linking ist Teil der Partner- und Rechteverwaltung.",
-          "Rollen können mit Streamer-Status synchronisiert werden.",
-          "Invite- und Community-Funktionen leben ebenfalls in angrenzenden Modulen.",
-        ],
-        access: "Gemischt",
-        tags: ["discord link", "role sync", "community", "invites"],
-        routes: [
-          { label: "Discord", href: DISCORD_INVITE_URL },
-          { label: "Admin-Panel", href: TWITCH_ADMIN_URL },
-        ],
-      },
-    ],
-  },
-);
-
-
+FAQ_SECTIONS.push({
+  id: "support",
+  badge: "Support",
+  title: "Hilfe, Konto & Rechtliches",
+  description:
+    "Antworten zu Support, Account-Verwaltung und rechtlichen Informationen.",
+  items: [
+    {
+      question: "Wo bekomme ich Hilfe?",
+      answer:
+        "Der schnellste Weg ist der Discord — dort gibt es einen Support-Bereich, in dem dir direkt geholfen wird. Alternativ findest du Antworten in dieser FAQ oder im Onboarding.",
+      details: [
+        "Im Discord antworten erfahrene Community-Mitglieder und das Team.",
+        "Die FAQ deckt die häufigsten Fragen ab — nutze die Suche oben.",
+        "Das Onboarding erklärt den Einstieg Schritt für Schritt.",
+      ],
+      access: "Alle",
+      tags: ["hilfe", "support", "fragen", "kontakt", "discord"],
+      routes: [
+        { label: "Discord beitreten", href: DISCORD_INVITE_URL },
+        { label: "Onboarding", href: TWITCH_ONBOARDING_URL },
+      ],
+    },
+    {
+      question: "Wie lösche ich meinen Account oder widerrufe den Zugang?",
+      answer:
+        "Du kannst den Bot-Zugang jederzeit über deine Twitch-Einstellungen widerrufen. Geh dazu in deine Twitch-Verbindungen und entferne die EarlySalty-Autorisierung. Für eine komplette Datenlöschung kontaktiere uns im Discord.",
+      details: [
+        "Twitch-Autorisierung widerrufen: Twitch → Einstellungen → Verbindungen → EarlySalty entfernen.",
+        "Nach dem Widerruf hat der Bot keinen Zugriff mehr auf deinen Account.",
+        "Für eine vollständige Löschung deiner gespeicherten Daten melde dich im Discord.",
+      ],
+      access: "Alle",
+      tags: ["löschen", "account", "widerrufen", "kündigung", "datenlöschung", "abmelden"],
+      routes: [
+        { label: "Discord (Support)", href: DISCORD_INVITE_URL },
+      ],
+    },
+    {
+      question: "Wo finde ich Impressum, Datenschutz und AGB?",
+      answer:
+        "Impressum, Datenschutzerklärung und AGB sind öffentlich auf der Website verfügbar — kein Login nötig.",
+      details: [
+        "Alle rechtlichen Dokumente sind jederzeit ohne Anmeldung einsehbar.",
+        "Die Links findest du auch im Footer jeder Seite.",
+        "Bei Fragen zum Datenschutz kannst du dich im Discord oder per E-Mail melden.",
+      ],
+      access: "Alle",
+      tags: ["impressum", "datenschutz", "agb", "rechtliches", "legal", "dsgvo"],
+      routes: [
+        { label: "Impressum", href: TWITCH_IMPRESSUM_URL },
+        { label: "Datenschutz", href: TWITCH_DATENSCHUTZ_URL },
+        { label: "AGB", href: TWITCH_AGB_URL },
+      ],
+    },
+  ],
+});

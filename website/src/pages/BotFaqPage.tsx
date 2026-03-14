@@ -12,11 +12,11 @@ import {
 import { FAQ_SECTIONS } from "@/data/twitchKnowledgeBase";
 
 const NAV_LINKS = [
-  { label: "Setup", href: "#zugang" },
-  { label: "Analytics", href: "#dashboards" },
-  { label: "Automation", href: "#live-discord" },
-  { label: "Growth", href: "#affiliate-social" },
-  { label: "Support", href: "#legal" },
+  { label: "Einstieg", href: "#einstieg" },
+  { label: "Analytics", href: "#analytics" },
+  { label: "Raids", href: "#raids" },
+  { label: "Community", href: "#community" },
+  { label: "Support", href: "#support" },
 ];
 
 function countFaqItems() {
@@ -84,20 +84,19 @@ export function BotFaqPage() {
             <div className="grid gap-8 lg:grid-cols-[1.1fr_0.9fr] lg:items-end">
               <div>
                 <p className="inline-flex rounded-full border border-border bg-[rgba(16,38,53,0.76)] px-4 py-1.5 text-sm text-accent">
-                  Vollständige Bot-FAQ
+                  Häufige Fragen
                 </p>
                 <h1 className="mt-6 max-w-5xl text-5xl font-bold leading-tight text-text-primary md:text-6xl">
-                  Alle dokumentierten
+                  Antworten auf die
                   <br />
                   <span className="bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
-                    Funktionen des Bots
+                    wichtigsten Fragen
                   </span>{" "}
-                  an einer Stelle.
+                  rund um EarlySalty.
                 </h1>
                 <p className="mt-6 max-w-3xl text-lg leading-relaxed text-text-secondary">
-                  Diese FAQ deckt öffentliche Produktflächen, Streamer-Routen,
-                  Growth-Module, Community-Tools und die sichtbaren Admin-Bausteine
-                  ab. Sie ist absichtlich breiter als ein klassisches Support-FAQ.
+                  Hier findest du Antworten zu Einstieg, Analytics, Raids,
+                  Discord-Automation und deinem Konto.
                 </p>
               </div>
 
@@ -137,13 +136,12 @@ export function BotFaqPage() {
                   type="text"
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
-                  placeholder="z. B. raids, billing, clips, ai, dashboard"
+                  placeholder="z. B. kosten, raid, dashboard, clips, kündigung"
                   className="w-full border-0 bg-transparent text-base text-text-primary outline-none placeholder:text-text-secondary"
                 />
               </div>
               <p className="mt-3 text-sm text-text-secondary">
-                Suche über Fragen, Antworten, Routen, Access-Level und Begriffe aus
-                dem Repo.
+                Suche über Fragen, Antworten und Themen.
               </p>
             </div>
           </div>
@@ -153,8 +151,8 @@ export function BotFaqPage() {
           <div className="mx-auto max-w-7xl">
             <SectionHeading
               badge="FAQ"
-              title="Funktionsbereiche"
-              subtitle="Die Antworten stammen aus den vorhandenen Dashboard-, Analytics-, Raid-, Billing-, Social-Media- und Community-Modulen."
+              title="Alle Themen"
+              subtitle="Von Einstieg über Analytics bis Support — alle Antworten auf einen Blick."
             />
 
             <div className="mt-12 space-y-8">
