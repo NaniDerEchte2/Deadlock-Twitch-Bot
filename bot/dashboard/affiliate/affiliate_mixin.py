@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import re
 import secrets
@@ -18,6 +19,9 @@ from aiohttp import web
 from ... import storage
 from ...core.constants import log
 from ...storage import sessions_db
+from .affiliate_email import AffiliateEmailSender
+from .affiliate_pii import AffiliatePII
+from .gutschrift import AffiliateGutschriftService
 
 TWITCH_OAUTH_AUTHORIZE_URL = "https://id.twitch.tv/oauth2/authorize"
 TWITCH_OAUTH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"  # noqa: S105
@@ -31,6 +35,7 @@ _AFFILIATE_COOKIE = "twitch_affiliate_session"
 _COMMISSION_RATE = 0.30
 _MAX_PENDING_COMMISSION_CENTS = 5000
 _AFFILIATE_COMMISSION_LOCK_NAMESPACE = 1_103_151_689
+_AFFILIATE_GUTSCHRIFT_LOOP_INTERVAL_SECONDS = 6 * 3600
 
 
 class _DashboardAffiliateMixin:
@@ -45,7 +50,172 @@ class _DashboardAffiliateMixin:
         schema_path = Path(__file__).resolve().parents[2] / "migrations" / "affiliate_schema.sql"
         sql = schema_path.read_text(encoding="utf-8")
         conn.executescript(sql)
+        AffiliateGutschriftService.ensure_schema(conn)
+        AffiliatePII.migrate_from_plaintext(conn)
         conn.commit()
+
+    @staticmethod
+    def _affiliate_profile_payload(
+        account_row: Any,
+        pii: dict[str, Any],
+        *,
+        readiness: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        stripe_id = str(account_row["stripe_account_id"] or "")
+        masked = f"{stripe_id[:8]}...{stripe_id[-4:]}" if len(stripe_id) > 12 else stripe_id
+        return {
+            "twitch_login": str(account_row["twitch_login"] or ""),
+            "display_name": str(account_row["display_name"] or ""),
+            "email": str(pii.get("email") or ""),
+            "full_name": str(pii.get("full_name") or ""),
+            "address_line1": str(pii.get("address_line1") or ""),
+            "address_city": str(pii.get("address_city") or ""),
+            "address_zip": str(pii.get("address_zip") or ""),
+            "address_country": str(pii.get("address_country") or "DE"),
+            "tax_id": str(pii.get("tax_id") or ""),
+            "vat_id": str(pii.get("vat_id") or ""),
+            "ust_status": str(pii.get("ust_status") or "unknown"),
+            "stripe_connect_status": str(account_row["stripe_connect_status"] or ""),
+            "stripe_account_id": masked,
+            "is_active": bool(account_row["is_active"]),
+            "created_at": account_row["created_at"],
+            "updated_at": account_row["updated_at"],
+            "profile_updated_at": pii.get("updated_at"),
+            "gutschrift_readiness": dict(readiness or {}),
+        }
+
+    def _affiliate_gutschrift_seller(self) -> dict[str, str]:
+        return {
+            "name": str(
+                self._load_secret_value("AFFILIATE_GUTSCHRIFT_SELLER_NAME")
+                or "[STEUERBERATER: Firmenname]"
+            ).strip(),
+            "company": str(
+                self._load_secret_value("AFFILIATE_GUTSCHRIFT_SELLER_COMPANY")
+                or "[STEUERBERATER: Firmierung]"
+            ).strip(),
+            "street": str(
+                self._load_secret_value("AFFILIATE_GUTSCHRIFT_SELLER_STREET")
+                or "[STEUERBERATER: Adresse]"
+            ).strip(),
+            "postal_code": str(
+                self._load_secret_value("AFFILIATE_GUTSCHRIFT_SELLER_POSTAL_CODE")
+                or ""
+            ).strip(),
+            "city": str(
+                self._load_secret_value("AFFILIATE_GUTSCHRIFT_SELLER_CITY")
+                or ""
+            ).strip(),
+            "country": str(
+                self._load_secret_value("AFFILIATE_GUTSCHRIFT_SELLER_COUNTRY")
+                or "DE"
+            ).strip().upper(),
+            "email": str(
+                self._load_secret_value(
+                    "AFFILIATE_GUTSCHRIFT_SELLER_EMAIL",
+                    "AFFILIATE_GUTSCHRIFT_FROM_EMAIL",
+                )
+                or "billing@example.invalid"
+            ).strip(),
+            "website": str(
+                self._load_secret_value("AFFILIATE_GUTSCHRIFT_SELLER_WEBSITE")
+                or getattr(self, "_public_url", "")
+                or "https://twitch.earlysalty.com"
+            ).strip(),
+            "tax_id": str(
+                self._load_secret_value(
+                    "AFFILIATE_GUTSCHRIFT_SELLER_TAX_ID",
+                    "AFFILIATE_GUTSCHRIFT_SELLER_VAT_ID",
+                )
+                or "[STEUERBERATER: Steuernummer/USt-IdNr.]"
+            ).strip(),
+        }
+
+    def _affiliate_email_sender(self) -> AffiliateEmailSender | None:
+        if not hasattr(self, "_affiliate_email_sender_cache"):
+            self._affiliate_email_sender_cache = AffiliateEmailSender.from_secret_loader(
+                self._load_secret_value
+            )
+        return self._affiliate_email_sender_cache
+
+    def _affiliate_run_gutschrift_job(
+        self,
+        *,
+        affiliate_login: str | None = None,
+        year: int | None = None,
+        month: int | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        with storage.get_conn() as conn:
+            self._affiliate_ensure_tables(conn)
+            if year and month:
+                results = AffiliateGutschriftService.generate_monthly_gutschriften(
+                    conn,
+                    year=int(year),
+                    month=int(month),
+                    email_sender=self._affiliate_email_sender(),
+                    seller=self._affiliate_gutschrift_seller(),
+                    affiliate_login=affiliate_login,
+                    force=force,
+                )
+                conn.commit()
+                return {"results": results}
+
+            if affiliate_login:
+                results = []
+                for due_login, due_year, due_month in AffiliateGutschriftService.due_periods(conn):
+                    if due_login != str(affiliate_login or "").strip().lower():
+                        continue
+                    results.append(
+                        AffiliateGutschriftService.generate_for_period(
+                            conn,
+                            affiliate_login=due_login,
+                            year=due_year,
+                            month=due_month,
+                            email_sender=self._affiliate_email_sender(),
+                            seller=self._affiliate_gutschrift_seller(),
+                            force=force,
+                        )
+                    )
+                conn.commit()
+                return {"results": results}
+
+            results = AffiliateGutschriftService.run_pending(
+                conn,
+                email_sender=self._affiliate_email_sender(),
+                seller=self._affiliate_gutschrift_seller(),
+            )
+            conn.commit()
+            return {"results": results}
+
+    async def _affiliate_background_context(self, _app: web.Application):
+        stop_event = asyncio.Event()
+
+        async def _runner() -> None:
+            await asyncio.sleep(20)
+            while not stop_event.is_set():
+                try:
+                    await asyncio.to_thread(self._affiliate_run_gutschrift_job)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("affiliate: gutschrift background run failed")
+                try:
+                    await asyncio.wait_for(
+                        stop_event.wait(),
+                        timeout=_AFFILIATE_GUTSCHRIFT_LOOP_INTERVAL_SECONDS,
+                    )
+                except TimeoutError:
+                    continue
+
+        task = asyncio.create_task(_runner(), name="affiliate.gutschrift.loop")
+        try:
+            yield
+        finally:
+            stop_event.set()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     # ------------------------------------------------------------------ #
     # Session helpers                                                      #
@@ -377,7 +547,7 @@ class _DashboardAffiliateMixin:
                             twitch_login,
                             twitch_user_id,
                             display_name,
-                            email,
+                            "",
                             "",
                             "",
                             "",
@@ -386,10 +556,15 @@ class _DashboardAffiliateMixin:
                             now,
                         ),
                     )
+                    AffiliatePII.save_pii(conn, twitch_login, {"email": email})
                     conn.commit()
                 except Exception as _dup_exc:
                     if "unique" not in str(_dup_exc).lower() and "duplicate" not in str(_dup_exc).lower():
                         raise
+            else:
+                if email:
+                    AffiliatePII.save_pii(conn, twitch_login, {"email": email})
+                    conn.commit()
 
         destination = "/twitch/affiliate/portal"
 
@@ -636,24 +811,79 @@ class _DashboardAffiliateMixin:
                 "SELECT * FROM affiliate_accounts WHERE twitch_login = ?",
                 (twitch_login,),
             ).fetchone()
+            pii = AffiliatePII.load_pii(conn, twitch_login) if row else None
 
         if not row:
             return web.json_response({"error": "not_found"}, status=404)
 
-        # Mask stripe_account_id
-        stripe_id = str(row["stripe_account_id"] or "")
-        masked = f"{stripe_id[:8]}...{stripe_id[-4:]}" if len(stripe_id) > 12 else stripe_id
+        readiness = AffiliateGutschriftService.build_readiness(pii or {})
+        return web.json_response(
+            self._affiliate_profile_payload(row, pii or {}, readiness=readiness)
+        )
 
-        return web.json_response({
-            "twitch_login": row["twitch_login"],
-            "display_name": row["display_name"],
-            "email": row["email"],
-            "full_name": row["full_name"],
-            "stripe_connect_status": row["stripe_connect_status"],
-            "stripe_account_id": masked,
-            "is_active": bool(row["is_active"]),
-            "created_at": row["created_at"],
-        })
+    async def _affiliate_api_profile_update(self, request: web.Request) -> web.StreamResponse:
+        session = self._get_affiliate_session(request)
+        if not session:
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid_json"}, status=400)
+
+        if not isinstance(body, dict):
+            return web.json_response({"error": "invalid_payload"}, status=400)
+
+        ust_status = str(body.get("ust_status") or "").strip().lower()
+        if ust_status and ust_status not in AffiliatePII.VALID_UST_STATUS:
+            return web.json_response({"error": "invalid_ust_status"}, status=400)
+
+        twitch_login = str(session.get("twitch_login") or "").strip().lower()
+        payload = {
+            "full_name": body.get("full_name"),
+            "email": body.get("email"),
+            "address_line1": body.get("address_line1"),
+            "address_city": body.get("address_city"),
+            "address_zip": body.get("address_zip"),
+            "address_country": body.get("address_country"),
+            "tax_id": body.get("tax_id"),
+            "vat_id": body.get("vat_id"),
+            "ust_status": ust_status or "unknown",
+        }
+        now = datetime.now(UTC).isoformat()
+
+        with storage.get_conn() as conn:
+            self._affiliate_ensure_tables(conn)
+            row = conn.execute(
+                "SELECT * FROM affiliate_accounts WHERE twitch_login = ?",
+                (twitch_login,),
+            ).fetchone()
+            if not row:
+                return web.json_response({"error": "not_found"}, status=404)
+
+            AffiliatePII.save_pii(conn, twitch_login, payload)
+            conn.execute(
+                "UPDATE affiliate_accounts SET updated_at = ? WHERE twitch_login = ?",
+                (now, twitch_login),
+            )
+            updated_row = conn.execute(
+                "SELECT * FROM affiliate_accounts WHERE twitch_login = ?",
+                (twitch_login,),
+            ).fetchone()
+            pii = AffiliatePII.load_pii(conn, twitch_login)
+            conn.commit()
+
+        readiness = AffiliateGutschriftService.build_readiness(pii)
+        return web.json_response(
+            {
+                "ok": True,
+                "profile": self._affiliate_profile_payload(
+                    updated_row,
+                    pii,
+                    readiness=readiness,
+                ),
+            }
+        )
 
     async def _affiliate_api_claims(self, request: web.Request) -> web.StreamResponse:
         session = self._get_affiliate_session(request)
@@ -740,6 +970,118 @@ class _DashboardAffiliateMixin:
             "page_size": page_size,
             "total": total,
         })
+
+    async def _affiliate_api_gutschriften(self, request: web.Request) -> web.StreamResponse:
+        session = self._get_affiliate_session(request)
+        if not session:
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        twitch_login = str(session.get("twitch_login") or "").strip().lower()
+        with storage.get_conn() as conn:
+            self._affiliate_ensure_tables(conn)
+            account_row = conn.execute(
+                "SELECT * FROM affiliate_accounts WHERE twitch_login = ?",
+                (twitch_login,),
+            ).fetchone()
+            if not account_row:
+                return web.json_response({"error": "not_found"}, status=404)
+            pii = AffiliatePII.load_pii(conn, twitch_login)
+            documents = AffiliateGutschriftService.list_for_affiliate(conn, twitch_login)
+
+        readiness = AffiliateGutschriftService.build_readiness(pii)
+        return web.json_response(
+            {
+                "gutschriften": documents,
+                "readiness": readiness,
+                "profile": self._affiliate_profile_payload(
+                    account_row,
+                    pii,
+                    readiness=readiness,
+                ),
+            }
+        )
+
+    async def _affiliate_api_gutschrift_pdf(self, request: web.Request) -> web.StreamResponse:
+        session = self._get_affiliate_session(request)
+        if not session:
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        try:
+            gutschrift_id = int(request.match_info.get("gutschrift_id", "0"))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "invalid_gutschrift_id"}, status=400)
+        if gutschrift_id <= 0:
+            return web.json_response({"error": "invalid_gutschrift_id"}, status=400)
+
+        twitch_login = str(session.get("twitch_login") or "").strip().lower()
+        with storage.get_conn() as conn:
+            self._affiliate_ensure_tables(conn)
+            resolved = AffiliateGutschriftService.get_pdf(
+                conn,
+                affiliate_login=twitch_login,
+                gutschrift_id=gutschrift_id,
+            )
+        if resolved is None:
+            return web.json_response({"error": "not_found"}, status=404)
+
+        metadata, pdf_bytes = resolved
+        filename = str(metadata.get("gutschrift_number") or f"gutschrift-{gutschrift_id}").replace(
+            '"', ""
+        )
+        return web.Response(
+            body=pdf_bytes,
+            content_type="application/pdf",
+            headers={
+                "Content-Disposition": f'inline; filename="{filename}.pdf"',
+            },
+        )
+
+    async def _affiliate_api_gutschrift_trigger(self, request: web.Request) -> web.StreamResponse:
+        admin_error = self._require_v2_admin_api(request)
+        if admin_error is not None:
+            return admin_error
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if body is None:
+            body = {}
+        if not isinstance(body, dict):
+            return web.json_response({"error": "invalid_payload"}, status=400)
+
+        affiliate_login = str(
+            body.get("affiliate_login") or body.get("twitch_login") or body.get("login") or ""
+        ).strip().lower()
+        force = str(body.get("force") or "").strip().lower() in {"1", "true", "yes", "on"}
+        year_raw = body.get("year")
+        month_raw = body.get("month")
+        year = None
+        month = None
+        if year_raw not in (None, "") or month_raw not in (None, ""):
+            if year_raw in (None, "") or month_raw in (None, ""):
+                return web.json_response({"error": "invalid_period"}, status=400)
+            try:
+                year = int(year_raw)
+                month = int(month_raw)
+            except (TypeError, ValueError):
+                return web.json_response({"error": "invalid_period"}, status=400)
+            if year < 2000 or month < 1 or month > 12:
+                return web.json_response({"error": "invalid_period"}, status=400)
+
+        result = await asyncio.to_thread(
+            self._affiliate_run_gutschrift_job,
+            affiliate_login=affiliate_login or None,
+            year=year,
+            month=month,
+            force=force,
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "results": list(result.get("results") or []),
+            }
+        )
 
     # ------------------------------------------------------------------ #
     # Commission processing (called from webhook, not a route)             #
@@ -852,6 +1194,9 @@ class _DashboardAffiliateMixin:
     def _affiliate_register_routes(self, app: web.Application) -> None:
         with storage.get_conn() as conn:
             self._affiliate_ensure_tables(conn)
+        if not getattr(self, "_affiliate_background_registered", False):
+            app.cleanup_ctx.append(self._affiliate_background_context)
+            self._affiliate_background_registered = True
 
         app.router.add_get(
             "/twitch/auth/affiliate/login", self._affiliate_auth_login
@@ -878,9 +1223,27 @@ class _DashboardAffiliateMixin:
         app.router.add_get(
             "/twitch/api/affiliate/me", self._affiliate_api_me
         )
+        app.router.add_put(
+            "/twitch/api/affiliate/profile", self._affiliate_api_profile_update
+        )
         app.router.add_get(
             "/twitch/api/affiliate/claims", self._affiliate_api_claims
         )
         app.router.add_get(
             "/twitch/api/affiliate/commissions", self._affiliate_api_commissions
+        )
+        app.router.add_get(
+            "/twitch/api/affiliate/gutschriften", self._affiliate_api_gutschriften
+        )
+        app.router.add_get(
+            "/twitch/api/affiliate/gutschriften/{gutschrift_id}/pdf",
+            self._affiliate_api_gutschrift_pdf,
+        )
+        app.router.add_post(
+            "/twitch/api/affiliate/gutschriften/trigger",
+            self._affiliate_api_gutschrift_trigger,
+        )
+        app.router.add_post(
+            "/twitch/api/affiliate/admin/generate-gutschriften",
+            self._affiliate_api_gutschrift_trigger,
         )
