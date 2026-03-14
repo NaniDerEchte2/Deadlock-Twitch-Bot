@@ -17,10 +17,6 @@ import { Experimental } from '@/pages/Experimental';
 import { AIAnalysis } from '@/pages/AIAnalysis';
 import { InternalHomeLanding } from '@/pages/InternalHomeLanding';
 import { VerwaltungPage } from '@/pages/Verwaltung';
-import Pricing from '@/pages/Pricing';
-import AffiliatePortal from '@/pages/AffiliatePortal';
-import { PlanProvider } from '@/context/PlanContext';
-import { UpgradeBanner } from '@/components/cards/UpgradeBanner';
 import { useStreamerList, useAuthStatus } from '@/hooks/useAnalytics';
 import type { TimeRange } from '@/types/analytics';
 import {
@@ -30,8 +26,6 @@ import {
   ShieldCheck,
   Wifi,
 } from 'lucide-react';
-import { GlowOrb } from '@/components/effects/GlowOrb';
-import { GlowButton } from '@/components/ui/GlowButton';
 
 // Error Boundary to prevent white screen on crashes
 interface ErrorBoundaryProps {
@@ -66,14 +60,12 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
             <p className="text-text-secondary mb-4">
               {this.state.error?.message || 'Ein unerwarteter Fehler ist aufgetreten.'}
             </p>
-            <GlowButton
-              as="button"
-              variant="primary"
-              size="sm"
+            <button
               onClick={() => this.setState({ hasError: false, error: null })}
+              className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary-hover transition-colors"
             >
               Erneut versuchen
-            </GlowButton>
+            </button>
           </div>
         </div>
       );
@@ -198,126 +190,105 @@ function AnalyticsDashboard() {
     );
   };
 
-  // Map auth plan to PlanStatus shape (or null for backward compat)
-  const planStatus = authStatus?.plan ?? null;
-
   return (
-    <PlanProvider
-      plan={planStatus}
-      isAdmin={authStatus?.isAdmin ?? false}
-      isLocalhost={authStatus?.isLocalhost ?? false}
-    >
-      <GlowOrb />
-      <div className="min-h-screen relative px-3 py-4 md:px-7 md:py-8">
-        <div className="relative max-w-[1700px] mx-auto">
-          {/* Auth Status Badge */}
-          <div className="flex justify-end mb-4">
-            <AuthBadge />
-          </div>
-
-          <Header
-            streamer={streamer}
-            streamers={streamers}
-            days={days}
-            onStreamerChange={setStreamer}
-            onDaysChange={setDays}
-            isLoading={loadingStreamers}
-            canViewAllStreamers={authStatus?.permissions?.viewAllStreamers || false}
-          />
-
-          <UpgradeBanner />
-
-          <TabNavigation activeTab={activeTab} onTabChange={setActiveTab} />
-
-          {/* Tab Content */}
-          {activeTab === 'overview' && (
-            <Overview
-              streamer={streamer}
-              days={days}
-              onSessionClick={handleSessionClick}
-            />
-          )}
-
-          {activeTab === 'streams' && (
-            <Sessions streamer={streamer || ''} days={days} />
-          )}
-
-          {activeTab === 'chat' && (
-            <ChatAnalytics streamer={streamer || ''} days={days} />
-          )}
-
-          {activeTab === 'growth' && (
-            <Growth streamer={streamer || ''} days={days} />
-          )}
-
-          {activeTab === 'audience' && (
-            <Audience streamer={streamer || ''} days={days} />
-          )}
-
-          {activeTab === 'viewers' && (
-            <Viewers streamer={streamer} days={days} />
-          )}
-
-          {activeTab === 'compare' && (
-            <Comparison streamer={streamer || ''} days={days} />
-          )}
-
-          {activeTab === 'schedule' && (
-            <Schedule streamer={streamer || ''} days={days} />
-          )}
-
-          {activeTab === 'coaching' && (
-            <Coaching streamer={streamer || ''} days={days} />
-          )}
-
-          {activeTab === 'monetization' && (
-            <Monetization streamer={streamer} days={days} />
-          )}
-
-          {activeTab === 'category' && (
-            <Category
-              streamer={streamer}
-              days={days}
-              onStreamerSelect={setStreamer}
-              onNavigate={setActiveTab}
-            />
-          )}
-
-          {activeTab === 'experimental' && (
-            <Experimental streamer={streamer} days={days} />
-          )}
-
-          {activeTab === 'ai' && (
-            <AIAnalysis streamer={streamer} days={days} />
-          )}
-
-        </div>
+    <div className="min-h-screen relative px-3 py-4 md:px-7 md:py-8">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        <div className="absolute -top-28 right-[-7rem] h-[25rem] w-[25rem] rounded-full bg-primary/12 blur-3xl" />
+        <div className="absolute top-[28%] -left-24 h-[20rem] w-[20rem] rounded-full bg-accent/14 blur-3xl" />
       </div>
-    </PlanProvider>
+      <div className="relative max-w-[1700px] mx-auto">
+        {/* Auth Status Badge */}
+        <div className="flex justify-end mb-4">
+          <AuthBadge />
+        </div>
+
+        <Header
+          streamer={streamer}
+          streamers={streamers}
+          days={days}
+          onStreamerChange={setStreamer}
+          onDaysChange={setDays}
+          isLoading={loadingStreamers}
+          canViewAllStreamers={authStatus?.permissions?.viewAllStreamers || false}
+        />
+
+        <TabNavigation activeTab={activeTab} onTabChange={setActiveTab} />
+
+        {/* Tab Content */}
+        {activeTab === 'overview' && (
+          <Overview
+            streamer={streamer}
+            days={days}
+            onSessionClick={handleSessionClick}
+          />
+        )}
+
+        {activeTab === 'streams' && (
+          <Sessions streamer={streamer || ''} days={days} />
+        )}
+
+        {activeTab === 'chat' && (
+          <ChatAnalytics streamer={streamer || ''} days={days} />
+        )}
+
+        {activeTab === 'growth' && (
+          <Growth streamer={streamer || ''} days={days} />
+        )}
+
+        {activeTab === 'audience' && (
+          <Audience streamer={streamer || ''} days={days} />
+        )}
+
+        {activeTab === 'viewers' && (
+          <Viewers streamer={streamer} days={days} />
+        )}
+
+        {activeTab === 'compare' && (
+          <Comparison streamer={streamer || ''} days={days} />
+        )}
+
+        {activeTab === 'schedule' && (
+          <Schedule streamer={streamer || ''} days={days} />
+        )}
+
+        {activeTab === 'coaching' && (
+          <Coaching streamer={streamer || ''} days={days} />
+        )}
+
+        {activeTab === 'monetization' && (
+          <Monetization streamer={streamer} days={days} />
+        )}
+
+        {activeTab === 'category' && (
+          <Category
+            streamer={streamer}
+            days={days}
+            onStreamerSelect={setStreamer}
+            onNavigate={setActiveTab}
+          />
+        )}
+
+        {activeTab === 'experimental' && (
+          <Experimental streamer={streamer} days={days} />
+        )}
+
+        {activeTab === 'ai' && (
+          <AIAnalysis streamer={streamer} days={days} />
+        )}
+
+      </div>
+    </div>
   );
 }
 
 export default function App() {
-  const pathname = normalizePathname(window.location.pathname);
-  const isInternalHomeRoute = pathname === '/twitch/dashboard';
-  const isVerwaltungRoute = pathname === '/twitch/verwaltung';
-  const isPricingRoute = pathname === '/twitch/pricing';
-  const isAffiliatePortalRoute = pathname === '/twitch/affiliate/portal';
+  const isInternalHomeRoute = normalizePathname(window.location.pathname) === '/twitch/dashboard';
+  const isVerwaltungRoute = normalizePathname(window.location.pathname) === '/twitch/verwaltung';
 
   return (
     <QueryClientProvider client={queryClient}>
       <ErrorBoundary>
-        {isVerwaltungRoute ? (
-          <VerwaltungPage />
-        ) : isInternalHomeRoute ? (
-          <InternalHome />
-        ) : isPricingRoute ? (
-          <Pricing />
-        ) : isAffiliatePortalRoute ? (
-          <AffiliatePortal />
-        ) : (
-          <AnalyticsDashboard />
-        )}
+        {isVerwaltungRoute ? <VerwaltungPage /> : isInternalHomeRoute ? <InternalHome /> : <AnalyticsDashboard />}
       </ErrorBoundary>
     </QueryClientProvider>
   );

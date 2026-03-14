@@ -38,8 +38,9 @@ body {
   -moz-osx-font-smoothing: grayscale;
   min-height: 100vh;
   background:
-    radial-gradient(1200px 520px at 90% -10%, rgba(255, 122, 24, 0.18), transparent 65%),
-    radial-gradient(900px 460px at 12% -18%, rgba(16, 183, 173, 0.24), transparent 60%),
+    radial-gradient(1200px 540px at 92% -10%, rgba(255, 122, 24, 0.24), transparent 65%),
+    radial-gradient(940px 500px at 9% -18%, rgba(16, 183, 173, 0.3), transparent 60%),
+    radial-gradient(1040px 540px at 52% 106%, rgba(46, 204, 113, 0.22), transparent 68%),
     linear-gradient(160deg, #07151d 0%, #081a24 55%, #0a202c 100%);
   color: var(--color-text-primary);
   position: relative;
@@ -431,11 +432,6 @@ h4,
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .glow-orb-container * {
-    animation: none !important;
-    transition: none !important;
-  }
-
   .internal-home-vibe::before,
   .internal-home-vibe::after,
   .internal-home-section,
