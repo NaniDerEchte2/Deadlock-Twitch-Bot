@@ -1742,6 +1742,122 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.rate_limit_args, (10, 60.0))
         self.assertIsNone(handler.created_changelog_args)
 
+    async def test_live_auth_status_includes_demo_mode_false(self) -> None:
+        handler = _DummyV2HeaderOnlyAuth()
+        request = SimpleNamespace(
+            headers={"Host": "dashboard.example"},
+            host="dashboard.example",
+            remote="203.0.113.10",
+            transport=None,
+        )
+
+        response = await handler._api_v2_auth_status(request)
+        payload = json.loads(response.text)
+
+        self.assertEqual(response.status, 200)
+        self.assertFalse(payload.get("demoMode"))
+
+    def test_demo_auth_status_uses_allowlisted_default_profile(self) -> None:
+        from bot.analytics.demo_data import DEFAULT_DEMO_PROFILE, build_demo_auth_status
+
+        payload = build_demo_auth_status()
+
+        self.assertTrue(payload.get("demoMode"))
+        self.assertEqual(payload.get("twitchLogin"), DEFAULT_DEMO_PROFILE)
+
+    def test_demo_streamer_allowlist_blocks_untrusted_profile_override(self) -> None:
+        from bot.analytics.demo_data import DEFAULT_DEMO_PROFILE, build_demo_payload
+
+        payload = build_demo_payload("overview", streamer="evil_streamer")
+
+        self.assertEqual(payload.get("streamer"), DEFAULT_DEMO_PROFILE)
+        self.assertNotEqual(payload.get("streamer"), "evil_streamer")
+
+    def test_demo_ai_fixture_stays_on_allowlisted_profile(self) -> None:
+        from bot.analytics.demo_data import DEFAULT_DEMO_PROFILE, build_demo_ai_analysis
+
+        payload = build_demo_ai_analysis(streamer="totally_not_allowed", days=30, game_filter="deadlock")
+
+        self.assertEqual(payload.get("streamer"), DEFAULT_DEMO_PROFILE)
+        self.assertEqual(payload.get("gameFilter"), "deadlock")
+        self.assertEqual(len(payload.get("points", [])), 10)
+        self.assertIn("dataSnapshot", payload)
+
+    def test_demo_streamer_list_contains_multiple_profiles(self) -> None:
+        from bot.analytics.demo_data import ALLOWED_DEMO_PROFILES, build_demo_streamers
+
+        payload = build_demo_streamers()
+
+        self.assertEqual([entry["login"] for entry in payload], list(ALLOWED_DEMO_PROFILES))
+        self.assertGreaterEqual(len(payload), 3)
+
+    def test_demo_profiles_have_distinct_small_mid_large_scales(self) -> None:
+        from bot.analytics.demo_data import ALLOWED_DEMO_PROFILES, build_demo_payload
+
+        overviews = {
+            login: build_demo_payload("overview", streamer=login, days=30)
+            for login in ALLOWED_DEMO_PROFILES
+        }
+        viewer_dirs = {
+            login: build_demo_payload("viewer-directory", streamer=login, per_page=10)
+            for login in ALLOWED_DEMO_PROFILES
+        }
+
+        avg_viewers = [overviews[login]["summary"]["avgViewers"] for login in ALLOWED_DEMO_PROFILES]
+        viewer_totals = [viewer_dirs[login]["summary"]["totalViewers"] for login in ALLOWED_DEMO_PROFILES]
+
+        self.assertEqual(avg_viewers, sorted(avg_viewers))
+        self.assertEqual(viewer_totals, sorted(viewer_totals))
+        self.assertGreater(avg_viewers[-1], avg_viewers[0] * 20)
+        self.assertGreater(viewer_totals[-1], viewer_totals[0] * 5)
+
+    def test_demo_monthly_stats_honor_month_limit(self) -> None:
+        from bot.analytics.demo_data import build_demo_payload
+
+        payload = build_demo_payload("monthly-stats", streamer="midcore_live", months=4)
+
+        self.assertEqual(len(payload), 4)
+        self.assertEqual([entry["month"] for entry in payload], [11, 12, 1, 2])
+
+    def test_demo_category_rank_matches_leaderboard_rank(self) -> None:
+        from bot.analytics.demo_data import ALLOWED_DEMO_PROFILES, build_demo_payload
+
+        for login in ALLOWED_DEMO_PROFILES:
+            overview = build_demo_payload("overview", streamer=login, days=30)
+            comparison = build_demo_payload("category-comparison", streamer=login, days=30)
+            leaderboard = build_demo_payload(
+                "category-leaderboard",
+                streamer=login,
+                days=30,
+                limit=64,
+                sort="avg",
+            )
+
+            self.assertEqual(overview["categoryRank"], comparison["categoryRank"])
+            self.assertEqual(overview["categoryRank"], leaderboard["yourRank"])
+
+    def test_demo_category_leaderboard_honors_limit_and_sort(self) -> None:
+        from bot.analytics.demo_data import build_demo_payload
+
+        payload = build_demo_payload(
+            "category-leaderboard",
+            streamer="megaarena_gg",
+            days=30,
+            limit=5,
+            sort="peak",
+        )
+
+        self.assertEqual(len(payload["leaderboard"]), 5)
+        peaks = [entry["peakViewers"] for entry in payload["leaderboard"]]
+        self.assertEqual(peaks, sorted(peaks, reverse=True))
+
+    def test_demo_rankings_honor_limit(self) -> None:
+        from bot.analytics.demo_data import build_demo_payload
+
+        payload = build_demo_payload("rankings", streamer="midcore_live", metric="viewers", limit=3)
+
+        self.assertEqual(len(payload), 3)
+
     async def test_demo_dashboard_v2_assets_do_not_redirect_when_unauthenticated(self) -> None:
         handler = _DummyOverviewAssetsAuth()
         request = SimpleNamespace(match_info={"path": "missing-demo-asset.js"})
@@ -1757,6 +1873,10 @@ class DashboardSecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertIn("/twitch/demo/dashboard-v2/assets/", response.text)
         self.assertNotIn("/twitch/dashboard-v2/assets/", response.text)
+        self.assertIn('"apiBase":"/twitch/demo/api/v2"', response.text)
+        self.assertIn('"demoMode":true', response.text)
+        self.assertIn('"allowedDemoProfiles"', response.text)
+        self.assertNotIn("window.fetch=function", response.text)
 
     async def test_social_media_fetch_clips_without_twitch_api_returns_503(self) -> None:
         handler = SocialMediaDashboard(clip_manager=ClipManager(), auth_checker=lambda _req: True)

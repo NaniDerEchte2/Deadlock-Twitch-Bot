@@ -10,6 +10,7 @@ interface HeaderProps {
   onDaysChange: (days: TimeRange) => void;
   isLoading?: boolean;
   canViewAllStreamers?: boolean;
+  isDemoMode?: boolean;
 }
 
 export function Header({
@@ -20,6 +21,7 @@ export function Header({
   onDaysChange,
   isLoading,
   canViewAllStreamers = false,
+  isDemoMode = false,
 }: HeaderProps) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -33,7 +35,7 @@ export function Header({
   const q = search.trim().toLowerCase();
   const partners = streamers.filter(s => s.isPartner && (!q || s.login.includes(q)));
   const others = streamers.filter(s => !s.isPartner && (!q || s.login.includes(q)));
-  const allLabel = canViewAllStreamers ? 'Alle Streamer' : 'Alle Partner';
+  const allLabel = isDemoMode ? 'Demo-Profil' : canViewAllStreamers ? 'Alle Streamer' : 'Alle Partner';
 
   // In Beta: Partner koennen vorerst alle Streamer sehen.
   const visiblePartners = partners;
@@ -94,18 +96,20 @@ export function Header({
                   </div>
                   <div className="max-h-80 overflow-y-auto">
                   {/* All Partners Option */}
-                  <button
-                    onClick={() => {
-                      onStreamerChange(null);
-                      setDropdownOpen(false);
-                      setSearch('');
-                    }}
-                    className={`w-full px-4 py-2.5 text-left hover:bg-white/5 transition-colors ${
-                      !streamer ? 'bg-accent/15 text-accent' : 'text-white'
-                    }`}
-                  >
-                    {allLabel}
-                  </button>
+                  {!isDemoMode && (
+                    <button
+                      onClick={() => {
+                        onStreamerChange(null);
+                        setDropdownOpen(false);
+                        setSearch('');
+                      }}
+                      className={`w-full px-4 py-2.5 text-left hover:bg-white/5 transition-colors ${
+                        !streamer ? 'bg-accent/15 text-accent' : 'text-white'
+                      }`}
+                    >
+                      {allLabel}
+                    </button>
+                  )}
 
                   {/* Partners */}
                   {visiblePartners.length > 0 && (

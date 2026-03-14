@@ -17,10 +17,13 @@ import { Experimental } from '@/pages/Experimental';
 import { AIAnalysis } from '@/pages/AIAnalysis';
 import { InternalHomeLanding } from '@/pages/InternalHomeLanding';
 import { VerwaltungPage } from '@/pages/Verwaltung';
+import { PlanProvider } from '@/context/PlanContext';
 import { useStreamerList, useAuthStatus } from '@/hooks/useAnalytics';
 import type { TimeRange } from '@/types/analytics';
+import { dashboardRuntimeConfig, resolveEffectiveDemoMode } from '@/runtimeConfig';
 import {
   AlertTriangle,
+  Sparkles,
   Shield,
   ShieldAlert,
   ShieldCheck,
@@ -100,6 +103,14 @@ function AnalyticsDashboard() {
 
   const { data: streamers = [], isLoading: loadingStreamers } = useStreamerList();
   const { data: authStatus, isLoading: loadingAuth, isError: authError } = useAuthStatus();
+  const isDemoShell = resolveEffectiveDemoMode({
+    pathname: window.location.pathname,
+    runtimeConfig: dashboardRuntimeConfig,
+  });
+  const isDemoMode = resolveEffectiveDemoMode({
+    pathname: window.location.pathname,
+    runtimeConfig: dashboardRuntimeConfig,
+  });
 
   // Tracks if we already auto-set the streamer from auth (fire-once guard)
   const hasAutoSetStreamer = useRef(false);
@@ -111,8 +122,15 @@ function AnalyticsDashboard() {
     const urlDays = params.get('days');
 
     if (urlStreamer) {
-      setStreamer(urlStreamer);
-      hasAutoSetStreamer.current = true; // URL explicitly set — skip auto-set
+      const normalizedStreamer = urlStreamer.trim().toLowerCase();
+      if (
+        !isDemoShell ||
+        dashboardRuntimeConfig.allowedDemoProfiles.length === 0 ||
+        dashboardRuntimeConfig.allowedDemoProfiles.includes(normalizedStreamer)
+      ) {
+        setStreamer(normalizedStreamer);
+        hasAutoSetStreamer.current = true; // URL explicitly set — skip auto-set
+      }
     }
     if (urlDays) {
       const d = parseInt(urlDays, 10);
@@ -122,11 +140,14 @@ function AnalyticsDashboard() {
 
   // Auto-set streamer to logged-in Twitch user on first auth load
   useEffect(() => {
-    if (!hasAutoSetStreamer.current && authStatus?.twitchLogin) {
-      setStreamer(authStatus.twitchLogin);
+    const fallbackStreamer =
+      authStatus?.twitchLogin ??
+      (isDemoShell ? dashboardRuntimeConfig.defaultDemoProfile : null);
+    if (!hasAutoSetStreamer.current && fallbackStreamer) {
+      setStreamer(fallbackStreamer);
       hasAutoSetStreamer.current = true;
     }
-  }, [authStatus]);
+  }, [authStatus, isDemoShell]);
 
   // Update URL when params change
   useEffect(() => {
@@ -154,6 +175,15 @@ function AnalyticsDashboard() {
       'flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-semibold tracking-wide backdrop-blur-md';
 
     if (loadingAuth) return null;
+
+    if (isDemoMode) {
+      return (
+        <div className={`${badgeBase} bg-warning/10 border-warning/30 text-warning`}>
+          <Sparkles className="w-4 h-4" />
+          <span>Demo-Daten</span>
+        </div>
+      );
+    }
 
     if (authError || !authStatus?.authenticated) {
       return (
@@ -202,79 +232,93 @@ function AnalyticsDashboard() {
           <AuthBadge />
         </div>
 
-        <Header
-          streamer={streamer}
-          streamers={streamers}
-          days={days}
-          onStreamerChange={setStreamer}
-          onDaysChange={setDays}
-          isLoading={loadingStreamers}
-          canViewAllStreamers={authStatus?.permissions?.viewAllStreamers || false}
-        />
-
-        <TabNavigation activeTab={activeTab} onTabChange={setActiveTab} />
-
-        {/* Tab Content */}
-        {activeTab === 'overview' && (
-          <Overview
+        <PlanProvider
+          plan={authStatus?.plan ?? null}
+          isAdmin={authStatus?.isAdmin ?? false}
+          isLocalhost={authStatus?.isLocalhost ?? false}
+          isDemoMode={isDemoMode}
+        >
+          <Header
             streamer={streamer}
+            streamers={streamers}
             days={days}
-            onSessionClick={handleSessionClick}
+            onStreamerChange={setStreamer}
+            onDaysChange={setDays}
+            isLoading={loadingStreamers}
+            canViewAllStreamers={authStatus?.permissions?.viewAllStreamers || false}
+            isDemoMode={isDemoMode}
           />
-        )}
 
-        {activeTab === 'streams' && (
-          <Sessions streamer={streamer || ''} days={days} />
-        )}
+          {isDemoMode && (
+            <div className="mb-4 rounded-2xl border border-warning/20 bg-warning/10 px-4 py-3 text-sm text-warning/90">
+              Demo-Daten aus einem statischen Snapshot. Profilwechsel und Analysen laufen ausschließlich über den Demo-Namespace.
+            </div>
+          )}
 
-        {activeTab === 'chat' && (
-          <ChatAnalytics streamer={streamer || ''} days={days} />
-        )}
+          <TabNavigation activeTab={activeTab} onTabChange={setActiveTab} />
 
-        {activeTab === 'growth' && (
-          <Growth streamer={streamer || ''} days={days} />
-        )}
+          {/* Tab Content */}
+          {activeTab === 'overview' && (
+            <Overview
+              streamer={streamer}
+              days={days}
+              onSessionClick={handleSessionClick}
+            />
+          )}
 
-        {activeTab === 'audience' && (
-          <Audience streamer={streamer || ''} days={days} />
-        )}
+          {activeTab === 'streams' && (
+            <Sessions streamer={streamer || ''} days={days} />
+          )}
 
-        {activeTab === 'viewers' && (
-          <Viewers streamer={streamer} days={days} />
-        )}
+          {activeTab === 'chat' && (
+            <ChatAnalytics streamer={streamer || ''} days={days} />
+          )}
 
-        {activeTab === 'compare' && (
-          <Comparison streamer={streamer || ''} days={days} />
-        )}
+          {activeTab === 'growth' && (
+            <Growth streamer={streamer || ''} days={days} />
+          )}
 
-        {activeTab === 'schedule' && (
-          <Schedule streamer={streamer || ''} days={days} />
-        )}
+          {activeTab === 'audience' && (
+            <Audience streamer={streamer || ''} days={days} />
+          )}
 
-        {activeTab === 'coaching' && (
-          <Coaching streamer={streamer || ''} days={days} />
-        )}
+          {activeTab === 'viewers' && (
+            <Viewers streamer={streamer} days={days} />
+          )}
 
-        {activeTab === 'monetization' && (
-          <Monetization streamer={streamer} days={days} />
-        )}
+          {activeTab === 'compare' && (
+            <Comparison streamer={streamer || ''} days={days} />
+          )}
 
-        {activeTab === 'category' && (
-          <Category
-            streamer={streamer}
-            days={days}
-            onStreamerSelect={setStreamer}
-            onNavigate={setActiveTab}
-          />
-        )}
+          {activeTab === 'schedule' && (
+            <Schedule streamer={streamer || ''} days={days} />
+          )}
 
-        {activeTab === 'experimental' && (
-          <Experimental streamer={streamer} days={days} />
-        )}
+          {activeTab === 'coaching' && (
+            <Coaching streamer={streamer || ''} days={days} />
+          )}
 
-        {activeTab === 'ai' && (
-          <AIAnalysis streamer={streamer} days={days} />
-        )}
+          {activeTab === 'monetization' && (
+            <Monetization streamer={streamer} days={days} />
+          )}
+
+          {activeTab === 'category' && (
+            <Category
+              streamer={streamer}
+              days={days}
+              onStreamerSelect={setStreamer}
+              onNavigate={setActiveTab}
+            />
+          )}
+
+          {activeTab === 'experimental' && (
+            <Experimental streamer={streamer} days={days} />
+          )}
+
+          {activeTab === 'ai' && (
+            <AIAnalysis streamer={streamer} days={days} />
+          )}
+        </PlanProvider>
 
       </div>
     </div>

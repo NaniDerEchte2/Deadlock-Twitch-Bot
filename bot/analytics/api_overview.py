@@ -6,6 +6,7 @@ Route setup, overview data, sessions, health scores, network stats, correlations
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -124,87 +125,69 @@ class _AnalyticsOverviewMixin:
     def _register_demo_routes(self, router: web.UrlDispatcher) -> None:
         """Register public demo endpoints – no authentication required."""
         from .demo_data import (
-            get_audience_demographics,
-            get_audience_insights,
-            get_audience_sharing,
-            get_auth_status,
-            get_calendar_heatmap,
-            get_category_activity_series,
-            get_category_comparison,
-            get_category_leaderboard,
-            get_category_timings,
-            get_chat_analytics,
-            get_coaching,
-            get_exp_game_breakdown,
-            get_exp_game_transitions,
-            get_exp_growth_curves,
-            get_exp_overview,
-            get_follower_funnel,
-            get_hourly_heatmap,
-            get_lurker_analysis,
-            get_monetization,
-            get_monthly_stats,
-            get_overview,
-            get_raid_retention,
-            get_rankings,
-            get_streamers,
-            get_tag_analysis,
-            get_tag_analysis_extended,
-            get_title_performance,
-            get_viewer_detail,
-            get_viewer_directory,
-            get_viewer_overlap,
-            get_viewer_profiles,
-            get_viewer_segments,
-            get_viewer_timeline,
-            get_watch_time_distribution,
-            get_weekday_stats,
+            build_demo_ai_analysis,
+            build_demo_ai_history,
+            build_demo_auth_status,
+            build_demo_payload,
+            build_demo_streamers,
         )
 
-        def _j(data):
+        def _streamer(request: web.Request) -> str | None:
+            return str(request.query.get("streamer", "") or "").strip() or None
+
+        def _query_int(request: web.Request, name: str, default: int) -> int:
+            try:
+                return int(request.query.get(name, str(default)))
+            except (TypeError, ValueError):
+                return default
+
+        def _query_bool(request: web.Request, name: str, default: bool = False) -> bool:
+            raw = str(request.query.get(name, "1" if default else "0") or "").strip().lower()
+            if raw in {"1", "true", "yes", "on"}:
+                return True
+            if raw in {"0", "false", "no", "off"}:
+                return False
+            return default
+
+        def _demo_payload_j(
+            kind: str,
+            *,
+            with_days: bool = False,
+            with_months: bool = False,
+            with_limit: bool = False,
+            with_metric: bool = False,
+            with_source: bool = False,
+            with_sort: bool = False,
+            with_exclude_external: bool = False,
+        ):
             async def _handler(request: web.Request) -> web.Response:
-                return web.json_response(data() if callable(data) else data)
+                payload_kwargs: dict[str, Any] = {"streamer": _streamer(request)}
+                if with_days:
+                    payload_kwargs["days"] = _query_int(request, "days", 30)
+                if with_months:
+                    payload_kwargs["months"] = _query_int(request, "months", 12)
+                if with_limit:
+                    payload_kwargs["limit"] = _query_int(request, "limit", 20)
+                if with_metric:
+                    payload_kwargs["metric"] = request.query.get("metric", "viewers")
+                if with_source:
+                    payload_kwargs["source"] = request.query.get("source", "category")
+                if with_sort:
+                    payload_kwargs["sort"] = request.query.get("sort", "avg")
+                if with_exclude_external:
+                    payload_kwargs["exclude_external"] = _query_bool(request, "exclude_external")
+                return web.json_response(build_demo_payload(kind, **payload_kwargs))
 
             return _handler
 
-        def _days_j(fn):
+        def _viewer_directory_j():
             async def _handler(request: web.Request) -> web.Response:
-                try:
-                    days = int(request.query.get("days", "30"))
-                except ValueError:
-                    days = 30
-                return web.json_response(fn(days))
-
-            return _handler
-
-        def _metric_j(fn):
-            async def _handler(request: web.Request) -> web.Response:
-                metric = request.query.get("metric", "viewers")
-                return web.json_response(fn(metric))
-
-            return _handler
-
-        def _exp_days_j(fn):
-            async def _handler(request: web.Request) -> web.Response:
-                try:
-                    days = int(request.query.get("days", "30"))
-                except ValueError:
-                    days = 30
-                return web.json_response(fn(days))
-
-            return _handler
-
-        def _viewer_directory_j(fn):
-            async def _handler(request: web.Request) -> web.Response:
-                try:
-                    page = int(request.query.get("page", "1"))
-                except ValueError:
-                    page = 1
-                try:
-                    per_page = int(request.query.get("per_page", "50"))
-                except ValueError:
-                    per_page = 50
-                payload = fn(
+                page = _query_int(request, "page", 1)
+                per_page = _query_int(request, "per_page", 50)
+                payload = build_demo_payload(
+                    "viewer-directory",
+                    streamer=_streamer(request),
+                    days=_query_int(request, "days", 30),
                     sort=request.query.get("sort", "sessions"),
                     order=request.query.get("order", "desc"),
                     filter_type=request.query.get("filter", "all"),
@@ -216,51 +199,91 @@ class _AnalyticsOverviewMixin:
 
             return _handler
 
-        def _viewer_detail_j(fn):
+        def _viewer_detail_j():
             async def _handler(request: web.Request) -> web.Response:
                 login = request.query.get("login", "").strip()
                 if not login:
                     return web.json_response({"error": "login required"}, status=400)
-                return web.json_response(fn(login))
+                return web.json_response(
+                    build_demo_payload(
+                        "viewer-detail",
+                        streamer=_streamer(request),
+                        days=_query_int(request, "days", 30),
+                        login=login,
+                    )
+                )
 
             return _handler
 
+        async def _demo_ai_analysis_handler(request: web.Request) -> web.Response:
+            try:
+                days = int(request.query.get("days", "30"))
+            except ValueError:
+                days = 30
+            game_filter = str(request.query.get("game_filter", "all") or "all").strip().lower()
+            if game_filter not in {"all", "deadlock"}:
+                game_filter = "all"
+            return web.json_response(
+                build_demo_ai_analysis(
+                    streamer=_streamer(request),
+                    days=days,
+                    game_filter=game_filter,
+                )
+            )
+
+        async def _demo_ai_history_handler(request: web.Request) -> web.Response:
+            try:
+                limit = int(request.query.get("limit", "20"))
+            except ValueError:
+                limit = 20
+            return web.json_response(
+                build_demo_ai_history(streamer=_streamer(request), limit=limit)
+            )
+
+        async def _demo_auth_status_handler(request: web.Request) -> web.Response:
+            return web.json_response(build_demo_auth_status(streamer=_streamer(request)))
+
+        async def _demo_streamers_handler(_request: web.Request) -> web.Response:
+            return web.json_response(build_demo_streamers())
+
         base = "/twitch/demo/api/v2"
-        router.add_get(f"{base}/auth-status", _j(get_auth_status))
-        router.add_get(f"{base}/streamers", _j(get_streamers))
-        router.add_get(f"{base}/overview", _days_j(get_overview))
-        router.add_get(f"{base}/monthly-stats", _j(get_monthly_stats))
-        router.add_get(f"{base}/weekly-stats", _j(get_weekday_stats))
-        router.add_get(f"{base}/hourly-heatmap", _j(get_hourly_heatmap))
-        router.add_get(f"{base}/calendar-heatmap", _j(get_calendar_heatmap))
-        router.add_get(f"{base}/chat-analytics", _j(get_chat_analytics))
-        router.add_get(f"{base}/viewer-overlap", _j(get_viewer_overlap))
-        router.add_get(f"{base}/tag-analysis", _j(get_tag_analysis))
-        router.add_get(f"{base}/tag-analysis-extended", _j(get_tag_analysis_extended))
-        router.add_get(f"{base}/title-performance", _j(get_title_performance))
-        router.add_get(f"{base}/rankings", _metric_j(get_rankings))
-        router.add_get(f"{base}/category-comparison", _j(get_category_comparison))
-        router.add_get(f"{base}/watch-time-distribution", _j(get_watch_time_distribution))
-        router.add_get(f"{base}/follower-funnel", _j(get_follower_funnel))
-        router.add_get(f"{base}/audience-insights", _j(get_audience_insights))
-        router.add_get(f"{base}/audience-demographics", _j(get_audience_demographics))
-        router.add_get(f"{base}/viewer-timeline", _days_j(get_viewer_timeline))
-        router.add_get(f"{base}/category-leaderboard", _j(get_category_leaderboard))
-        router.add_get(f"{base}/coaching", _j(get_coaching))
-        router.add_get(f"{base}/monetization", _j(get_monetization))
-        router.add_get(f"{base}/category-timings", _j(get_category_timings))
-        router.add_get(f"{base}/category-activity-series", _j(get_category_activity_series))
-        router.add_get(f"{base}/lurker-analysis", _j(get_lurker_analysis))
-        router.add_get(f"{base}/raid-retention", _j(get_raid_retention))
-        router.add_get(f"{base}/viewer-directory", _viewer_directory_j(get_viewer_directory))
-        router.add_get(f"{base}/viewer-detail", _viewer_detail_j(get_viewer_detail))
-        router.add_get(f"{base}/viewer-segments", _j(get_viewer_segments))
-        router.add_get(f"{base}/viewer-profiles", _j(get_viewer_profiles))
-        router.add_get(f"{base}/audience-sharing", _j(get_audience_sharing))
-        router.add_get(f"{base}/exp/overview", _exp_days_j(get_exp_overview))
-        router.add_get(f"{base}/exp/game-breakdown", _exp_days_j(get_exp_game_breakdown))
-        router.add_get(f"{base}/exp/game-transitions", _exp_days_j(get_exp_game_transitions))
-        router.add_get(f"{base}/exp/growth-curves", _exp_days_j(get_exp_growth_curves))
+        router.add_get(f"{base}/auth-status", _demo_auth_status_handler)
+        router.add_get(f"{base}/streamers", _demo_streamers_handler)
+        router.add_get(f"{base}/overview", _demo_payload_j("overview", with_days=True))
+        router.add_get(f"{base}/monthly-stats", _demo_payload_j("monthly-stats", with_months=True))
+        router.add_get(f"{base}/weekly-stats", _demo_payload_j("weekly-stats", with_days=True))
+        router.add_get(f"{base}/hourly-heatmap", _demo_payload_j("hourly-heatmap", with_days=True))
+        router.add_get(f"{base}/calendar-heatmap", _demo_payload_j("calendar-heatmap", with_days=True))
+        router.add_get(f"{base}/chat-analytics", _demo_payload_j("chat-analytics", with_days=True))
+        router.add_get(f"{base}/viewer-overlap", _demo_payload_j("viewer-overlap", with_limit=True))
+        router.add_get(f"{base}/tag-analysis", _demo_payload_j("tag-analysis", with_days=True, with_limit=True))
+        router.add_get(f"{base}/tag-analysis-extended", _demo_payload_j("tag-analysis-extended", with_days=True, with_limit=True))
+        router.add_get(f"{base}/title-performance", _demo_payload_j("title-performance", with_days=True, with_limit=True))
+        router.add_get(f"{base}/rankings", _demo_payload_j("rankings", with_days=True, with_limit=True, with_metric=True, with_exclude_external=True))
+        router.add_get(f"{base}/category-comparison", _demo_payload_j("category-comparison", with_days=True, with_exclude_external=True))
+        router.add_get(f"{base}/watch-time-distribution", _demo_payload_j("watch-time-distribution", with_days=True))
+        router.add_get(f"{base}/follower-funnel", _demo_payload_j("follower-funnel", with_days=True))
+        router.add_get(f"{base}/audience-insights", _demo_payload_j("audience-insights", with_days=True))
+        router.add_get(f"{base}/audience-demographics", _demo_payload_j("audience-demographics", with_days=True))
+        router.add_get(f"{base}/viewer-timeline", _demo_payload_j("viewer-timeline", with_days=True))
+        router.add_get(f"{base}/category-leaderboard", _demo_payload_j("category-leaderboard", with_days=True, with_limit=True, with_sort=True, with_exclude_external=True))
+        router.add_get(f"{base}/coaching", _demo_payload_j("coaching", with_days=True))
+        router.add_get(f"{base}/monetization", _demo_payload_j("monetization", with_days=True))
+        router.add_get(f"{base}/category-timings", _demo_payload_j("category-timings", with_days=True, with_source=True))
+        router.add_get(f"{base}/category-activity-series", _demo_payload_j("category-activity-series", with_days=True))
+        router.add_get(f"{base}/lurker-analysis", _demo_payload_j("lurker-analysis", with_days=True))
+        router.add_get(f"{base}/raid-retention", _demo_payload_j("raid-retention", with_days=True))
+        router.add_get(f"{base}/viewer-directory", _viewer_directory_j())
+        router.add_get(f"{base}/viewer-detail", _viewer_detail_j())
+        router.add_get(f"{base}/viewer-segments", _demo_payload_j("viewer-segments", with_days=True))
+        router.add_get(f"{base}/viewer-profiles", _demo_payload_j("viewer-profiles", with_days=True))
+        router.add_get(f"{base}/audience-sharing", _demo_payload_j("audience-sharing", with_days=True))
+        router.add_get(f"{base}/exp/overview", _demo_payload_j("exp-overview", with_days=True))
+        router.add_get(f"{base}/exp/game-breakdown", _demo_payload_j("exp-game-breakdown", with_days=True))
+        router.add_get(f"{base}/exp/game-transitions", _demo_payload_j("exp-game-transitions", with_days=True))
+        router.add_get(f"{base}/exp/growth-curves", _demo_payload_j("exp-growth-curves", with_days=True))
+        router.add_get(f"{base}/ai/analysis", _demo_ai_analysis_handler)
+        router.add_get(f"{base}/ai/history", _demo_ai_history_handler)
         # Demo dashboard HTML
         router.add_get("/twitch/demo/", self._serve_demo_dashboard)
         router.add_get("/twitch/demo", self._serve_demo_dashboard)
@@ -393,9 +416,33 @@ class _AnalyticsOverviewMixin:
 
         return (pathlib.Path(__file__).resolve().parents[1] / "admin_dashboard" / "dist").resolve()
 
+    @staticmethod
+    def _dashboard_runtime_script(runtime_config: dict[str, Any]) -> str:
+        runtime_json = json.dumps(runtime_config, separators=(",", ":"), ensure_ascii=False)
+        return (
+            "<script>"
+            f"window.__TWITCH_DASHBOARD_RUNTIME__=Object.freeze({runtime_json});"
+            "</script>"
+        )
+
+    @classmethod
+    def _inject_dashboard_runtime_config(
+        cls,
+        html: str,
+        *,
+        runtime_config: dict[str, Any],
+        asset_prefix: str | None = None,
+    ) -> str:
+        rendered_html = html
+        if asset_prefix and asset_prefix != "/twitch/dashboard-v2/":
+            rendered_html = rendered_html.replace("/twitch/dashboard-v2/", asset_prefix)
+        script = cls._dashboard_runtime_script(runtime_config)
+        return rendered_html.replace("</head>", f"{script}\n  </head>", 1)
+
     async def _serve_demo_dashboard(self, request: web.Request) -> web.Response:
         """Serve the demo dashboard HTML without authentication."""
         import pathlib
+        from .demo_data import ALLOWED_DEMO_PROFILES, DEFAULT_DEMO_PROFILE
 
         dist_path = pathlib.Path(__file__).parent / "dashboard_v2" / "dist" / "index.html"
         if not dist_path.exists():
@@ -404,43 +451,17 @@ class _AnalyticsOverviewMixin:
                 status=404,
             )
         html = dist_path.read_text(encoding="utf-8")
-        # Keep demo assets on a dedicated public path so dashboard-v2 auth
-        # rules cannot interfere with demo rendering.
-        html = html.replace("/twitch/dashboard-v2/", "/twitch/demo/dashboard-v2/")
-        # Inject demo config + fetch interceptor before the app boots.
-        # The built JS has the API base hardcoded as "/twitch/api/v2", so we
-        # intercept fetch() to transparently rewrite those calls to the public
-        # demo endpoints at "/twitch/demo/api/v2".
-        inject = (
-            "<script>"
-            "window.__DEMO_MODE__=true;"
-            'window.__DEMO_STREAMER__="deadlock_de_demo";'
-            "(function(){"
-            'var INTERNAL_PREFIX="/twitch/api/v2/";'
-            'var DEMO_PREFIX="/twitch/demo/api/v2/";'
-            "var _f=window.fetch;"
-            "function _rewriteUrl(raw){"
-            "if(raw==null){return raw;}"
-            "var s=String(raw);"
-            "var abs;"
-            "try{abs=new URL(s,window.location.origin);}catch(_){return raw;}"
-            'if(abs.origin!==window.location.origin||abs.pathname.indexOf(INTERNAL_PREFIX)!==0){return raw;}'
-            'abs.pathname=DEMO_PREFIX+abs.pathname.slice(INTERNAL_PREFIX.length);'
-            "return abs.toString();"
-            "}"
-            "window.fetch=function(u,o){"
-            "if(typeof Request!==\"undefined\"&&u instanceof Request){"
-            "var rewrittenReq=_rewriteUrl(u.url);"
-            "if(rewrittenReq!==u.url){return _f.call(this,new Request(rewrittenReq,u),o);}"
-            "return _f.call(this,u,o);"
-            "}"
-            "var rewritten=_rewriteUrl(u);"
-            "return _f.call(this,rewritten,o);"
-            "};"
-            "})();"
-            "</script>"
+        runtime_config = {
+            "apiBase": "/twitch/demo/api/v2",
+            "demoMode": True,
+            "allowedDemoProfiles": list(ALLOWED_DEMO_PROFILES),
+            "defaultDemoProfile": DEFAULT_DEMO_PROFILE,
+        }
+        html = self._inject_dashboard_runtime_config(
+            html,
+            runtime_config=runtime_config,
+            asset_prefix="/twitch/demo/dashboard-v2/",
         )
-        html = html.replace("</head>", f"{inject}\n  </head>", 1)
         return web.Response(text=html, content_type="text/html", charset="utf-8")
 
     async def _serve_dashboard_v2(self, request: web.Request) -> web.Response:
@@ -577,7 +598,16 @@ class _AnalyticsOverviewMixin:
 
         dist_path = pathlib.Path(__file__).parent / "dashboard_v2" / "dist" / "index.html"
         if dist_path.exists():
-            return web.FileResponse(dist_path)
+            html = dist_path.read_text(encoding="utf-8")
+            html = self._inject_dashboard_runtime_config(
+                html,
+                runtime_config={
+                    "apiBase": "/twitch/api/v2",
+                    "demoMode": False,
+                    "allowedDemoProfiles": [],
+                },
+            )
+            return web.Response(text=html, content_type="text/html", charset="utf-8")
         return web.Response(
             text="Dashboard not built. Run npm run build in dashboard_v2/", status=404
         )

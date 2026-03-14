@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { useQuery } from '@tanstack/react-query';
 import {
+  buildApiUrl,
   fetchInternalHome,
   type InternalHomeActionEntry,
   type InternalHomeChangelogEntry,
@@ -91,12 +92,14 @@ function getPartnerToken(): string | null {
 }
 
 async function fetchInternalHomeExtras(streamer?: string | null): Promise<RawInternalHomeExtras> {
-  const url = new URL('/twitch/api/v2/internal-home', window.location.origin);
+  const params: Record<string, string> = {};
+  if (streamer) params.streamer = streamer;
   const token = getPartnerToken();
-  if (token) url.searchParams.set('partner_token', token);
-  if (streamer) url.searchParams.set('streamer', streamer);
+  if (token) params.partner_token = token;
 
-  const res = await fetch(url.toString(), { headers: { Accept: 'application/json' } });
+  const res = await fetch(buildApiUrl('/internal-home', params), {
+    headers: { Accept: 'application/json' },
+  });
   if (!res.ok) return {};
   const raw = await res.json();
   return {

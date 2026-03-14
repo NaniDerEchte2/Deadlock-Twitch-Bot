@@ -22,6 +22,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useAuthStatus } from '@/hooks/useAnalytics';
 import { fetchAIAnalysis, fetchAIHistory } from '@/api/client';
 import type { AIAnalysisResult, AIAnalysisPoint, AIHistoryEntry, TimeRange } from '@/types/analytics';
+import { dashboardRuntimeConfig, resolveEffectiveDemoMode } from '@/runtimeConfig';
 
 interface AIAnalysisProps {
   streamer: string | null;
@@ -72,13 +73,18 @@ export function AIAnalysis({ streamer, days }: AIAnalysisProps) {
   const [expandedPoint, setExpandedPoint] = useState<number | null>(null);
   const [gameFilter, setGameFilter] = useState<GameFilter>('all');
 
+  const isDemoMode = resolveEffectiveDemoMode({
+    pathname: window.location.pathname,
+    runtimeConfig: dashboardRuntimeConfig,
+  });
   const isAdmin = authStatus?.isAdmin || authStatus?.isLocalhost;
+  const canUseAI = isDemoMode || isAdmin;
   const analysisInProgress = useRef(false);
 
   const { data: history = [], refetch: refetchHistory } = useQuery<AIHistoryEntry[]>({
     queryKey: ['ai-history', streamer],
     queryFn: () => fetchAIHistory(streamer!, 20),
-    enabled: isAdmin && !!streamer,
+    enabled: canUseAI && !!streamer,
     staleTime: 0,
   });
 
@@ -90,7 +96,7 @@ export function AIAnalysis({ streamer, days }: AIAnalysisProps) {
     );
   }
 
-  if (!isAdmin) {
+  if (!canUseAI) {
     return (
       <div className="flex flex-col items-center justify-center h-80 gap-5">
         <div className="relative">
@@ -226,7 +232,7 @@ export function AIAnalysis({ streamer, days }: AIAnalysisProps) {
                 className="flex items-center gap-1.5 px-3 py-1 text-xs text-text-secondary bg-background/60 rounded-full border border-border"
               >
                 <Icon className="w-3 h-3" />
-                {label}
+                {label === 'Nur für dich sichtbar' && isDemoMode ? 'Snapshot-basiert' : label}
               </span>
             ))}
           </div>

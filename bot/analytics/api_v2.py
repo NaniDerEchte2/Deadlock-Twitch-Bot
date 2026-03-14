@@ -2631,6 +2631,7 @@ class AnalyticsV2Mixin(
                 "authenticated": is_authenticated,
                 "level": auth_level,
                 "authLevel": auth_level,
+                "demoMode": False,
                 "isAdmin": auth_level in ("localhost", "admin"),
                 "isLocalhost": auth_level == "localhost",
                 "canViewAllStreamers": can_view_all_streamers,

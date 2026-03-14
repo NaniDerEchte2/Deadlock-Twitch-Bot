@@ -8,6 +8,7 @@ All data is synthetic and does not reflect any real streamer.
 
 from __future__ import annotations
 
+import copy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -2152,6 +2153,380 @@ def get_viewer_segments() -> dict[str, Any]:
     }
 
 
+def _profile_viewer_pool(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    base = _all_demo_viewers()
+    target = max(24, int(spec.get("viewer_population_target", len(base)) or len(base)))
+    session_factor = max(0.35, float(spec.get("activity_factor", 1.0) or 1.0))
+    chat_factor = max(0.0, float(spec.get("chat_factor", 1.0) or 1.0))
+    other_factor = max(0.35, float(spec.get("other_channels_factor", 1.0) or 1.0))
+
+    adjusted: list[dict[str, Any]] = []
+    for index, viewer in enumerate(base):
+        login = str(viewer["login"])
+        last_seen_days = int(viewer["daysSinceLastSeen"])
+        session_bias = 0.86 + (index % 5) * 0.05
+        message_bias = 0.80 + (index % 7) * 0.04
+        total_sessions = max(1, int(round(float(viewer["totalSessions"]) * session_factor * session_bias)))
+        if viewer["isLurker"]:
+            total_messages = 0
+        else:
+            total_messages = max(
+                0,
+                int(round(float(viewer["totalMessages"]) * chat_factor * message_bias)),
+            )
+        other_channels = max(0, int(round(float(viewer["otherChannels"]) * other_factor)))
+        first_seen_days = min(360, last_seen_days + 24 + (index * 9) % 210)
+        adjusted.append(
+            _make_viewer_entry(
+                login=login,
+                total_sessions=total_sessions,
+                total_messages=total_messages,
+                first_seen_days=first_seen_days,
+                last_seen_days=last_seen_days,
+                other_channels=other_channels,
+            )
+        )
+
+    if target <= len(adjusted):
+        return adjusted[:target]
+
+    prefix = str(spec.get("login", "demo"))[:3]
+    out = list(adjusted)
+    clone_index = 0
+    while len(out) < target:
+        source = adjusted[clone_index % len(adjusted)]
+        multiplier = 0.62 + (clone_index % 6) * 0.08
+        last_seen_days = (int(source["daysSinceLastSeen"]) + clone_index * 3) % 58
+        total_sessions = max(1, int(round(float(source["totalSessions"]) * multiplier)))
+        if source["isLurker"]:
+            total_messages = 0
+        else:
+            total_messages = max(0, int(round(float(source["totalMessages"]) * multiplier)))
+        other_channels = max(
+            0,
+            int(round(float(source["otherChannels"]) * (0.9 + (clone_index % 3) * 0.15))),
+        )
+        first_seen_days = min(360, last_seen_days + 18 + (clone_index * 11) % 210)
+        out.append(
+            _make_viewer_entry(
+                login=f"{source['login']}_{prefix}{clone_index + 1:03d}",
+                total_sessions=total_sessions,
+                total_messages=total_messages,
+                first_seen_days=first_seen_days,
+                last_seen_days=last_seen_days,
+                other_channels=other_channels,
+            )
+        )
+        clone_index += 1
+    return out
+
+
+def build_demo_viewer_directory(
+    spec: dict[str, Any],
+    *,
+    sort: str = "sessions",
+    order: str = "desc",
+    filter_type: str = "all",
+    search: str = "",
+    page: int = 1,
+    per_page: int = 50,
+) -> dict[str, Any]:
+    page = max(1, int(page))
+    per_page = min(100, max(10, int(per_page)))
+    search = (search or "").strip().lower()
+
+    viewers = _profile_viewer_pool(spec)
+    total_viewers = len(viewers)
+    total_active = sum(1 for v in viewers if v["daysSinceLastSeen"] <= 14)
+    total_lurkers = sum(1 for v in viewers if v["isLurker"])
+    total_exclusive = sum(1 for v in viewers if v["otherChannels"] == 0)
+    total_shared = total_viewers - total_exclusive
+    avg_sessions = (
+        round(sum(v["totalSessions"] for v in viewers) / total_viewers, 1)
+        if total_viewers
+        else 0
+    )
+    avg_other = (
+        round(sum(v["otherChannels"] for v in viewers) / total_viewers, 1)
+        if total_viewers
+        else 0
+    )
+
+    filtered = viewers
+    if filter_type == "active":
+        filtered = [v for v in filtered if v["daysSinceLastSeen"] <= 14]
+    elif filter_type == "lurker":
+        filtered = [v for v in filtered if v["isLurker"]]
+    elif filter_type == "exclusive":
+        filtered = [v for v in filtered if v["otherChannels"] == 0]
+    elif filter_type == "shared":
+        filtered = [v for v in filtered if v["otherChannels"] > 0]
+    elif filter_type == "new":
+        filtered = [v for v in filtered if v["category"] == "new"]
+    elif filter_type == "churned":
+        filtered = [v for v in filtered if v["daysSinceLastSeen"] > 30]
+
+    if search:
+        filtered = [v for v in filtered if search in str(v["login"]).lower()]
+
+    sort_map = {
+        "sessions": "totalSessions",
+        "messages": "totalMessages",
+        "last_seen": "daysSinceLastSeen",
+        "other_channels": "otherChannels",
+        "first_seen": "firstSeen",
+    }
+    sort_key = sort_map.get(sort, "totalSessions")
+    reverse = order == "desc"
+    if sort == "last_seen":
+        reverse = order == "asc"
+    filtered = sorted(filtered, key=lambda item: item.get(sort_key, 0), reverse=reverse)
+
+    start = (page - 1) * per_page
+    end = start + per_page
+    return {
+        "viewers": filtered[start:end],
+        "total": len(filtered),
+        "page": page,
+        "perPage": per_page,
+        "summary": {
+            "totalViewers": total_viewers,
+            "activeViewers": total_active,
+            "lurkers": total_lurkers,
+            "exclusiveViewers": total_exclusive,
+            "sharedViewers": total_shared,
+            "avgSessionsPerViewer": avg_sessions,
+            "avgOtherChannels": avg_other,
+        },
+    }
+
+
+def _fallback_viewer_for_profile(spec: dict[str, Any], login: str) -> dict[str, Any]:
+    seed = _checksum(login)
+    session_factor = max(0.35, float(spec.get("activity_factor", 1.0) or 1.0))
+    chat_factor = max(0.0, float(spec.get("chat_factor", 1.0) or 1.0))
+    other_factor = max(0.35, float(spec.get("other_channels_factor", 1.0) or 1.0))
+    total_sessions = max(1, int(round((4 + seed % 18) * session_factor)))
+    total_messages = 0 if seed % 7 == 0 else int(round(total_sessions * (3 + seed % 13) * chat_factor))
+    return _make_viewer_entry(
+        login=login,
+        total_sessions=total_sessions,
+        total_messages=total_messages,
+        first_seen_days=70 + (seed % 220),
+        last_seen_days=seed % 21,
+        other_channels=max(0, int(round((seed % 4) * other_factor))),
+    )
+
+
+def build_demo_viewer_detail(spec: dict[str, Any], login: str) -> dict[str, Any]:
+    viewer_pool = _profile_viewer_pool(spec)
+    viewer = next(
+        (item for item in viewer_pool if str(item["login"]).lower() == login.strip().lower()),
+        _fallback_viewer_for_profile(spec, login.strip().lower() or "unknown_viewer"),
+    )
+    seed = _checksum(str(viewer["login"]))
+
+    activity: list[dict[str, Any]] = []
+    for idx in range(30):
+        days_ago = (30 - idx) * 3
+        sessions = 1 if (idx + seed) % 4 != 0 else 0
+        if viewer["totalSessions"] >= 20 and idx % 5 == 0:
+            sessions += 1
+        if viewer["isLurker"]:
+            messages = 0
+        else:
+            drift = ((seed // 3 + idx * 7) % 9) - 2
+            base_msgs = max(2.0, float(viewer["avgMessagesPerSession"]) * 0.65)
+            messages = max(0, int(sessions * base_msgs + drift))
+        activity.append({"date": _date(days_ago), "sessions": sessions, "messages": messages})
+
+    cross_channel: list[dict[str, Any]] = []
+    for i, channel in enumerate(viewer["topOtherChannels"][:6]):
+        sessions = max(1, int(viewer["totalSessions"] * (0.45 - 0.06 * i)))
+        if viewer["isLurker"]:
+            messages = 0
+        else:
+            messages = int(
+                sessions
+                * max(1.4, float(viewer["avgMessagesPerSession"]) * (0.75 - 0.08 * i))
+            )
+        overlap = "before" if i % 3 == 0 else ("after" if i % 3 == 1 else "unknown")
+        cross_channel.append(
+            {
+                "streamer": channel,
+                "sessions": sessions,
+                "messages": max(0, messages),
+                "firstSeen": _viewer_timestamp(
+                    min(360, viewer["daysSinceLastSeen"] + 90 + i * 9), hour=18
+                ),
+                "lastSeen": _viewer_timestamp(
+                    min(60, viewer["daysSinceLastSeen"] + i * 4), hour=20
+                ),
+                "overlap": overlap,
+            }
+        )
+
+    base_hour = 16 + (seed % 7)
+    peak_hours = sorted(
+        {
+            base_hour % 24,
+            (base_hour + 2 + seed % 3) % 24,
+            (base_hour + 5) % 24,
+        }
+    )
+    weekday_names = [
+        "Sonntag",
+        "Montag",
+        "Dienstag",
+        "Mittwoch",
+        "Donnerstag",
+        "Freitag",
+        "Samstag",
+    ]
+    most_active_day = weekday_names[seed % 7]
+    trend = "insufficient_data" if viewer["totalSessions"] < 4 else ("increasing", "decreasing", "stable")[seed % 3]
+
+    payload: dict[str, Any] = {
+        "login": viewer["login"],
+        "overview": {
+            "totalSessions": viewer["totalSessions"],
+            "totalMessages": viewer["totalMessages"],
+            "firstSeen": viewer["firstSeen"],
+            "lastSeen": viewer["lastSeen"],
+            "category": viewer["category"],
+            "isLurker": viewer["isLurker"],
+        },
+        "activityTimeline": activity,
+        "crossChannelPresence": cross_channel,
+        "chatPatterns": {
+            "peakHours": peak_hours,
+            "avgMessagesPerSession": viewer["avgMessagesPerSession"],
+            "mostActiveDay": most_active_day,
+            "messagesTrend": trend,
+        },
+    }
+    if not viewer["isLurker"]:
+        base = max(3, int(float(viewer["avgMessagesPerSession"])))
+        distribution = {
+            "Game-Related": base * 3 + seed % 12,
+            "Reaction": base * 2 + (seed // 2) % 9,
+            "Question": base + seed % 7,
+            "Greeting": base // 2 + 2 + seed % 5,
+            "Engagement": base * 2 + (seed // 5) % 8,
+            "Command": base + (seed // 7) % 6,
+            "Other": max(1, base // 2 + seed % 4),
+        }
+        payload["personality"] = {
+            "primary": max(distribution, key=distribution.get),
+            "distribution": distribution,
+        }
+    return payload
+
+
+def build_demo_viewer_segments(spec: dict[str, Any]) -> dict[str, Any]:
+    viewers = _profile_viewer_pool(spec)
+    total = len(viewers)
+    segment_names = ("dedicated", "regular", "casual", "lurker", "new")
+    buckets: dict[str, list[dict[str, Any]]] = {name: [] for name in segment_names}
+    for viewer in viewers:
+        cat = str(viewer["category"])
+        if cat not in buckets:
+            cat = "casual"
+        buckets[cat].append(viewer)
+
+    segments: dict[str, Any] = {}
+    for name in segment_names:
+        chunk = buckets[name]
+        count = len(chunk)
+        segments[name] = {
+            "count": count,
+            "pct": round((count / total) * 100, 1) if total else 0,
+            "avgMessages": round(sum(v["totalMessages"] for v in chunk) / max(1, count), 1) if count else 0,
+            "avgSessions": round(sum(v["totalSessions"] for v in chunk) / max(1, count), 1) if count else 0,
+        }
+
+    at_risk = []
+    recently_churned = 0
+    for viewer in viewers:
+        engaged = viewer["totalSessions"] >= 3 and viewer["totalMessages"] > 0
+        last_seen = viewer["daysSinceLastSeen"]
+        if engaged and 14 < last_seen <= 45:
+            at_risk.append(
+                {
+                    "login": viewer["login"],
+                    "sessions": viewer["totalSessions"],
+                    "messages": viewer["totalMessages"],
+                    "daysSinceLastSeen": last_seen,
+                    "category": viewer["category"],
+                    "recentlySeenAt": viewer["topOtherChannels"][:2],
+                }
+            )
+        elif engaged and last_seen > 45:
+            recently_churned += 1
+    at_risk.sort(key=lambda v: (v["sessions"] * 2 + v["messages"]), reverse=True)
+
+    exclusive = sum(1 for v in viewers if v["otherChannels"] == 0)
+    avg_other = round(sum(v["otherChannels"] for v in viewers) / max(1, total), 1)
+    top_shared_counts: dict[str, int] = {}
+    for viewer in viewers:
+        for channel in viewer["topOtherChannels"][:3]:
+            top_shared_counts[channel] = top_shared_counts.get(channel, 0) + 1
+    top_shared = sorted(top_shared_counts.items(), key=lambda item: item[1], reverse=True)[:10]
+    top_shared_payload = []
+    for i, (channel, count) in enumerate(top_shared):
+        direction = "bidirectional" if i < 3 else ("outgoing" if i % 2 == 0 else "incoming")
+        top_shared_payload.append(
+            {"streamer": channel, "sharedCount": count, "direction": direction}
+        )
+
+    return {
+        "segments": segments,
+        "churnRisk": {
+            "atRisk": len(at_risk),
+            "recentlyChurned": recently_churned,
+            "atRiskViewers": at_risk[:20],
+        },
+        "crossChannelStats": {
+            "exclusiveViewersPct": round((exclusive / total) * 100, 1) if total else 0,
+            "avgOtherChannels": avg_other,
+            "topSharedChannels": top_shared_payload,
+        },
+    }
+
+
+def build_demo_viewer_profiles(spec: dict[str, Any]) -> dict[str, Any]:
+    viewers = _profile_viewer_pool(spec)
+    exclusive = sum(1 for v in viewers if v["otherChannels"] == 0)
+    explorer = sum(1 for v in viewers if v["otherChannels"] >= 5)
+    loyal_multi = sum(
+        1
+        for v in viewers
+        if not v["isLurker"] and v["otherChannels"] in {2, 3, 4} and v["totalSessions"] >= 8
+    )
+    passive = sum(1 for v in viewers if v["isLurker"])
+    casual = max(0, len(viewers) - exclusive - loyal_multi - explorer - passive)
+    distribution: dict[int, int] = {}
+    for viewer in viewers:
+        bucket = max(1, int(viewer["otherChannels"]) + 1)
+        distribution[bucket] = distribution.get(bucket, 0) + 1
+
+    return {
+        "dataAvailable": True,
+        "profiles": {
+            "exclusive": exclusive,
+            "loyalMulti": loyal_multi,
+            "casual": casual,
+            "explorer": explorer,
+            "passive": passive,
+            "total": len(viewers),
+        },
+        "exclusivityDistribution": [
+            {"streamerCount": count, "viewerCount": distribution[count]}
+            for count in sorted(distribution)
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Labor / Experimental demo data
 # ---------------------------------------------------------------------------
@@ -2324,3 +2699,844 @@ def get_exp_growth_curves(days: int = 30) -> list[dict[str, Any]]:
             )
     out.sort(key=lambda r: (r["game"], r["minuteFromStart"]))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Multi-profile demo fixture layer
+# ---------------------------------------------------------------------------
+
+DEMO_FIXTURE_VERSION = "earlysalty-snapshot-2026-03-v2"
+DEFAULT_DEMO_PROFILE = "midcore_live"
+
+_DEMO_PROFILE_SPECS: dict[str, dict[str, Any]] = {
+    "smallquest_tv": {
+        "display_name": "SmallQuest TV",
+        "viewer_factor": 0.14,
+        "peak_factor": 0.20,
+        "chat_factor": 0.34,
+        "follower_factor": 0.21,
+        "monetization_factor": 0.18,
+        "ads_factor": 0.28,
+        "hype_factor": 0.35,
+        "activity_factor": 0.74,
+        "duration_factor": 0.88,
+        "other_channels_factor": 0.72,
+        "viewer_population_target": 34,
+        "retention_shift": 10.8,
+        "engagement_pct_factor": 1.28,
+        "rank_position": 10,
+        "category_rank": 43,
+        "category_total": 64,
+        "overview_scores": {
+            "total": 63,
+            "reach": 29,
+            "retention": 86,
+            "engagement": 79,
+            "growth": 36,
+            "monetization": 21,
+            "network": 41,
+        },
+        "findings": [
+            {"type": "pos", "title": "Enge Stamm-Community", "text": "Ein kleiner Kanal mit ueberdurchschnittlicher Bindung: ein grosser Teil der Viewer bleibt frueh aktiv und kommt wieder."},
+            {"type": "pos", "title": "Chat reagiert schnell", "text": "Interaktive Formate loesen trotz geringer Reichweite verhaeltnismaessig viele Chat-Signale aus."},
+            {"type": "warn", "title": "Zu wenig Discovery", "text": "Der Kanal lebt stark von Wiederkehrern, aber neue Zuschauerstroeme sind noch zu klein und unregelmaessig."},
+            {"type": "info", "title": "Jeder Slot zaehlt", "text": "Schon kleine Timing- oder Titel-Aenderungen sind in dieser Groessenordnung sofort messbar."},
+            {"type": "neg", "title": "Monetization fast nur eventgetrieben", "text": "Support-Spitzen entstehen punktuell, aber noch nicht als verlaesslicher wiederkehrender Kanal."},
+        ],
+        "actions": [
+            {"tag": "Reach", "text": "Plane pro Woche einen Discovery-Stream mit klarerem Hook fuer neue Viewer statt nur fuer die Stamm-Community.", "priority": "high"},
+            {"tag": "Consistency", "text": "Halte zwei feste Slots ueber mehrere Wochen konstant, damit der kleine Datensatz nicht verrauscht.", "priority": "high"},
+            {"tag": "Community", "text": "Bewahre die enge Interaktion, aber verpacke sie in einfachere, sofort erkennbare Titel-Hooks.", "priority": "medium"},
+        ],
+        "session_titles": [
+            "After Work Grind | Chat spielt mit",
+            "Small Stream, Big Calls | Ranked",
+            "Patch-Talk + Duo Queue",
+            "Road to 100 Avg | Community Night",
+        ],
+        "ai_focus": "kleiner Community-Kanal mit hoher Bindung",
+    },
+    "midcore_live": {
+        "display_name": "MidCore Live",
+        "viewer_factor": 1.00,
+        "peak_factor": 1.12,
+        "chat_factor": 1.04,
+        "follower_factor": 1.02,
+        "monetization_factor": 1.06,
+        "ads_factor": 1.05,
+        "hype_factor": 1.08,
+        "activity_factor": 1.02,
+        "duration_factor": 1.01,
+        "other_channels_factor": 1.00,
+        "viewer_population_target": 92,
+        "retention_shift": 2.1,
+        "engagement_pct_factor": 1.02,
+        "rank_position": 6,
+        "category_rank": 13,
+        "category_total": 64,
+        "overview_scores": {
+            "total": 77,
+            "reach": 71,
+            "retention": 74,
+            "engagement": 73,
+            "growth": 76,
+            "monetization": 61,
+            "network": 72,
+        },
+        "findings": [
+            {"type": "pos", "title": "Balanced Mid-Tier-Profil", "text": "Der Kanal liefert als mittlere Groessenklasse klare Signale in fast allen Tabs ohne Extreme zu verstecken."},
+            {"type": "pos", "title": "Stabiles Wachstum", "text": "Follower-, Viewer- und Chat-Signale wachsen breit genug, um neue Tests belastbar auszuwerten."},
+            {"type": "warn", "title": "Noch keine klare Dominanz", "text": "Gute Gesamtperformance, aber kein einzelner Hebel ist so stark, dass er den Kanal allein nach oben zieht."},
+            {"type": "info", "title": "Vergleichs- und Ranking-Tab sind aussagekraeftig", "text": "Die Groessenordnung liegt mitten im Wettbewerbsfeld und eignet sich gut fuer Benchmarks."},
+            {"type": "neg", "title": "Zu viele solide statt starke Slots", "text": "Viele Streams performen ordentlich, aber zu wenige erreichen wiederholt echte Ausreisser nach oben."},
+        ],
+        "actions": [
+            {"tag": "Growth", "text": "Waehle ein klares Hero-Format pro Woche und optimiere dieses aggressiver als den restlichen Schedule.", "priority": "high"},
+            {"tag": "Retention", "text": "Kuerze schwache Intros und verlagere den ersten echten Value-Moment in die ersten 10 Minuten.", "priority": "medium"},
+            {"tag": "Programming", "text": "Trenne stabile Core-Slots von Test-Slots klarer, damit Ursachen in den Daten sauber lesbar bleiben.", "priority": "medium"},
+        ],
+        "session_titles": [
+            "Prime Time Grind | Ranked + Review",
+            "Meta Check | Patch, Queue, Calls",
+            "Mid-Tier Push | Heute Peak knacken",
+            "Ranked Session | Fokus + Community",
+        ],
+        "ai_focus": "mittlerer Growth-Kanal mit ausgewogenen Signalen",
+    },
+    "megaarena_gg": {
+        "display_name": "MegaArena GG",
+        "viewer_factor": 7.60,
+        "peak_factor": 8.80,
+        "chat_factor": 5.20,
+        "follower_factor": 7.10,
+        "monetization_factor": 8.60,
+        "ads_factor": 2.20,
+        "hype_factor": 3.10,
+        "activity_factor": 1.58,
+        "duration_factor": 1.24,
+        "other_channels_factor": 1.34,
+        "viewer_population_target": 280,
+        "retention_shift": -8.7,
+        "engagement_pct_factor": 0.82,
+        "rank_position": 1,
+        "category_rank": 2,
+        "category_total": 64,
+        "overview_scores": {
+            "total": 89,
+            "reach": 97,
+            "retention": 61,
+            "engagement": 78,
+            "growth": 94,
+            "monetization": 96,
+            "network": 91,
+        },
+        "findings": [
+            {"type": "pos", "title": "Massive Reichweite", "text": "Das grosse Profil demonstriert klar, wie Peaks, Wachstum und Revenue auf einem deutlich groesseren Niveau zusammenspielen."},
+            {"type": "pos", "title": "Revenue-Engine aktiv", "text": "Bits, Subs, Hype und Ads sind nicht nur Begleitsignale, sondern ein eigener, stark sichtbarer Leistungskanal."},
+            {"type": "warn", "title": "Retention kostet auf Skalenniveau", "text": "Bei hoher Reichweite schlagen auch kleine Halteverluste sofort in absoluten Viewer-Zahlen durch."},
+            {"type": "info", "title": "Viewer- und Audience-Tabs zeigen echte Breite", "text": "Grosse Segmente, mehr Overlap und deutlich mehr Churn-/Lifecycle-Signale machen den Kanal sichtbar anders als Mid- und Small-Tier."},
+            {"type": "neg", "title": "Ops-Risiko in der Session-Mitte", "text": "Bei grossem Volumen werden schwache Mid-Stream-Passagen, zu lange Ads oder unklare Switches sofort teuer."},
+        ],
+        "actions": [
+            {"tag": "Retention", "text": "Zerlege lange Sessions in klar erkennbare Akte und setze den zweiten Peak bewusst statt zufaellig.", "priority": "high"},
+            {"tag": "Revenue", "text": "Optimiere Ads, Hype- und Gift-Momente auf minimale Reibung pro Zuschauerblock statt auf maximale Haeufigkeit.", "priority": "high"},
+            {"tag": "Operations", "text": "Plane Category- oder Segment-Wechsel so, dass Zuschauerstrom und Moderation nicht gleichzeitig kippen.", "priority": "medium"},
+        ],
+        "session_titles": [
+            "Mega Queue Night | Peak Push",
+            "Main Stage Grind | Ranked Marathon",
+            "Arena Callouts | Patch + Queue",
+            "Big Session Energy | Road to #1",
+        ],
+        "ai_focus": "grosser Reach- und Revenue-Kanal",
+    },
+}
+
+ALLOWED_DEMO_PROFILES: tuple[str, ...] = tuple(_DEMO_PROFILE_SPECS.keys())
+
+
+def _resolve_demo_profile(requested_streamer: str | None = None) -> dict[str, Any]:
+    normalized = str(requested_streamer or "").strip().lower()
+    login = normalized if normalized in _DEMO_PROFILE_SPECS else DEFAULT_DEMO_PROFILE
+    spec = dict(_DEMO_PROFILE_SPECS[login])
+    spec["login"] = login
+    return spec
+
+
+def build_demo_streamers() -> list[dict[str, Any]]:
+    return [{"login": login, "isPartner": True} for login in ALLOWED_DEMO_PROFILES]
+
+
+def build_demo_auth_status(*, streamer: str | None = None) -> dict[str, Any]:
+    spec = _resolve_demo_profile(streamer)
+    return {
+        "authenticated": True,
+        "level": "partner",
+        "authLevel": "partner",
+        "demoMode": True,
+        "isAdmin": False,
+        "isLocalhost": False,
+        "canViewAllStreamers": False,
+        "twitchLogin": spec["login"],
+        "displayName": spec["display_name"],
+        "plan": None,
+        "permissions": {
+            "viewAllStreamers": False,
+            "viewComparison": True,
+            "viewChatAnalytics": True,
+            "viewOverlap": True,
+        },
+    }
+
+
+def _profile_rank_scale(spec: dict[str, Any], metric: str, value: int | float) -> float:
+    if metric == "viewers":
+        return float(spec.get("viewer_factor", 1.0) or 1.0)
+    if metric == "growth":
+        return float(spec.get("follower_factor", 1.0) or 1.0)
+    if metric == "retention":
+        baseline = max(1.0, float(value))
+        adjusted = max(18.0, min(98.0, baseline + float(spec.get("retention_shift", 0.0) or 0.0)))
+        return adjusted / baseline
+    return float(spec.get("chat_factor", 1.0) or 1.0)
+
+
+def build_demo_rankings(spec: dict[str, Any], metric: str) -> list[dict[str, Any]]:
+    rows = _copy_payload(get_rankings(metric))
+    for row in rows:
+        if str(row.get("login", "")).lower() != DEMO_STREAMER:
+            continue
+        row["login"] = spec["login"]
+        scale = _profile_rank_scale(spec, metric, float(row.get("value", 0) or 0))
+        row["value"] = _round_like(float(row.get("value", 0) or 0), float(row.get("value", 0) or 0) * scale)
+        row["trendValue"] = _round_like(
+            float(row.get("trendValue", 0) or 0),
+            float(row.get("trendValue", 0) or 0) * max(0.6, min(scale, 3.0)),
+        )
+        break
+
+    rows.sort(key=lambda item: float(item.get("value", 0) or 0), reverse=True)
+    for index, row in enumerate(rows, start=1):
+        row["rank"] = index
+    return rows
+
+
+def _slice_limit(rows: list[Any], limit: int) -> list[Any]:
+    safe_limit = max(1, min(int(limit or 1), len(rows))) if rows else 0
+    return rows[:safe_limit] if safe_limit else []
+
+
+def _build_demo_category_rows(spec: dict[str, Any], days: int) -> list[dict[str, Any]]:
+    overview = build_demo_payload("overview", streamer=spec["login"], days=days)
+    summary = overview.get("summary", {}) if isinstance(overview, dict) else {}
+    total_streamers = max(12, int(spec.get("category_total", 64) or 64))
+    desired_rank = max(1, min(total_streamers, int(spec.get("category_rank", 1) or 1)))
+    target_avg = max(12, int(summary.get("avgViewers", 0) or 0))
+    target_peak = max(target_avg + 25, int(summary.get("peakViewers", 0) or 0))
+    peak_ratio = max(1.4, float(target_peak) / float(max(1, target_avg)))
+    up_step = max(3, int(round(max(4.0, target_avg * 0.06))))
+    down_slots = max(1, total_streamers - desired_rank)
+    down_step = max(1, int((target_avg - 12) / max(1, down_slots)))
+
+    rows: list[dict[str, Any]] = []
+    for rank in range(1, total_streamers + 1):
+        if rank < desired_rank:
+            avg_viewers = target_avg + up_step * (desired_rank - rank)
+        elif rank > desired_rank:
+            avg_viewers = max(12, target_avg - down_step * (rank - desired_rank))
+        else:
+            avg_viewers = target_avg
+
+        peak_viewers = max(avg_viewers + 25, int(round(avg_viewers * peak_ratio)))
+        is_partner = rank <= max(6, int(round(total_streamers * 0.58))) or rank % 5 in {1, 2}
+        rows.append(
+            {
+                "rank": rank,
+                "streamer": f"deadlock_rank_{rank:02d}",
+                "avgViewers": avg_viewers,
+                "peakViewers": peak_viewers,
+                "isPartner": is_partner,
+                "isYou": False,
+            }
+        )
+
+    target_row = rows[desired_rank - 1]
+    target_row["streamer"] = spec["login"]
+    target_row["avgViewers"] = target_avg
+    target_row["peakViewers"] = target_peak
+    target_row["isPartner"] = True
+    target_row["isYou"] = True
+    return rows
+
+
+def build_demo_category_leaderboard(
+    spec: dict[str, Any],
+    *,
+    days: int = 30,
+    limit: int = 25,
+    sort: str = "avg",
+    exclude_external: bool = False,
+) -> dict[str, Any]:
+    leaderboard = _build_demo_category_rows(spec, days)
+    if exclude_external:
+        leaderboard = [
+            row
+            for row in leaderboard
+            if row.get("isPartner") or int(row.get("avgViewers", 0) or 0) <= 100
+        ]
+
+    sort_key = "peakViewers" if str(sort).strip().lower() == "peak" else "avgViewers"
+    leaderboard.sort(key=lambda item: float(item.get(sort_key, 0) or 0), reverse=True)
+
+    your_rank = 1
+    for index, row in enumerate(leaderboard, start=1):
+        row["rank"] = index
+        if row.get("isYou"):
+            your_rank = index
+
+    limited_rows = _slice_limit(leaderboard, min(max(1, limit), len(leaderboard)))
+    return {
+        "leaderboard": limited_rows,
+        "totalStreamers": len(leaderboard),
+        "yourRank": your_rank,
+    }
+
+
+def build_demo_category_comparison(spec: dict[str, Any]) -> dict[str, Any]:
+    payload = _copy_payload(get_category_comparison())
+    your_stats = payload.get("yourStats", {})
+    percentiles = payload.get("percentiles", {})
+    your_stats["avgViewers"] = int(round(float(your_stats.get("avgViewers", 0) or 0) * float(spec.get("viewer_factor", 1.0))))
+    your_stats["peakViewers"] = int(round(float(your_stats.get("peakViewers", 0) or 0) * float(spec.get("peak_factor", 1.0))))
+    your_stats["retention10m"] = round(
+        max(15.0, min(98.0, float(your_stats.get("retention10m", 0) or 0) + float(spec.get("retention_shift", 0.0)))),
+        1,
+    )
+    your_stats["chatHealth"] = int(round(max(12.0, min(99.0, float(your_stats.get("chatHealth", 0) or 0) * float(spec.get("engagement_pct_factor", 1.0))))))
+    category_rank = int(spec.get("category_rank", payload.get("categoryRank", 1)))
+    category_total = int(spec.get("category_total", payload.get("categoryTotal", 58)))
+    rank_percentile = max(
+        1,
+        min(99, int(round(((category_total - category_rank) / max(1, category_total - 1)) * 100))),
+    )
+    percentiles["avgViewers"] = rank_percentile
+    percentiles["peakViewers"] = max(1, min(99, rank_percentile + 4))
+    percentiles["retention10m"] = max(10, min(99, int(round(float(percentiles.get("retention10m", 0) or 0) + float(spec.get("retention_shift", 0.0))))))
+    percentiles["chatHealth"] = max(10, min(99, int(round(float(percentiles.get("chatHealth", 0) or 0) * float(spec.get("engagement_pct_factor", 1.0))))))
+    payload["categoryRank"] = category_rank
+    payload["categoryTotal"] = category_total
+    return payload
+
+
+def build_demo_monetization(spec: dict[str, Any]) -> dict[str, Any]:
+    payload = _copy_payload(get_monetization())
+    ads_factor = float(spec.get("ads_factor", spec.get("activity_factor", 1.0)) or 1.0)
+    hype_factor = float(spec.get("hype_factor", spec.get("activity_factor", 1.0)) or 1.0)
+    money_factor = float(spec.get("monetization_factor", 1.0) or 1.0)
+
+    ads = payload.get("ads", {})
+    ads["total"] = int(round(float(ads.get("total", 0) or 0) * ads_factor))
+    ads["auto"] = int(round(float(ads.get("auto", 0) or 0) * ads_factor))
+    ads["manual"] = max(0, ads["total"] - ads["auto"])
+    ads["sessions_with_ads"] = int(round(float(ads.get("sessions_with_ads", 0) or 0) * float(spec.get("activity_factor", 1.0))))
+    ads["avg_viewer_drop_pct"] = round(
+        max(1.2, min(34.0, float(ads.get("avg_viewer_drop_pct", 0) or 0) - float(spec.get("retention_shift", 0.0)) * 0.35)),
+        1,
+    )
+
+    hype_train = payload.get("hype_train", {})
+    hype_train["total"] = int(round(float(hype_train.get("total", 0) or 0) * hype_factor))
+    hype_train["avg_level"] = round(max(1.0, min(5.0, float(hype_train.get("avg_level", 0) or 0) * (0.72 + hype_factor * 0.18))), 1)
+    hype_train["max_level"] = int(round(max(float(hype_train.get("avg_level", 0) or 0), float(hype_train.get("max_level", 0) or 0) * (0.7 + hype_factor * 0.15))))
+
+    bits = payload.get("bits", {})
+    bits["total"] = int(round(float(bits.get("total", 0) or 0) * money_factor))
+    bits["cheer_events"] = int(round(float(bits.get("cheer_events", 0) or 0) * max(0.4, money_factor * 0.52)))
+
+    subs = payload.get("subs", {})
+    subs["total_events"] = int(round(float(subs.get("total_events", 0) or 0) * money_factor))
+    subs["gifted"] = int(round(float(subs.get("gifted", 0) or 0) * max(0.5, money_factor * 0.78)))
+    return payload
+
+
+def _copy_payload(data: Any) -> Any:
+    return copy.deepcopy(data)
+
+
+def _replace_demo_strings(value: Any, spec: dict[str, Any]) -> Any:
+    if isinstance(value, dict):
+        return {key: _replace_demo_strings(item, spec) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_replace_demo_strings(item, spec) for item in value]
+    if isinstance(value, str):
+        return (
+            value.replace(DEMO_STREAMER, spec["login"])
+            .replace(DEMO_DISPLAY_NAME, spec["display_name"])
+        )
+    return value
+
+
+def _round_like(original: int | float, new_value: float) -> int | float:
+    if isinstance(original, bool):
+        return original
+    if isinstance(original, int):
+        return int(round(new_value))
+    return round(new_value, 1)
+
+
+def _scale_ratio(value: int | float, factor: float) -> int | float:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return max(0, int(round(float(value) * factor)))
+    return round(max(0.0, float(value) * factor), 1)
+
+
+def _transform_numeric(value: int | float, key: str, spec: dict[str, Any]) -> int | float:
+    lower = key.lower()
+    if lower.endswith("id") or lower in {
+        "id",
+        "raidid",
+        "rank",
+        "yourrank",
+        "weekday",
+        "month",
+        "year",
+        "hour",
+        "number",
+        "page",
+        "perpage",
+        "window_days",
+        "windowdays",
+        "days",
+        "minutefromstart",
+    }:
+        return value
+
+    if "retention" in lower:
+        adjusted = max(0.0, min(100.0, float(value) + float(spec["retention_shift"])))
+        return _round_like(value, adjusted)
+    if "dropoff" in lower:
+        adjusted = max(0.0, min(100.0, float(value) - float(spec["retention_shift"]) * 0.7))
+        return _round_like(value, adjusted)
+    if any(token in lower for token in ("pct", "percentage", "ratio", "rate", "share")):
+        upper_bound = 1.0 if float(value) <= 1.0 else 100.0
+        adjusted = max(0.0, min(upper_bound, float(value) * float(spec["engagement_pct_factor"])))
+        return _round_like(value, adjusted)
+    if any(token in lower for token in ("message", "chatter", "chat", "lurker", "interaction", "engagement")):
+        return _scale_ratio(value, float(spec["chat_factor"]))
+    if any(token in lower for token in ("gift", "bit", "sub", "ads", "hype", "monet", "revenue", "payout", "cheer")):
+        return _scale_ratio(value, float(spec["monetization_factor"]))
+    if any(token in lower for token in ("follower", "follow", "growth")):
+        return _scale_ratio(value, float(spec["follower_factor"]))
+    if any(token in lower for token in ("viewer", "peak", "hourswatched", "watchtime")):
+        factor = float(spec["peak_factor"]) if "peak" in lower else float(spec["viewer_factor"])
+        return _scale_ratio(value, factor)
+    if any(token in lower for token in ("duration", "airtime", "hours", "minute")):
+        return _scale_ratio(value, float(spec["duration_factor"]))
+    if any(token in lower for token in ("session", "streamcount", "sample", "count", "total", "streams", "gamesplayed")):
+        return _scale_ratio(value, float(spec["activity_factor"]))
+    if "score" in lower:
+        return _scale_ratio(value, 0.98 + (float(spec["viewer_factor"]) - 1.0) * 0.35)
+    return value
+
+
+def _transform_demo_payload(value: Any, spec: dict[str, Any], key: str = "") -> Any:
+    if isinstance(value, dict):
+        return {item_key: _transform_demo_payload(item, spec, item_key) for item_key, item in value.items()}
+    if isinstance(value, list):
+        return [_transform_demo_payload(item, spec, key) for item in value]
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        return _transform_numeric(value, key, spec)
+    if isinstance(value, str):
+        return _replace_demo_strings(value, spec)
+    return value
+
+
+def _apply_profile_overrides(kind: str, payload: Any, spec: dict[str, Any]) -> Any:
+    if kind == "rankings" and isinstance(payload, list):
+        for row in payload:
+            if isinstance(row, dict) and str(row.get("login", "")).lower() == spec["login"]:
+                row["rank"] = spec["rank_position"]
+                break
+        return payload
+
+    if not isinstance(payload, dict):
+        return payload
+
+    if kind == "overview":
+        payload["streamer"] = spec["login"]
+        payload["scores"] = dict(spec["overview_scores"])
+        payload["categoryRank"] = spec["category_rank"]
+        payload["categoryTotal"] = spec.get("category_total", 64)
+        payload["findings"] = _copy_payload(spec["findings"])
+        payload["actions"] = _copy_payload(spec["actions"])
+        for index, session in enumerate(payload.get("sessions", [])):
+            if isinstance(session, dict):
+                session["title"] = spec["session_titles"][index % len(spec["session_titles"])]
+    elif kind == "coaching":
+        payload["streamer"] = spec["login"]
+        title_analysis = payload.get("titleAnalysis")
+        if isinstance(title_analysis, dict):
+            for index, row in enumerate(title_analysis.get("yourTitles", [])):
+                if isinstance(row, dict):
+                    row["title"] = spec["session_titles"][index % len(spec["session_titles"])]
+    return payload
+
+
+def _base_demo_payload(
+    kind: str,
+    *,
+    days: int,
+    months: int,
+    limit: int,
+    metric: str,
+    login: str,
+    sort: str,
+    order: str,
+    filter_type: str,
+    search: str,
+    page: int,
+    per_page: int,
+    source: str,
+    exclude_external: bool,
+) -> Any:
+    if kind == "overview":
+        return get_overview(days)
+    if kind == "monthly-stats":
+        stats = get_monthly_stats()
+        return stats[-max(1, min(months, len(stats))):]
+    if kind == "weekly-stats":
+        return get_weekday_stats()
+    if kind == "hourly-heatmap":
+        return get_hourly_heatmap()
+    if kind == "calendar-heatmap":
+        return get_calendar_heatmap()
+    if kind == "chat-analytics":
+        return get_chat_analytics()
+    if kind == "viewer-overlap":
+        return _slice_limit(get_viewer_overlap(), limit)
+    if kind == "tag-analysis":
+        return _slice_limit(get_tag_analysis(), limit)
+    if kind == "tag-analysis-extended":
+        return _slice_limit(get_tag_analysis_extended(), limit)
+    if kind == "title-performance":
+        return _slice_limit(get_title_performance(), limit)
+    if kind == "rankings":
+        return _slice_limit(get_rankings(metric), limit)
+    if kind == "category-comparison":
+        return get_category_comparison()
+    if kind == "watch-time-distribution":
+        return get_watch_time_distribution()
+    if kind == "follower-funnel":
+        return get_follower_funnel()
+    if kind == "audience-insights":
+        return get_audience_insights()
+    if kind == "audience-demographics":
+        return get_audience_demographics()
+    if kind == "viewer-timeline":
+        return get_viewer_timeline(days)
+    if kind == "category-leaderboard":
+        return get_category_leaderboard()
+    if kind == "coaching":
+        return get_coaching()
+    if kind == "monetization":
+        return get_monetization()
+    if kind == "category-timings":
+        payload = get_category_timings()
+        if isinstance(payload, dict):
+          payload["source"] = source if source in {"category", "tracked"} else "category"
+          payload["windowDays"] = min(max(days, 7), 365)
+        return payload
+    if kind == "category-activity-series":
+        payload = get_category_activity_series()
+        if isinstance(payload, dict):
+            payload["windowDays"] = min(max(days, 7), 365)
+            payload["source"] = source if source in {"category", "tracked"} else "category"
+        return payload
+    if kind == "lurker-analysis":
+        return get_lurker_analysis()
+    if kind == "raid-retention":
+        return get_raid_retention()
+    if kind == "viewer-directory":
+        return get_viewer_directory(
+            sort=sort,
+            order=order,
+            filter_type=filter_type,
+            search=search,
+            page=page,
+            per_page=per_page,
+        )
+    if kind == "viewer-detail":
+        return get_viewer_detail(login)
+    if kind == "viewer-segments":
+        return get_viewer_segments()
+    if kind == "viewer-profiles":
+        return get_viewer_profiles()
+    if kind == "audience-sharing":
+        return get_audience_sharing()
+    if kind == "exp-overview":
+        return get_exp_overview(days)
+    if kind == "exp-game-breakdown":
+        return get_exp_game_breakdown(days)
+    if kind == "exp-game-transitions":
+        return get_exp_game_transitions(days)
+    if kind == "exp-growth-curves":
+        return get_exp_growth_curves(days)
+    raise KeyError(f"Unknown demo fixture kind: {kind}")
+
+
+def build_demo_payload(
+    kind: str,
+    *,
+    streamer: str | None = None,
+    days: int = 30,
+    months: int = 12,
+    limit: int = 20,
+    metric: str = "viewers",
+    login: str = "",
+    sort: str = "sessions",
+    order: str = "desc",
+    filter_type: str = "all",
+    search: str = "",
+    page: int = 1,
+    per_page: int = 50,
+    source: str = "category",
+    exclude_external: bool = False,
+) -> Any:
+    spec = _resolve_demo_profile(streamer)
+    if kind == "rankings":
+        return _slice_limit(build_demo_rankings(spec, metric), limit)
+    if kind == "category-leaderboard":
+        return build_demo_category_leaderboard(
+            spec,
+            days=days,
+            limit=limit,
+            sort=sort,
+            exclude_external=exclude_external,
+        )
+    if kind == "category-comparison":
+        return build_demo_category_comparison(spec)
+    if kind == "monetization":
+        return build_demo_monetization(spec)
+    if kind == "viewer-directory":
+        return build_demo_viewer_directory(
+            spec,
+            sort=sort,
+            order=order,
+            filter_type=filter_type,
+            search=search,
+            page=page,
+            per_page=per_page,
+        )
+    if kind == "viewer-detail":
+        return build_demo_viewer_detail(spec, login)
+    if kind == "viewer-segments":
+        return build_demo_viewer_segments(spec)
+    if kind == "viewer-profiles":
+        return build_demo_viewer_profiles(spec)
+
+    base_payload = _base_demo_payload(
+        kind,
+        days=days,
+        months=months,
+        limit=limit,
+        metric=metric,
+        login=login,
+        sort=sort,
+        order=order,
+        filter_type=filter_type,
+        search=search,
+        page=page,
+        per_page=per_page,
+        source=source,
+        exclude_external=exclude_external,
+    )
+    payload = _copy_payload(base_payload)
+    payload = _replace_demo_strings(payload, spec)
+    payload = _transform_demo_payload(payload, spec)
+    payload = _apply_profile_overrides(kind, payload, spec)
+    return payload
+
+
+def _demo_ai_points(
+    spec: dict[str, Any],
+    *,
+    days: int,
+    game_filter: str,
+    snapshot: dict[str, Any],
+) -> list[dict[str, Any]]:
+    avg_viewers = int(snapshot.get("avgViewers", 0) or 0)
+    peak_viewers = int(snapshot.get("peakViewers", 0) or 0)
+    followers = int(snapshot.get("followersGained", 0) or 0)
+    retention = round(float(snapshot.get("avgRetention10m", 0) or 0), 1)
+    dropoff = round(float(snapshot.get("avgDropoffPct", 0) or 0), 1)
+    chatters = int(snapshot.get("avgChatters", 0) or 0)
+    stream_count = int(snapshot.get("streamCount", 0) or 0)
+    mode_label = "Deadlock-Fokus" if game_filter == "deadlock" else "Gesamtprogramm"
+
+    profile_focus = {
+        "smallquest_tv": "Nutze die hohe Naehe zur Community, aber baue gezielt wiederholbare Discovery-Hooks ein.",
+        "midcore_live": "Wandle die solide Mid-Tier-Basis in einen klaren Hero-Slot mit wiederkehrenden Peak-Signalen um.",
+        "megaarena_gg": "Sichere Reichweite operativ ab, damit Scale nicht an Retention, Ads oder Session-Struktur verloren geht.",
+    }[spec["login"]]
+
+    return [
+        {
+            "number": 1,
+            "priority": "kritisch",
+            "title": "Opening-Fenster schaerfen",
+            "analysis": f"Im {mode_label} liegen {avg_viewers} Ø Viewer und {retention}% 10-Min-Retention nah genug zusammen, um den Einstieg klar zu optimieren. Der Peak von {peak_viewers} zeigt, dass Reichweite vorhanden ist, aber zu viel Momentum noch nach dem Start verschenkt wird.",
+            "action": "Baue in den ersten 8 Minuten einen klaren Hook, einen sichtbaren Session-Plan und den ersten messbaren Payoff ein.",
+            "expectedImpact": "Hoehere Fruehbindung und sauberere Conversion der Peak-Wellen in stabile Durchschnittswerte.",
+        },
+        {
+            "number": 2,
+            "priority": "kritisch",
+            "title": "Prime-Slot fokussieren",
+            "analysis": f"Mit {stream_count} Sessions auf {days} Tage ist genug Datenmasse da, um den besten Prime-Slot enger zu schneiden. {profile_focus}",
+            "action": "Lasse nur einen klaren Hauptslot unangetastet und fuehre Experimente isoliert an einem zweiten Wochentag durch.",
+            "expectedImpact": "Weniger Rauschen im Zeitplan und schneller sichtbare Ursache-Wirkung bei Slot-Aenderungen.",
+        },
+        {
+            "number": 3,
+            "priority": "kritisch",
+            "title": "Hook auf Zielsignal ausrichten",
+            "analysis": f"Der Kanal gewinnt im betrachteten Zeitraum {followers} Follower, aber die Differenz zwischen Peak ({peak_viewers}) und Chat-Tiefe ({chatters} aktive Chatter im Schnitt) zeigt ungenutztes Conversion-Potenzial.",
+            "action": "Definiere pro Format genau ein Zielsignal: Follows, aktive Chat-Teilnahme oder Session-Retention, und mappe Hook, CTA und Mid-Stream-Event darauf.",
+            "expectedImpact": "Staerkere Uebersetzung von Reichweite in wiederkehrende Community- und Growth-Signale.",
+        },
+        {
+            "number": 4,
+            "priority": "hoch",
+            "title": "Session-Mitte absichern",
+            "analysis": f"Die aktuelle Dropoff-Rate von {dropoff}% ist beherrschbar, aber sie zeigt, wo das Format nach dem ersten Peak an Klarheit verliert. Gerade bei guten Startwerten kostet eine diffuse Mittelphase unverhaeltnismaessig viel Durchschnittsreichweite.",
+            "action": "Plane zur Halbzeit ein wiederkehrendes Segment mit klarer Erwartung: Review, Community-Event, Challenge oder Switch.",
+            "expectedImpact": "Stabilerer Mittelteil und weniger abrupte Zuschauerabbrueche nach dem ersten Hoch.",
+        },
+        {
+            "number": 5,
+            "priority": "hoch",
+            "title": "Titel-Set reduzieren",
+            "analysis": "Die aktuellen Formate funktionieren, aber ihre Hooks sind noch zu breit gestreut. Ein kleineres, konsequent iteriertes Titel-Set macht Unterschiede schneller sichtbar und verbessert den Lerneffekt pro Session.",
+            "action": "Arbeite fuer 3 Wochen mit drei festen Titel-Frameworks und aendere pro Stream nur ein Element.",
+            "expectedImpact": "Messbarere CTR-/Retention-Learnings statt Bauchgefuehl ueber einzelne Ausreisser.",
+        },
+        {
+            "number": 6,
+            "priority": "hoch",
+            "title": "Chat-Momentum gezielt nutzen",
+            "analysis": f"{chatters} durchschnittliche aktive Chatter sind genug, um soziale Dynamik sichtbar zu steuern. Das Signal ist stark genug, dass Format- und CTA-Aenderungen kurzfristig im Chat lesbar werden.",
+            "action": "Setze pro Stream zwei klar definierte Interaktionspunkte mit Poll, Call oder Community-Entscheidung und tracke deren Effekt auf Viewer-Haltekurve.",
+            "expectedImpact": "Hoehere Beteiligung pro Viewer und bessere Lesbarkeit der wirksamen Community-Momente.",
+        },
+        {
+            "number": 7,
+            "priority": "hoch",
+            "title": "Netzwerk-Effekte planbar machen",
+            "analysis": "Das Netzwerk-Signal ist stark genug, um nicht nur Zufall zu sein. Reichweite und Wiederkehr profitieren am meisten, wenn Partner-Slots bewusst zur eigenen Formatstruktur passen.",
+            "action": "Raids und Cross-Community-Formate auf dieselben Themenfenster legen, in denen der eigene Kanal ohnehin ueberdurchschnittlich gut haelt.",
+            "expectedImpact": "Weniger Streuverlust bei externem Traffic und bessere Wiederkehrraten nach Partner-Kontakten.",
+        },
+        {
+            "number": 8,
+            "priority": "mittel",
+            "title": "Monetization nicht isoliert denken",
+            "analysis": "Support-Signale funktionieren am besten, wenn sie wie ein organischer Teil des Formats wirken. Einzelne Revenue-Peaks ohne Formatanker sind schwer wiederholbar.",
+            "action": "Koppele Support-Momente an wiederkehrende Segmente und formuliere ihren Nutzen fuer den Stream klarer aus.",
+            "expectedImpact": "Planbarere Monetization-Spitzen ohne Bruch im Zuschauererlebnis.",
+        },
+        {
+            "number": 9,
+            "priority": "mittel",
+            "title": "Viewer-Rueckkehr sichtbar machen",
+            "analysis": "Der Datensatz ist breit genug, um Wiederkehr nicht nur global, sondern pro Format zu lesen. Genau dort liegen die stabilsten Qualitaetssignale jenseits von Einzelpeaks.",
+            "action": "Vergleiche jede Woche zwei Formate ueber Rueckkehr, Chat-Aktivierung und Follower-pro-Stunde statt nur ueber Peak-Viewer.",
+            "expectedImpact": "Bessere Priorisierung der Formate, die nachhaltig tragen statt nur kurzfristig ziehen.",
+        },
+        {
+            "number": 10,
+            "priority": "mittel",
+            "title": "Experiment-Takt verkuerzen",
+            "analysis": "Der Kanal hat genug Kontrast in den Daten, um schneller zu lernen. Lange Iterationszyklen kosten vor allem dort, wo gute Signale bereits vorhanden sind.",
+            "action": "Lege einen 14-Tage-Rhythmus fuer kleine, dokumentierte Experimente fest und bewerte jedes davon ueber dieselben drei Kernmetriken.",
+            "expectedImpact": "Schnelleres Lernen mit weniger Zufall und saubereren Produktentscheidungen pro Format.",
+        },
+    ]
+
+
+def build_demo_ai_analysis(
+    *,
+    streamer: str | None = None,
+    days: int = 30,
+    game_filter: str = "all",
+) -> dict[str, Any]:
+    spec = _resolve_demo_profile(streamer)
+    overview = build_demo_payload("overview", streamer=spec["login"], days=days)
+    summary = dict(overview.get("summary", {}))
+    sessions = [
+        session for session in overview.get("sessions", []) if isinstance(session, dict)
+    ]
+    avg_dropoff = (
+        round(
+            sum(float(session.get("dropoffPct", 0) or 0) for session in sessions)
+            / max(1, len(sessions)),
+            1,
+        )
+        if sessions
+        else 18.0
+    )
+    stream_count = max(1, int(summary.get("streamCount", len(sessions)) or len(sessions) or 1))
+    analysis_id = 9000 + ALLOWED_DEMO_PROFILES.index(spec["login"]) * 100 + min(max(days, 7), 365)
+    if game_filter == "deadlock":
+        summary["streamCount"] = max(4, int(round(stream_count * 0.68)))
+        summary["totalAirtime"] = round(float(summary.get("totalAirtime", summary.get("totalHours", 0)) or 0) * 0.72, 1)
+        summary["avgViewers"] = int(round(float(summary.get("avgViewers", 0) or 0) * 1.06))
+        summary["peakViewers"] = int(round(float(summary.get("peakViewers", 0) or 0) * 1.08))
+        summary["followersGained"] = int(round(float(summary.get("followersGained", 0) or 0) * 0.76))
+        avg_dropoff = round(avg_dropoff * 0.92, 1)
+
+    snapshot_streams = max(1, int(summary.get("streamCount", stream_count) or stream_count))
+    snapshot = {
+        "streamCount": snapshot_streams,
+        "totalHours": round(float(summary.get("totalAirtime", summary.get("totalHours", 0)) or 0), 1),
+        "avgViewers": int(round(float(summary.get("avgViewers", 0) or 0))),
+        "peakViewers": int(round(float(summary.get("peakViewers", 0) or 0))),
+        "followersGained": int(round(float(summary.get("followersGained", 0) or 0))),
+        "avgRetention10m": round(float(summary.get("retention10m", 0) or 0), 1),
+        "avgDropoffPct": avg_dropoff,
+        "avgChatters": int(round(float(summary.get("uniqueChatters", 0) or 0) / snapshot_streams)),
+    }
+
+    points = _demo_ai_points(spec, days=days, game_filter=game_filter, snapshot=snapshot)
+    return {
+        "id": analysis_id,
+        "streamer": spec["login"],
+        "days": min(max(days, 7), 365),
+        "gameFilter": "deadlock" if game_filter == "deadlock" else "all",
+        "generatedAt": _viewer_timestamp(1 + ALLOWED_DEMO_PROFILES.index(spec["login"]) * 2, hour=11),
+        "points": points,
+        "dataSnapshot": snapshot,
+    }
+
+
+def build_demo_ai_history(*, streamer: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    spec = _resolve_demo_profile(streamer)
+    presets = (
+        (14, "deadlock", 2, 9),
+        (30, "all", 7, 11),
+        (90, "all", 19, 14),
+    )
+    out: list[dict[str, Any]] = []
+    for index, (days, game_filter, days_ago, hour) in enumerate(presets, start=1):
+        entry = build_demo_ai_analysis(streamer=spec["login"], days=days, game_filter=game_filter)
+        points = list(entry.get("points", []))
+        entry["id"] = 7000 + ALLOWED_DEMO_PROFILES.index(spec["login"]) * 100 + index
+        entry["generatedAt"] = _viewer_timestamp(days_ago, hour=hour)
+        entry["model"] = "claude-opus-4-6"
+        entry["kritischCount"] = sum(1 for point in points if point.get("priority") == "kritisch")
+        entry["hochCount"] = sum(1 for point in points if point.get("priority") == "hoch")
+        entry["mittelCount"] = sum(1 for point in points if point.get("priority") == "mittel")
+        out.append(entry)
+    out.sort(key=lambda item: str(item.get("generatedAt", "")), reverse=True)
+    return out[: max(1, min(limit, 50))]

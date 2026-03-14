@@ -7,6 +7,7 @@ interface PlanContextType {
   plan: PlanStatus | null;
   view: DashboardView;
   setView: (view: DashboardView) => void;
+  isDemoMode: boolean;
   isPreviewMode: boolean;
   canAccessTab: (tabId: TabId) => boolean;
   isTabLocked: (tabId: TabId) => boolean;
@@ -21,10 +22,11 @@ interface PlanProviderProps {
   plan: PlanStatus | null;
   isAdmin: boolean;
   isLocalhost: boolean;
+  isDemoMode: boolean;
 }
 
-export function PlanProvider({ children, plan, isAdmin, isLocalhost }: PlanProviderProps) {
-  const hasFullAccess = isAdmin || isLocalhost;
+export function PlanProvider({ children, plan, isAdmin, isLocalhost, isDemoMode }: PlanProviderProps) {
+  const hasFullAccess = isAdmin || isLocalhost || isDemoMode;
   const tier: PlanTier = hasFullAccess ? 'extended' : (plan?.tier ?? 'free');
   const [view, setView] = useState<DashboardView>(
     tier === 'extended' ? 'extended' : 'basic'
@@ -43,6 +45,7 @@ export function PlanProvider({ children, plan, isAdmin, isLocalhost }: PlanProvi
     plan,
     view,
     setView,
+    isDemoMode,
     isPreviewMode,
     canAccessTab: (tabId: TabId) => {
       if (hasFullAccess) return true;
@@ -58,7 +61,7 @@ export function PlanProvider({ children, plan, isAdmin, isLocalhost }: PlanProvi
       return !tierMeetsRequirement(tier, requiredTier);
     },
     hasFullAccess,
-  }), [tier, plan, view, isPreviewMode, hasFullAccess]);
+  }), [tier, plan, view, isDemoMode, isPreviewMode, hasFullAccess]);
 
   return <PlanContext.Provider value={value}>{children}</PlanContext.Provider>;
 }

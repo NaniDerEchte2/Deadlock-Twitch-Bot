@@ -43,8 +43,9 @@ import type {
   ExpGrowthCurve,
   AIAnalysisResult,
 } from '@/types/analytics';
+import { dashboardRuntimeConfig } from '@/runtimeConfig';
 
-const API_BASE = '/twitch/api/v2';
+const API_BASE = dashboardRuntimeConfig.apiBase;
 const INTERNAL_REDIRECT_PREFIX = '/twitch';
 const INTERNAL_HOME_LOGIN_FALLBACK = '/twitch/auth/login?next=%2Ftwitch%2Fdashboard';
 const INTERNAL_HOME_DISCORD_CONNECT_FALLBACK = '/twitch/auth/discord/login?next=%2Ftwitch%2Fdashboard';
@@ -136,7 +137,10 @@ function withPartnerHeaders(headers: HeadersInit = {}): Headers {
 }
 
 // Helper to build URL with params
-function buildUrl(endpoint: string, params: Record<string, string | number | boolean> = {}): string {
+export function buildApiUrl(
+  endpoint: string,
+  params: Record<string, string | number | boolean> = {}
+): string {
   const url = new URL(`${API_BASE}${endpoint}`, window.location.origin);
   const token = getPartnerToken();
   if (token) {
@@ -160,7 +164,7 @@ function getBrowserTimezone(): string {
 
 // Generic fetch wrapper
 async function fetchApi<T>(endpoint: string, params: Record<string, string | number | boolean> = {}, timeoutMs?: number): Promise<T> {
-  const url = buildUrl(endpoint, params);
+  const url = buildApiUrl(endpoint, params);
 
   const abortCtrl = timeoutMs ? new AbortController() : null;
   const timer = abortCtrl ? setTimeout(() => abortCtrl.abort(), timeoutMs!) : null;
@@ -305,6 +309,7 @@ export async function fetchStreamerList(): Promise<{ login: string; isPartner: b
 export interface AuthStatus {
   authenticated: boolean;
   level: 'localhost' | 'admin' | 'partner' | 'none';
+  demoMode: boolean;
   isAdmin: boolean;
   isLocalhost: boolean;
   canViewAllStreamers: boolean;
@@ -790,7 +795,7 @@ export interface CreateInternalHomeChangelogPayload {
 export async function createInternalHomeChangelogEntry(
   payload: CreateInternalHomeChangelogPayload
 ): Promise<InternalHomeChangelogEntry> {
-  const url = buildUrl('/internal-home/changelog');
+  const url = buildApiUrl('/internal-home/changelog');
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -1359,7 +1364,7 @@ export async function toggleAffiliate(
 }
 
 export async function fetchAffiliatePortal(): Promise<AffiliatePortalData> {
-  const url = buildUrl('/affiliate/portal');
+  const url = buildApiUrl('/affiliate/portal');
   const response = await fetch(url, {
     headers: withPartnerHeaders({ 'Accept': 'application/json' }),
   });
