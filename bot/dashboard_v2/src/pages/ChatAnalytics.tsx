@@ -34,6 +34,9 @@ interface ChatAnalyticsProps {
   days: TimeRange;
 }
 
+const CHAT_SOCIAL_GRAPH_ENABLED = false;
+const CHAT_PENETRATION_ENABLED = false;
+
 function RawChatStatusBanner({
   status,
   compact = false,
@@ -82,12 +85,14 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
 
   const { data: viewerProfilesData } = useViewerProfiles(streamer, days);
   const { data: coachingData } = useCoaching(streamer, days);
+  const hourlyChartGradientId = `hourly-chat-${useId().replace(/:/g, '')}`;
 
   // Chat Deep Analysis hooks
   const [selectedSessionId, setSelectedSessionId] = useState<number | undefined>(undefined);
   const { data: hypeData } = useChatHypeTimeline(streamer, selectedSessionId);
   const { data: contentData } = useChatContentAnalysis(streamer, days);
-  const { data: socialData } = useChatSocialGraph(streamer, days);
+  const socialGraphStreamer = CHAT_SOCIAL_GRAPH_ENABLED ? streamer : null;
+  const { data: socialData } = useChatSocialGraph(socialGraphStreamer, days);
 
   if (!streamer) {
     return (
@@ -119,7 +124,20 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
   const totalTrackedViewers = data.totalTrackedViewers ?? totalChatters;
   const firstTimeChatters = data.firstTimeChatters ?? 0;
   const returningChatters = data.returningChatters ?? Math.max(0, totalChatters - firstTimeChatters);
+  const returningTrackedViewers = data.returningTrackedViewers ?? returningChatters;
+  const coreLoyalViewers = data.coreLoyalViewers ?? 0;
+  const silentCoreLoyalViewers = data.silentCoreLoyalViewers ?? 0;
+  const coreLoyalViewerRate =
+    data.coreLoyalViewerRate ?? (totalTrackedViewers ? (coreLoyalViewers / totalTrackedViewers) * 100 : 0);
+  const loyaltySessionThreshold =
+    data.loyaltySessionThreshold ?? (days <= 7 ? 2 : days <= 30 ? 3 : days <= 90 ? 8 : 12);
   const messagesPer100ViewerMinutes = resolveMessagesPer100ViewerMinutes(data);
+  const messagesPer100ViewerMinutesPercentile = data.messagesPer100ViewerMinutesPercentile ?? null;
+  const messagesPer100ViewerMinutesMedian = data.messagesPer100ViewerMinutesMedian ?? null;
+  const messagesPer100ViewerMinutesBenchmarkSessions =
+    data.messagesPer100ViewerMinutesBenchmarkSessions ?? 0;
+  const messagesGaugeHasBenchmark =
+    messagesPer100ViewerMinutesPercentile !== null && messagesPer100ViewerMinutesBenchmarkSessions >= 3;
   const chatterReturnRate =
     data.chatterReturnRate ?? (totalChatters ? (returningChatters / totalChatters) * 100 : 0);
   const penetration = resolveChatPenetration(data);
@@ -129,12 +147,55 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
   const hourlyActivity = normalizeHourlyActivity(data.hourlyActivity);
   const hasHourlySamples = hourlyActivity.some((h) => h.count > 0);
   const hoursWithData = hourlyActivity.filter((h) => h.count > 0).length;
-  const maxHourlyCount = Math.max(1, ...hourlyActivity.map((h) => h.count));
+  const hourlyChartData = hourlyActivity.map((entry) => ({
+    ...entry,
+    label: `${entry.hour}:00`,
+  }));
+  const peakHour = hourlyActivity.reduce(
+    (best, entry) => (entry.count > best.count ? entry : best),
+    hourlyActivity[0] ?? { hour: 0, count: 0 }
+  );
   const dataMethod = resolveQualityMethod(data.dataQuality?.method, data.totalMessages > 0);
-
-  // Community loyalty state detection
   const noReturnHistory = chatterReturnRate === 0 && firstTimeChatters >= totalChatters && totalChatters > 0;
   const chattersApiInactive = interactionCoverage === 0 && totalTrackedViewers > 0;
+  const newViewerShare = totalChatters > 0 ? (firstTimeChatters / totalChatters) * 100 : 0;
+  const activeChattersShare = totalTrackedViewers > 0 ? (totalChatters / totalTrackedViewers) * 100 : 0;
+  const activeChattersDescription = totalTrackedViewers > 0
+    ? `${totalChatters.toLocaleString('de-DE')} von ${totalTrackedViewers.toLocaleString('de-DE')} getrackten Accounts haben im Zeitraum geschrieben.`
+    : 'Anteil der getrackten Chat-Accounts mit mindestens einer Nachricht im Zeitraum.';
+  const chatPenetrationGaugeValue =
+    chattersApiInactive && data.legacyInteractionActivePerAvgViewer != null
+      ? Math.min(100, data.legacyInteractionActivePerAvgViewer)
+      : interactionRate;
+  const messagesBenchmarkText = (() => {
+    if (messagesPer100ViewerMinutes === null) {
+      return 'Keine Viewer-Minuten im Zeitraum';
+    }
+    if (
+      messagesPer100ViewerMinutesPercentile !== null &&
+      messagesPer100ViewerMinutesMedian !== null &&
+      messagesPer100ViewerMinutesBenchmarkSessions >= 3
+    ) {
+      const rating =
+        messagesPer100ViewerMinutesPercentile >= 75
+          ? 'Uber deinem ublichen Niveau'
+          : messagesPer100ViewerMinutesPercentile >= 40
+            ? 'Im typischen Bereich'
+            : 'Unter deinem ublichen Niveau';
+      return `${rating} · Rohwert ${messagesPer100ViewerMinutes.toFixed(1)} Nachrichten pro 100 Viewer-Minuten · besser als ${messagesPer100ViewerMinutesPercentile.toFixed(0)}% deiner ${messagesPer100ViewerMinutesBenchmarkSessions} Streams`;
+    }
+    return messagesPer100ViewerMinutesBenchmarkSessions > 0
+      ? `Rohwert ${messagesPer100ViewerMinutes.toFixed(1)} Nachrichten pro 100 Viewer-Minuten · Eigenvergleich noch instabil (${messagesPer100ViewerMinutesBenchmarkSessions} Streams)`
+      : `Rohwert ${messagesPer100ViewerMinutes.toFixed(1)} Nachrichten pro 100 Viewer-Minuten · Noch keine Vergleichsbasis aus fruheren Streams`;
+  })();
+  const messagesBenchmarkFootnote =
+    data.viewerMinutes && data.viewerMinutes > 0
+      ? `Median: ${messagesPer100ViewerMinutesMedian?.toFixed(1) ?? '-'} · Basis: ${data.viewerMinutes.toFixed(0)} Viewer-Minuten`
+      : 'Keine Viewer-Minuten im Zeitraum';
+  const messagesGaugeProgress =
+    messagesGaugeHasBenchmark
+      ? Math.min(100, Math.max(0, messagesPer100ViewerMinutesPercentile))
+      : 0;
 
   return (
     <div className="space-y-6">
@@ -145,144 +206,138 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
           Datenqualität eingeschränkt: mindestens eine KPI basiert auf Low-Coverage/Fallback-Samples.
         </div>
       )}
-      {chattersApiInactive ? (
-        <div className="panel-card rounded-2xl p-4 text-sm flex items-start gap-3 text-text-secondary">
-          <Info className="w-4 h-4 text-primary shrink-0 mt-0.5" />
-          <div>
-            <span className="text-white font-medium">Chatters-API nicht aktiv</span>
-            <span className="ml-2">— Chat Penetration kann nicht berechnet werden. Daten stammen nur aus Chat-Nachrichten (kein passive Viewer Tracking).</span>
+      {CHAT_PENETRATION_ENABLED && (
+        chattersApiInactive ? (
+          <div className="panel-card rounded-2xl p-4 text-sm flex items-start gap-3 text-text-secondary">
+            <Info className="w-4 h-4 text-primary shrink-0 mt-0.5" />
+            <div>
+              <span className="text-white font-medium">Chatters-API nicht aktiv</span>
+              <span className="ml-2">— Chat Penetration kann nicht berechnet werden. Daten stammen nur aus Chat-Nachrichten (kein passive Viewer Tracking).</span>
+            </div>
           </div>
-        </div>
-      ) : !interactionRateReliable && totalTrackedViewers > 0 && (
-        <div className="panel-card rounded-2xl p-4 text-sm text-text-secondary">
-          Chat Penetration ist derzeit nicht belastbar: passive Samples oder Chatters-Coverage sind zu gering ({(interactionCoverage * 100).toFixed(1)}% Coverage).
-        </div>
+        ) : !interactionRateReliable && totalTrackedViewers > 0 && (
+          <div className="panel-card rounded-2xl p-4 text-sm text-text-secondary">
+            Chat Penetration ist derzeit nicht belastbar: passive Samples oder Chatters-Coverage sind zu gering ({(interactionCoverage * 100).toFixed(1)}% Coverage).
+          </div>
+        )
       )}
-
-      {/* Overview Stats - 4-column grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard
-          icon={<Users className="w-5 h-5" />}
-          label="Aktive Chatters"
-          value={totalChatters.toLocaleString('de-DE')}
-          subtext={`Getrackte Chat-Accounts: ${totalTrackedViewers.toLocaleString('de-DE')}`}
-          color="primary"
-        />
-        <StatCard
-          icon={<TrendingUp className="w-5 h-5" />}
-          label="Chat Penetration"
-          value={
-            chattersApiInactive
-              ? data.legacyInteractionActivePerAvgViewer != null
-                ? `${Math.min(100, data.legacyInteractionActivePerAvgViewer).toFixed(1)}%`
-                : 'N/A'
-              : interactionRateReliable && interactionRate !== null
-                ? `${interactionRate.toFixed(1)}%`
-                : 'Nicht belastbar'
-          }
-          subtext={
-            chattersApiInactive
-              ? data.legacyInteractionActivePerAvgViewer != null
-                ? 'Fallback: aktive Chatter / Ø Viewer (eingeschränkt)'
-                : 'Chatters-API nicht aktiv'
-              : `Coverage ${(interactionCoverage * 100).toFixed(1)}% · ${CHAT_AUDIENCE_TOOLTIP}`
-          }
-          color="accent"
-        />
-        <StatCard
-          icon={<MessageCircle className="w-5 h-5" />}
-          label="Messages pro 100 Viewer-Minuten"
-          value={
-            messagesPer100ViewerMinutes !== null
-              ? messagesPer100ViewerMinutes.toFixed(1)
-              : '-'
-          }
-          subtext={
-            data.viewerMinutes && data.viewerMinutes > 0
-              ? `Basis: ${data.viewerMinutes.toFixed(0)} Viewer-Minuten`
-              : 'Keine Viewer-Minuten im Zeitraum'
-          }
-          color="success"
-        />
-        <StatCard
-          icon={<Heart className="w-5 h-5" />}
-          label="Wiederkehrende Chatters"
-          value={returningChatters.toLocaleString('de-DE')}
-          subtext={`${chatterReturnRate.toFixed(1)}% Return Rate · Erstmalig: ${firstTimeChatters.toLocaleString('de-DE')}`}
-          color="warning"
-        />
-      </div>
 
       {/* Chatter Loyalty Distribution */}
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="panel-card rounded-2xl p-6"
+        className="panel-card rounded-2xl p-6 lg:px-7 lg:py-8 lg:min-h-[21rem] flex flex-col"
       >
         <div className="flex items-center gap-3 mb-6">
           <Heart className="w-6 h-6 text-primary" />
           <h2 className="text-xl font-bold text-white">Community-Treue</h2>
         </div>
 
-        {noReturnHistory ? (
-          <div className="flex items-center gap-3 p-4 rounded-xl bg-primary/10 border border-primary/20">
-            <Info className="w-5 h-5 text-primary shrink-0" />
-            <div>
-              <p className="text-white font-medium text-sm">Noch zu wenig Historie</p>
-              <p className="text-text-secondary text-sm mt-0.5">
-                Alle {totalChatters} Chatter wurden erstmalig gesehen. Sobald sie wiederkehren, werden Return-Rate und Stammzuschauer berechnet.
-              </p>
+        <div className="space-y-7 flex-1 flex flex-col justify-center">
+          {noReturnHistory && (
+            <div className="flex items-center gap-3 p-4 rounded-xl bg-primary/10 border border-primary/20">
+              <Info className="w-5 h-5 text-primary shrink-0" />
+              <div>
+                <p className="text-white font-medium text-sm">Noch zu wenig Historie</p>
+                <p className="text-text-secondary text-sm mt-0.5">
+                  Alle {totalChatters} Chatter wurden erstmalig gesehen. Sobald sie wiederkehren, werden Return-Rate und Stammzuschauer berechnet.
+                </p>
+              </div>
             </div>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          )}
+
+          <div
+            className={`grid grid-cols-1 sm:grid-cols-2 ${
+              CHAT_PENETRATION_ENABLED ? 'xl:grid-cols-6' : 'lg:grid-cols-5'
+            } gap-4 lg:gap-3 items-start justify-items-center`}
+          >
             <LoyaltyGauge
               label="Neue Zuschauer"
-              percentage={(firstTimeChatters / Math.max(1, totalChatters)) * 100}
+              percentage={newViewerShare}
               description="Chatten zum ersten Mal"
               startColor="var(--color-accent)"
               endColor="var(--color-primary)"
             />
-            {returningChatters > 0 ? (
+            <LoyaltyGauge
+              label="Stammzuschauer"
+              percentage={coreLoyalViewerRate}
+              valueText={`${coreLoyalViewerRate.toFixed(1)}%`}
+              description={
+                coreLoyalViewers > 0
+                  ? `${coreLoyalViewers.toLocaleString('de-DE')} von ${totalTrackedViewers.toLocaleString('de-DE')} getrackten Zuschauern · ${silentCoreLoyalViewers.toLocaleString('de-DE')} silent · ${loyaltySessionThreshold}+ Streams`
+                  : `Noch keine Stammzuschauer · ${loyaltySessionThreshold}+ Streams`
+              }
+              startColor="var(--color-success)"
+              endColor="var(--color-accent)"
+            />
+            {CHAT_PENETRATION_ENABLED && (
               <LoyaltyGauge
-                label="Stammzuschauer"
-                percentage={chatterReturnRate}
-                description="Kommen regelmäßig zurück"
-                startColor="var(--color-success)"
-                endColor="var(--color-accent)"
+                label="Chat Penetration"
+                percentage={chatPenetrationGaugeValue ?? 0}
+                description={
+                  chattersApiInactive
+                    ? 'Fallback-Metrik (eingeschränkt)'
+                    : interactionRateReliable
+                      ? 'Aktive Chatters / getrackte Chat-Accounts'
+                      : `Nicht belastbar (${(interactionCoverage * 100).toFixed(1)}% Coverage)`
+                }
+                startColor="var(--color-primary)"
+                endColor="var(--color-success)"
               />
-            ) : (
-              <div className="text-center">
-                <div className="relative w-32 h-32 mx-auto mb-3 flex items-center justify-center rounded-full border-4 border-border">
-                  <span className="text-text-secondary text-sm text-center px-2">Noch keine<br/>Stammzuschauer</span>
-                </div>
-                <div className="font-medium text-white">Stammzuschauer</div>
-                <div className="text-sm text-text-secondary">Kommen regelmäßig zurück</div>
-              </div>
             )}
             <LoyaltyGauge
-              label="Chat Penetration"
-              percentage={
-                chattersApiInactive
-                  ? data.legacyInteractionActivePerAvgViewer != null
-                    ? Math.min(100, data.legacyInteractionActivePerAvgViewer)
-                    : 0
-                  : interactionRateReliable && interactionRate !== null
-                    ? interactionRate
-                    : 0
+              label="Messages pro 100 Viewer-Minuten"
+              percentage={messagesGaugeProgress}
+              valueText={
+                messagesPer100ViewerMinutes !== null
+                  ? messagesGaugeHasBenchmark
+                    ? `${messagesGaugeProgress.toFixed(0)}%`
+                    : messagesPer100ViewerMinutes.toFixed(1)
+                  : '-'
               }
-              description={
-                chattersApiInactive
-                  ? 'Fallback-Metrik (eingeschränkt)'
-                  : interactionRateReliable
-                    ? 'Aktive Chatters / getrackte Chat-Accounts'
-                    : `Nicht belastbar (${(interactionCoverage * 100).toFixed(1)}% Coverage)`
-              }
-              startColor="var(--color-primary)"
-              endColor="var(--color-success)"
+              description={messagesBenchmarkText}
+              footnote={messagesBenchmarkFootnote}
+              startColor="var(--color-success)"
+              endColor="var(--color-primary)"
+            />
+            <LoyaltyGauge
+              label="Wiederkehrende Chatters"
+              percentage={chatterReturnRate}
+              valueText={`${chatterReturnRate.toFixed(1)}%`}
+              description={`${returningChatters.toLocaleString('de-DE')} von ${totalChatters.toLocaleString('de-DE')} aktiven Chattern · Erstmalig: ${firstTimeChatters.toLocaleString('de-DE')}`}
+              startColor="var(--color-warning)"
+              endColor="var(--color-accent)"
+            />
+            {CHAT_PENETRATION_ENABLED && (
+              <LoyaltyGauge
+                label="Chat Penetration"
+                percentage={chatPenetrationGaugeValue ?? 0}
+                valueText={
+                  chatPenetrationGaugeValue !== null
+                    ? `${chatPenetrationGaugeValue.toFixed(1)}%`
+                    : 'N/A'
+                }
+                description={
+                  chattersApiInactive
+                    ? data.legacyInteractionActivePerAvgViewer != null
+                      ? 'Fallback: aktive Chatter / Ø Viewer (eingeschränkt)'
+                      : 'Chatters-API nicht aktiv'
+                    : `Coverage ${(interactionCoverage * 100).toFixed(1)}% · ${CHAT_AUDIENCE_TOOLTIP}`
+                }
+                startColor="var(--color-primary)"
+                endColor="var(--color-success)"
+              />
+            )}
+            <LoyaltyGauge
+              label="Aktive Chatters"
+              percentage={activeChattersShare}
+              valueText={`${activeChattersShare.toFixed(1)}%`}
+              description={activeChattersDescription}
+              startColor="var(--color-accent)"
+              endColor="var(--color-primary)"
             />
           </div>
-        )}
+        </div>
       </motion.div>
 
       {/* Message Analysis */}
@@ -328,12 +383,19 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
           transition={{ delay: 0.15 }}
           className="panel-card rounded-2xl p-6"
         >
-          <div className="flex items-center gap-3 mb-6">
-            <TrendingUp className="w-6 h-6 text-success" />
-            <h2 className="text-xl font-bold text-white">Aktivität nach Tageszeit</h2>
-            <span className="text-[11px] text-text-secondary border border-border/60 rounded-full px-2 py-0.5">
-              {data.timezone || 'UTC'}
-            </span>
+          <div className="mb-6 flex items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-3">
+                <TrendingUp className="w-6 h-6 text-success" />
+                <h2 className="text-xl font-bold text-white">Chat-Nachrichten nach Uhrzeit</h2>
+                <span className="text-[11px] text-text-secondary border border-border/60 rounded-full px-2 py-0.5">
+                  {data.timezone || 'UTC'}
+                </span>
+              </div>
+              <p className="mt-2 text-sm text-text-secondary">
+                Aggregierte Roh-Chat-Nachrichten pro Stunde im gewählten Zeitraum.
+              </p>
+            </div>
           </div>
           {hasHourlySamples ? (
             <>
@@ -342,34 +404,59 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
                   Nur {hoursWithData} Stunde{hoursWithData !== 1 ? 'n' : ''} mit Daten — zu wenig für aussagekräftige Tageszeit-Analyse.
                 </div>
               )}
-              <div className="h-64 flex items-end gap-1">
-                {Array.from({ length: 24 }).map((_, hour) => {
-                  const stat = hourlyActivity.find(h => h.hour === hour);
-                  const count = stat?.count || 0;
-                  const height = (count / maxHourlyCount) * 100;
-                  // Minimum visible height for bars with data
-                  const minHeight = count > 0 ? Math.max(height, 4) : 0;
-
-                  return (
-                    <div key={hour} className="flex-1 flex flex-col items-center group relative">
-                      <motion.div
-                        initial={{ height: 0 }}
-                        animate={{ height: `${minHeight}%` }}
-                        transition={{ duration: 0.5, delay: hour * 0.02 }}
-                        className={`w-full rounded-t-sm group-hover:bg-success transition-colors ${count > 0 ? 'bg-success/60' : 'min-h-[2px] bg-border'}`}
-                      />
-                      {/* Tooltip with absolute count */}
-                      <div className="absolute bottom-full mb-2 hidden group-hover:block bg-popover text-white text-xs p-2 rounded z-10 whitespace-nowrap border border-border">
-                        <div className="font-medium">{hour}:00 Uhr</div>
-                        <div>{count.toLocaleString('de-DE')} Nachrichten</div>
-                        {count > 0 && <div className="text-text-secondary">{((count / maxHourlyCount) * 100).toFixed(0)}% vom Peak</div>}
-                      </div>
-                      {hour % 4 === 0 && (
-                        <div className="text-[10px] text-text-secondary mt-1">{hour}h</div>
-                      )}
-                    </div>
-                  );
-                })}
+              <div className="h-72 rounded-xl border border-border/60 bg-background/35 p-3">
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart
+                    data={hourlyChartData}
+                    margin={{ top: 12, right: 8, left: -16, bottom: 0 }}
+                  >
+                    <defs>
+                      <linearGradient id={hourlyChartGradientId} x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="var(--color-success)" stopOpacity={0.4} />
+                        <stop offset="95%" stopColor="var(--color-success)" stopOpacity={0.04} />
+                      </linearGradient>
+                    </defs>
+                    <XAxis
+                      dataKey="label"
+                      interval={3}
+                      tick={{ fontSize: 11, fill: 'var(--color-text-secondary)' }}
+                      tickLine={false}
+                      axisLine={false}
+                    />
+                    <YAxis
+                      allowDecimals={false}
+                      width={42}
+                      tick={{ fontSize: 11, fill: 'var(--color-text-secondary)' }}
+                      tickLine={false}
+                      axisLine={false}
+                    />
+                    <Tooltip
+                      contentStyle={CHART_TOOLTIP_STYLE}
+                      labelFormatter={(label) => `${label} Uhr`}
+                      formatter={(value) => {
+                        const numericValue = Number(value);
+                        return [
+                          `${numericValue.toLocaleString('de-DE')} Nachrichten`,
+                          'Chatvolumen',
+                        ];
+                      }}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="count"
+                      stroke="var(--color-success)"
+                      strokeWidth={3}
+                      fill={`url(#${hourlyChartGradientId})`}
+                      activeDot={{ r: 5, strokeWidth: 0, fill: 'var(--color-success)' }}
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-text-secondary">
+                <span>Jeder Punkt summiert alle Roh-Chat-Nachrichten dieser Stunde.</span>
+                <span>
+                  Peak bei {peakHour.hour}:00 Uhr mit {peakHour.count.toLocaleString('de-DE')} Nachrichten
+                </span>
               </div>
             </>
           ) : (
@@ -450,10 +537,12 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
                   : `${chatterReturnRate.toFixed(0)}% Return Rate - versuche mehr Interaktion!`}
               />
               <InsightItem
-                type={firstTimeChatters > returningChatters ? 'info' : 'positive'}
-                text={firstTimeChatters > returningChatters
-                  ? 'Viele neue Gesichter! Binde sie durch direkte Ansprache.'
-                  : 'Deine Stammzuschauer sind loyal - belohne sie!'
+                type={coreLoyalViewers > 0 ? 'positive' : 'info'}
+                text={coreLoyalViewers > 0
+                  ? silentCoreLoyalViewers > 0
+                    ? `${coreLoyalViewers.toLocaleString('de-DE')} Stammzuschauer erkannt, davon ${silentCoreLoyalViewers.toLocaleString('de-DE')} silent.`
+                    : `${coreLoyalViewers.toLocaleString('de-DE')} Stammzuschauer im ${days}-Tage-Fenster erkannt.`
+                  : `${returningTrackedViewers.toLocaleString('de-DE')} wiederkehrende Zuschauer, aber noch niemand mit ${loyaltySessionThreshold}+ Streams im Fenster.`
                 }
               />
             </>
@@ -478,43 +567,13 @@ export function ChatAnalytics({ streamer, days }: ChatAnalyticsProps) {
         {contentData && <StimmungTopicsSection data={contentData} />}
       </PlanGateCard>
 
-      {/* Chat-Netzwerk */}
-      <PlanGateCard featureId="chat_social_graph" title="Chat Social Graph">
-        {socialData && <ChatNetzwerkSection data={socialData} />}
-      </PlanGateCard>
+      {/* Chat-Netzwerk ist bewusst deaktiviert; Implementierung bleibt vorerst im Code. */}
+      {CHAT_SOCIAL_GRAPH_ENABLED && (
+        <PlanGateCard featureId="chat_social_graph" title="Chat Social Graph">
+          {socialData && <ChatNetzwerkSection data={socialData} />}
+        </PlanGateCard>
+      )}
     </div>
-  );
-}
-
-interface StatCardProps {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  subtext?: string;
-  color: 'primary' | 'accent' | 'success' | 'warning';
-}
-
-function StatCard({ icon, label, value, subtext, color }: StatCardProps) {
-  const colorClasses = {
-    primary: 'bg-primary/10 text-primary',
-    accent: 'bg-accent/10 text-accent',
-    success: 'bg-success/10 text-success',
-    warning: 'bg-warning/10 text-warning',
-  };
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.95 }}
-      animate={{ opacity: 1, scale: 1 }}
-      className="panel-card soft-elevate rounded-2xl p-5"
-    >
-      <div className={`w-10 h-10 rounded-xl ${colorClasses[color]} flex items-center justify-center mb-3`}>
-        {icon}
-      </div>
-      <div className="text-sm text-text-secondary mb-1">{label}</div>
-      <div className="display-font text-2xl font-bold text-white">{value}</div>
-      {subtext && <div className="text-sm text-text-secondary mt-1">{subtext}</div>}
-    </motion.div>
   );
 }
 
@@ -524,14 +583,26 @@ interface LoyaltyGaugeProps {
   description: string;
   startColor: string;
   endColor: string;
+  valueText?: string;
+  footnote?: string;
 }
 
-function LoyaltyGauge({ label, percentage, description, startColor, endColor }: LoyaltyGaugeProps) {
+function LoyaltyGauge({
+  label,
+  percentage,
+  description,
+  startColor,
+  endColor,
+  valueText,
+  footnote,
+}: LoyaltyGaugeProps) {
   const clampedPercentage = Math.min(100, Math.max(0, percentage));
   const gradientId = `gauge-${useId().replace(/:/g, '')}`;
+  const centerValue = valueText ?? `${clampedPercentage.toFixed(0)}%`;
+  const centerTextClass = centerValue.length > 6 ? 'text-lg' : centerValue.length > 4 ? 'text-xl' : 'text-2xl';
 
   return (
-    <div className="text-center">
+    <div className="w-full max-w-[12rem] text-center">
       <div className="relative w-32 h-32 mx-auto mb-3">
         <svg className="w-full h-full -rotate-90">
           <circle
@@ -564,11 +635,12 @@ function LoyaltyGauge({ label, percentage, description, startColor, endColor }: 
           </defs>
         </svg>
         <div className="absolute inset-0 flex items-center justify-center">
-          <span className="text-2xl font-bold text-white">{clampedPercentage.toFixed(0)}%</span>
+          <span className={`${centerTextClass} font-bold text-white`}>{centerValue}</span>
         </div>
       </div>
       <div className="font-medium text-white">{label}</div>
       <div className="text-sm text-text-secondary">{description}</div>
+      {footnote && <div className="mt-1 text-xs text-text-secondary/80">{footnote}</div>}
     </div>
   );
 }

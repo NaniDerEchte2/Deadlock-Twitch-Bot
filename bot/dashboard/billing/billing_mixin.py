@@ -779,7 +779,8 @@ class _DashboardBillingMixin:
                     """
                     INSERT INTO streamer_plans (twitch_user_id, twitch_login, plan_name, expires_at)
                     SELECT twitch_user_id, twitch_login, ?, NULL
-                    FROM twitch_streamers WHERE LOWER(twitch_login) = LOWER(?)
+                    FROM twitch_streamers_partner_state
+                    WHERE LOWER(twitch_login) = LOWER(?)
                     ON CONFLICT(twitch_user_id) DO UPDATE SET
                         plan_name = EXCLUDED.plan_name,
                         expires_at = EXCLUDED.expires_at
@@ -789,7 +790,7 @@ class _DashboardBillingMixin:
                 row = conn.execute(
                     """
                     SELECT twitch_user_id, twitch_login
-                    FROM twitch_streamers
+                    FROM twitch_streamers_partner_state
                     WHERE LOWER(twitch_login) = LOWER(?)
                     LIMIT 1
                     """,
@@ -1321,7 +1322,7 @@ class _DashboardBillingMixin:
                         p.manual_plan_expires_at,
                         p.manual_plan_notes,
                         p.manual_plan_updated_at
-                    FROM twitch_streamers s
+                    FROM twitch_streamers_partner_state s
                     LEFT JOIN streamer_plans p
                       ON (
                            s.twitch_user_id IS NOT NULL
@@ -1420,7 +1421,7 @@ class _DashboardBillingMixin:
             streamer_row = conn.execute(
                 """
                 SELECT twitch_user_id, twitch_login
-                FROM twitch_streamers
+                FROM twitch_streamers_partner_state
                 WHERE LOWER(twitch_login) = LOWER(?)
                 LIMIT 1
                 """,
@@ -1492,7 +1493,7 @@ class _DashboardBillingMixin:
             streamer_row = conn.execute(
                 """
                 SELECT twitch_user_id, twitch_login
-                FROM twitch_streamers
+                FROM twitch_streamers_partner_state
                 WHERE LOWER(twitch_login) = LOWER(?)
                 LIMIT 1
                 """,

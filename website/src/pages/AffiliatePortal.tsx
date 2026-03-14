@@ -25,7 +25,8 @@ interface AffiliateProfile {
 }
 
 interface Claim {
-  claimed_streamer_login: string;
+  claimed_streamer_login?: string;
+  streamer_login?: string;
   claimed_at: string;
   total_commission_cents: number;
   commission_count: number;
@@ -163,6 +164,17 @@ export default function AffiliatePortal() {
           >
             Mit Twitch anmelden
           </button>
+          <div className="mt-4 rounded-xl border border-[rgba(255,122,24,0.25)] bg-[rgba(255,122,24,0.08)] px-4 py-3 text-left">
+            <div className="flex items-start gap-3">
+              <AlertCircle size={18} className="text-[#ffb067] mt-0.5 shrink-0" />
+              <p className="text-xs leading-relaxed text-[#d7e5f0]">
+                Steuerhinweis: Du bist selbst fuer die steuerliche Behandlung
+                deiner Provisionen verantwortlich. Verbinde spaeter Stripe,
+                damit Auszahlungen automatisch an dein Auszahlungs-Konto gehen
+                koennen.
+              </p>
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -175,6 +187,8 @@ export default function AffiliatePortal() {
   const pendingCents = commissions
     .filter((c) => c.status === "pending")
     .reduce((s, c) => s + c.commission_cents, 0);
+  const stripeConnected = profile?.stripe_connect_status === "connected";
+  const needsNextSteps = claims.length === 0 || !stripeConnected;
 
   return (
     <div className="min-h-screen bg-[#07151d] text-[#e9f1f7] font-[Manrope]">
@@ -211,6 +225,68 @@ export default function AffiliatePortal() {
           <div className="space-y-6">
             <h2 className="text-2xl font-bold font-[Sora]">Übersicht</h2>
 
+            <div className="panel-card rounded-xl p-6 space-y-3">
+              <p className="text-lg font-semibold font-[Sora]">
+                Willkommen zurueck{profile?.display_name ? `, ${profile.display_name}` : ""}.
+              </p>
+              <p className="text-sm leading-relaxed text-[#9bb3c5]">
+                Hier verwaltest du deine beanspruchten Streamer, behältst deine
+                Provisionen im Blick und richtest deine Auszahlungen über Stripe
+                Connect ein.
+              </p>
+            </div>
+
+            {needsNextSteps && (
+              <div className="panel-card rounded-xl p-6 space-y-4">
+                <div>
+                  <h3 className="text-sm font-semibold text-[#9bb3c5] uppercase tracking-wider">
+                    Deine naechsten Schritte
+                  </h3>
+                  <p className="mt-2 text-sm leading-relaxed text-[#9bb3c5]">
+                    Schließe die fehlenden Punkte ab, damit du Provisionen
+                    sammeln und automatisch ausgezahlt werden kannst.
+                  </p>
+                </div>
+
+                <div className="space-y-3">
+                  {claims.length === 0 && (
+                    <div className="flex items-start gap-3 rounded-xl border border-[rgba(194,221,240,0.14)] bg-[#102635]/40 px-4 py-3">
+                      <Users size={18} className="text-[#ff7a18] mt-0.5 shrink-0" />
+                      <div>
+                        <p className="text-sm font-semibold text-[#e9f1f7]">
+                          Ersten Streamer beanspruchen
+                        </p>
+                        <p className="mt-1 text-sm leading-relaxed text-[#9bb3c5]">
+                          Oeffne den Tab Streamer und beanspruche einen Channel
+                          per Twitch-Login. Ab dann bekommst du 30% auf jede
+                          Zahlung dieses Streamers.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {!stripeConnected && (
+                    <div className="flex items-start gap-3 rounded-xl border border-[rgba(194,221,240,0.14)] bg-[#102635]/40 px-4 py-3">
+                      <ArrowRightLeft
+                        size={18}
+                        className="text-[#10b7ad] mt-0.5 shrink-0"
+                      />
+                      <div>
+                        <p className="text-sm font-semibold text-[#e9f1f7]">
+                          Stripe fuer automatische Auszahlungen verbinden
+                        </p>
+                        <p className="mt-1 text-sm leading-relaxed text-[#9bb3c5]">
+                          Ohne Stripe werden Provisionen nur bis 50,00 EUR
+                          gespeichert. Alles darueber verfaellt, bis dein Konto
+                          verbunden ist.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               <StatCard
                 label="Gesamtverdienst"
@@ -237,6 +313,14 @@ export default function AffiliatePortal() {
         {tab === "streamers" && (
           <div className="space-y-6">
             <h2 className="text-2xl font-bold font-[Sora]">Streamer</h2>
+
+            <div className="panel-card rounded-xl p-6">
+              <p className="text-sm leading-relaxed text-[#9bb3c5]">
+                Beanspruche Streamer ueber ihren Twitch-Login. Sobald ein
+                Streamer dir zugeordnet ist, erhältst du 30% Provision auf jede
+                Zahlung dieses Accounts.
+              </p>
+            </div>
 
             <div className="panel-card rounded-xl p-6">
               <h3 className="text-sm font-semibold text-[#9bb3c5] uppercase tracking-wider mb-4">
@@ -279,19 +363,22 @@ export default function AffiliatePortal() {
                   </tr>
                 </thead>
                 <tbody>
-                  {claims.map((c) => (
-                    <tr
-                      key={c.claimed_streamer_login}
-                      className="border-b border-[rgba(194,221,240,0.14)] last:border-0"
-                    >
-                      <td className="px-6 py-3 font-medium">{c.claimed_streamer_login}</td>
-                      <td className="px-6 py-3">{c.commission_count}</td>
-                      <td className="px-6 py-3">{formatCents(c.total_commission_cents)}</td>
-                      <td className="px-6 py-3 text-[#9bb3c5]">
-                        {new Date(c.claimed_at).toLocaleDateString("de-DE")}
-                      </td>
-                    </tr>
-                  ))}
+                  {claims.map((c, index) => {
+                    const claimLogin = c.streamer_login ?? c.claimed_streamer_login ?? "";
+                    return (
+                      <tr
+                        key={`${claimLogin || "claim"}-${c.claimed_at}-${index}`}
+                        className="border-b border-[rgba(194,221,240,0.14)] last:border-0"
+                      >
+                        <td className="px-6 py-3 font-medium">{claimLogin || "\u2014"}</td>
+                        <td className="px-6 py-3">{c.commission_count}</td>
+                        <td className="px-6 py-3">{formatCents(c.total_commission_cents)}</td>
+                        <td className="px-6 py-3 text-[#9bb3c5]">
+                          {new Date(c.claimed_at).toLocaleDateString("de-DE")}
+                        </td>
+                      </tr>
+                    );
+                  })}
                   {claims.length === 0 && (
                     <tr>
                       <td colSpan={4} className="px-6 py-8 text-center text-[#9bb3c5]">
@@ -410,27 +497,44 @@ function StripeCard({ profile }: { profile: AffiliateProfile | null }) {
       <h3 className="text-sm font-semibold text-[#9bb3c5] uppercase tracking-wider mb-4">
         Stripe Connect
       </h3>
-      {connected ? (
-        <div className="flex items-center gap-2 text-emerald-400">
-          <CheckCircle size={18} />
-          <span className="font-medium">Verbunden</span>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          <div className="flex items-center gap-2 text-yellow-400">
-            <XCircle size={18} />
-            <span className="text-sm">Nicht verbunden</span>
+      <div className="space-y-4">
+        <p className="text-sm leading-relaxed text-[#9bb3c5]">
+          Auszahlungen laufen automatisch ueber Stripe Connect auf dein
+          verbundenes Auszahlungs-Konto.
+        </p>
+        {connected ? (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-emerald-400">
+              <CheckCircle size={18} />
+              <span className="font-medium">Verbunden</span>
+            </div>
+            <p className="text-sm leading-relaxed text-[#9bb3c5]">
+              Neue Provisionen koennen automatisch fuer Auszahlungen
+              verarbeitet werden, sobald Stripe Transfers ausloest.
+            </p>
           </div>
-          <button
-            onClick={() => {
-              window.location.href = "/twitch/affiliate/connect/stripe";
-            }}
-            className="gradient-accent rounded-lg px-5 py-2.5 text-sm font-semibold text-white transition-all hover:brightness-110"
-          >
-            Stripe-Konto verbinden
-          </button>
-        </div>
-      )}
+        ) : (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-yellow-400">
+              <XCircle size={18} />
+              <span className="text-sm">Nicht verbunden</span>
+            </div>
+            <p className="text-sm leading-relaxed text-[#9bb3c5]">
+              Ohne Stripe werden Provisionen nur bis 50,00 EUR gespeichert.
+              Sobald weitere Provisionen darueber hinaus anfallen, verfallen
+              sie, bis du Stripe verbunden hast.
+            </p>
+            <button
+              onClick={() => {
+                window.location.href = "/twitch/affiliate/connect/stripe";
+              }}
+              className="gradient-accent rounded-lg px-5 py-2.5 text-sm font-semibold text-white transition-all hover:brightness-110"
+            >
+              Stripe-Konto verbinden
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

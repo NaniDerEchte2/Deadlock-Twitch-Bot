@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import discord
@@ -51,7 +51,12 @@ class TwitchAdminMixin:
         try:
             with storage.get_conn() as c:
                 rows = c.execute(
-                    "SELECT twitch_login, manual_verified_permanent, manual_verified_until FROM twitch_streamers ORDER BY twitch_login"
+                    """
+                    SELECT twitch_login, manual_verified_permanent, manual_verified_until
+                    FROM twitch_partners_all_state
+                    WHERE status = 'active'
+                    ORDER BY LOWER(twitch_login)
+                    """
                 ).fetchall()
         except Exception:
             log.exception("Konnte Streamer-Liste aus DB lesen")
@@ -211,20 +216,26 @@ class TwitchAdminMixin:
 
         try:
             with storage.get_conn() as c:
-                c.execute(
-                    "INSERT INTO twitch_streamers "
-                    "(twitch_login, twitch_user_id, require_discord_link, next_link_check_at) "
-                    "VALUES (?, ?, ?, datetime('now','+30 days')) "
-                    "ON CONFLICT (twitch_login) DO NOTHING",
-                    (user["login"].lower(), user["id"], int(require_link)),
+                partner_row = storage.load_active_partner(
+                    c,
+                    twitch_login=user["login"].lower(),
+                    twitch_user_id=user["id"],
                 )
-                # WICHTIG: Auch bei UPDATE die user_id setzen (falls sie vorher NULL war)
-                c.execute(
-                    "UPDATE twitch_streamers "
-                    "SET manual_verified_permanent=0, manual_verified_until=NULL, manual_verified_at=NULL, "
-                    "    twitch_user_id=?, is_monitored_only=0 "
-                    "WHERE twitch_login=?",
-                    (user["id"], normalized),
+                if partner_row:
+                    storage.upsert_streamer_identity(
+                        c,
+                        twitch_user_id=user["id"],
+                        twitch_login=user["login"].lower(),
+                    )
+                    return f"{user['display_name']} ist bereits als Partner aktiv"
+
+                storage.upsert_non_partner_streamer(
+                    c,
+                    twitch_login=user["login"].lower(),
+                    twitch_user_id=user["id"],
+                    require_discord_link=int(require_link),
+                    next_link_check_at=(datetime.now(UTC) + timedelta(days=30)).isoformat(),
+                    is_monitored_only=0,
                 )
                 # Historische Kategorie-Daten übernehmen, damit der Partner-Dashboard
                 # nicht bei 0 startet. Kopiert alle Einträge aus twitch_stats_category,
@@ -245,7 +256,8 @@ class TwitchAdminMixin:
         deleted = 0
         try:
             with storage.get_conn() as c:
-                deleted = storage.delete_streamer(c, normalized)
+                archived = storage.archive_active_partner(c, twitch_login=normalized)
+                deleted = 1 if archived else storage.delete_streamer(c, normalized)
                 c.execute(
                     "DELETE FROM twitch_live_state WHERE streamer_login=?",
                     (normalized,),

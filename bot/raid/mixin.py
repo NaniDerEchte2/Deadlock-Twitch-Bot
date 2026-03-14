@@ -5,7 +5,7 @@ import logging
 import time
 from datetime import UTC, datetime
 
-from ..storage import get_conn
+from ..storage import get_conn, load_active_partner
 
 log = logging.getLogger("TwitchStreams.RaidMixin")
 
@@ -42,18 +42,14 @@ class TwitchRaidMixin:
         # Nur wenn Streamer Auto-Raid explizit aktiviert und autorisiert hat
         try:
             with get_conn() as conn:
-                # Wir prüfen: Ist der Streamer in twitch_streamers ODER hat er einfach nur auth gegeben?
-                # Wichtig ist vor allem der Check in twitch_raid_auth via has_enabled_auth
-                row = conn.execute(
-                    "SELECT raid_bot_enabled FROM twitch_streamers WHERE twitch_user_id = ?",
-                    (twitch_user_id,),
-                ).fetchone()
+                row = load_active_partner(conn, twitch_user_id=twitch_user_id)
 
             # Falls er nicht in twitch_streamers steht (noch kein Partner),
             # gehen wir davon aus, dass er den Bot via OAuth aktiviert hat.
-            if row and not row[0]:
+            raid_bot_enabled = row["raid_bot_enabled"] if row and hasattr(row, "keys") else (row[13] if row else None)
+            if row and not raid_bot_enabled:
                 log.debug(
-                    "Auto-Raid übersprungen für %s: deaktiviert in twitch_streamers",
+                    "Auto-Raid übersprungen für %s: deaktiviert im Partner-Registry",
                     login,
                 )
                 return

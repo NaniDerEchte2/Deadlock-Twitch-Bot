@@ -5,7 +5,7 @@ import time
 from datetime import UTC, datetime
 
 from ..core.chat_bots import is_known_chat_bot
-from ..storage import get_conn
+from ..storage import get_conn, load_active_partner
 from .constants import (
     _INVITE_QUESTION_CHANNEL_COOLDOWN_SEC,
     _INVITE_QUESTION_RE,
@@ -1092,11 +1092,20 @@ class ModerationMixin:
                                 silent = False
                                 try:
                                     with get_conn() as _conn:
-                                        _sb_row = _conn.execute(
-                                            "SELECT silent_ban FROM twitch_streamers WHERE twitch_user_id = ?",
-                                            (twitch_user_id,),
-                                        ).fetchone()
-                                        silent = bool(int((_sb_row[0] if _sb_row else 0) or 0))
+                                        _sb_row = load_active_partner(
+                                            _conn,
+                                            twitch_user_id=twitch_user_id,
+                                        )
+                                        silent = bool(
+                                            int(
+                                                (
+                                                    _sb_row["silent_ban"]
+                                                    if _sb_row and hasattr(_sb_row, "keys")
+                                                    else (_sb_row[14] if _sb_row else 0)
+                                                )
+                                                or 0
+                                            )
+                                        )
                                 except Exception as exc:
                                     log.debug(
                                         "Konnte silent_ban nicht ermitteln fuer %s",

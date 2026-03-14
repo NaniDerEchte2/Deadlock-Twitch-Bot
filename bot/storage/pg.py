@@ -18,6 +18,26 @@ from urllib.parse import urlsplit
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
 
+from .partner_registry import (
+    archive_active_partner,
+    bulk_update_partner_flags,
+    load_active_partner,
+    load_latest_partner_history,
+    load_partner_by_discord_user_id,
+    load_streamer_identity,
+    migrate_legacy_partner_registry,
+    promote_streamer_to_partner,
+    reactivate_partner,
+    save_streamer_discord_profile,
+    set_partner_live_ping_settings,
+    set_partner_raid_bot_enabled,
+    set_partner_silent_flags,
+    set_streamer_discord_member,
+    upsert_non_partner_streamer,
+    upsert_streamer_identity,
+    verification_payload,
+)
+
 log = logging.getLogger("TwitchStreams.StoragePG")
 
 KEYRING_SERVICE = "DeadlockBot"
@@ -1307,82 +1327,231 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_streamers_user_id ON twitch_streamers(twitch_user_id)"
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS twitch_streamer_identities (
+            twitch_user_id       TEXT PRIMARY KEY,
+            twitch_login         TEXT NOT NULL,
+            discord_user_id      TEXT,
+            discord_display_name TEXT,
+            is_on_discord        INTEGER DEFAULT 0,
+            created_at           TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at           TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_streamer_identities_login_lower "
+        "ON twitch_streamer_identities(LOWER(twitch_login)) "
+        "WHERE twitch_login IS NOT NULL AND twitch_login <> ''"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_streamer_identities_discord_user "
+        "ON twitch_streamer_identities(discord_user_id) "
+        "WHERE discord_user_id IS NOT NULL AND discord_user_id <> ''"
+    )
 
-    # View: partner state (single source of truth)
-    # NOTE: Drop/recreate avoids PostgreSQL CREATE OR REPLACE restrictions when
-    # existing columns were reordered by previous s.* expansions.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS twitch_partners (
+            id                        BIGSERIAL PRIMARY KEY,
+            twitch_user_id            TEXT NOT NULL,
+            twitch_login              TEXT NOT NULL,
+            require_discord_link      INTEGER DEFAULT 0,
+            last_description          TEXT,
+            last_link_ok              INTEGER,
+            added_by                  TEXT,
+            last_link_checked_at      TEXT,
+            next_link_check_at        TEXT,
+            manual_verified_permanent INTEGER DEFAULT 0,
+            manual_verified_until     TEXT,
+            manual_verified_at        TEXT,
+            manual_partner_opt_out    INTEGER DEFAULT 0,
+            raid_bot_enabled          INTEGER DEFAULT 0,
+            silent_ban                INTEGER DEFAULT 0,
+            silent_raid               INTEGER DEFAULT 0,
+            live_ping_role_id         BIGINT,
+            live_ping_enabled         INTEGER DEFAULT 1,
+            partnered_at              TEXT DEFAULT CURRENT_TIMESTAMP,
+            departnered_at            TEXT,
+            status                    TEXT NOT NULL DEFAULT 'active'
+        )
+        """
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_partners_active_user_id "
+        "ON twitch_partners(twitch_user_id) WHERE status = 'active'"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_partners_active_login_lower "
+        "ON twitch_partners(LOWER(twitch_login)) WHERE status = 'active'"
+    )
+
     conn.execute("DROP VIEW IF EXISTS twitch_streamers_partner_state")
+    conn.execute("DROP VIEW IF EXISTS twitch_partners_all_state")
+    conn.execute(
+        """
+        CREATE VIEW twitch_partners_all_state AS
+        SELECT
+            p.id,
+            p.twitch_login,
+            p.twitch_user_id,
+            p.require_discord_link,
+            p.next_link_check_at,
+            i.discord_user_id,
+            i.discord_display_name,
+            COALESCE(i.is_on_discord, 0) AS is_on_discord,
+            p.manual_verified_permanent,
+            p.manual_verified_until,
+            p.manual_verified_at,
+            p.manual_partner_opt_out,
+            p.partnered_at AS created_at,
+            CASE WHEN p.status = 'active' THEN NULL ELSE p.departnered_at END AS archived_at,
+            p.raid_bot_enabled,
+            p.silent_ban,
+            p.silent_raid,
+            0 AS is_monitored_only,
+            CASE
+                WHEN (
+                    COALESCE(p.manual_verified_permanent, 0) = 1
+                    OR (
+                        p.manual_verified_until IS NOT NULL
+                        AND p.manual_verified_until::timestamptz >= NOW()
+                    )
+                    OR p.manual_verified_at IS NOT NULL
+                )
+                THEN 1 ELSE 0
+            END AS is_verified,
+            1 AS is_partner,
+            CASE WHEN p.status = 'active' THEN 1 ELSE 0 END AS is_partner_active,
+            p.live_ping_role_id,
+            COALESCE(p.live_ping_enabled, 1) AS live_ping_enabled,
+            p.status,
+            p.departnered_at
+        FROM twitch_partners p
+        LEFT JOIN twitch_streamer_identities i
+          ON i.twitch_user_id = p.twitch_user_id
+        """
+    )
     conn.execute(
         """
         CREATE VIEW twitch_streamers_partner_state AS
-        WITH base AS (
-            SELECT
-                s.twitch_login,
-                s.twitch_user_id,
-                s.require_discord_link,
-                s.next_link_check_at,
-                s.discord_user_id,
-                s.discord_display_name,
-                s.is_on_discord,
-                s.manual_verified_permanent,
-                s.manual_verified_until,
-                s.manual_verified_at,
-                s.manual_partner_opt_out,
-                s.created_at,
-                s.archived_at,
-                s.raid_bot_enabled,
-                s.silent_ban,
-                s.silent_raid,
-                s.is_monitored_only,
-                CASE
-                    WHEN (
-                        COALESCE(s.manual_verified_permanent, 0) = 1
-                        OR (
-                            s.manual_verified_until IS NOT NULL
-                            AND s.manual_verified_until::timestamptz >= NOW()
-                        )
-                        OR s.manual_verified_at IS NOT NULL
-                    )
-                    THEN 1 ELSE 0
-                END AS is_verified,
-                s.live_ping_role_id,
-                COALESCE(s.live_ping_enabled, 1) AS live_ping_enabled
-            FROM twitch_streamers s
-        )
         SELECT
-            base.twitch_login,
-            base.twitch_user_id,
-            base.require_discord_link,
-            base.next_link_check_at,
-            base.discord_user_id,
-            base.discord_display_name,
-            base.is_on_discord,
-            base.manual_verified_permanent,
-            base.manual_verified_until,
-            base.manual_verified_at,
-            base.manual_partner_opt_out,
-            base.created_at,
-            base.archived_at,
-            base.raid_bot_enabled,
-            base.silent_ban,
-            base.silent_raid,
-            base.is_monitored_only,
-            base.is_verified,
-            CASE
-                WHEN base.is_verified = 1
-                     AND COALESCE(base.manual_partner_opt_out, 0) = 0
-                     AND COALESCE(base.is_monitored_only, 0) = 0
-                THEN 1 ELSE 0
-            END AS is_partner,
-            CASE
-                WHEN base.is_verified = 1
-                     AND COALESCE(base.manual_partner_opt_out, 0) = 0
-                     AND COALESCE(base.is_monitored_only, 0) = 0
-                THEN 1 ELSE 0
-            END AS is_partner_active,
-            base.live_ping_role_id,
-            base.live_ping_enabled
-        FROM base
+            twitch_login,
+            twitch_user_id,
+            require_discord_link,
+            next_link_check_at,
+            discord_user_id,
+            discord_display_name,
+            is_on_discord,
+            manual_verified_permanent,
+            manual_verified_until,
+            manual_verified_at,
+            manual_partner_opt_out,
+            created_at,
+            archived_at,
+            raid_bot_enabled,
+            silent_ban,
+            silent_raid,
+            is_monitored_only,
+            is_verified,
+            is_partner,
+            is_partner_active,
+            live_ping_role_id,
+            live_ping_enabled
+        FROM twitch_partners_all_state
+        WHERE status = 'active'
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE OR REPLACE FUNCTION sync_twitch_streamer_identity_from_streamers()
+        RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF COALESCE(NEW.twitch_user_id, '') <> '' THEN
+                INSERT INTO twitch_streamer_identities (
+                    twitch_user_id,
+                    twitch_login,
+                    discord_user_id,
+                    discord_display_name,
+                    is_on_discord,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    NEW.twitch_user_id,
+                    LOWER(NEW.twitch_login),
+                    NEW.discord_user_id,
+                    NEW.discord_display_name,
+                    COALESCE(NEW.is_on_discord, 0),
+                    CURRENT_TIMESTAMP::text,
+                    CURRENT_TIMESTAMP::text
+                )
+                ON CONFLICT (twitch_user_id) DO UPDATE SET
+                    twitch_login = EXCLUDED.twitch_login,
+                    discord_user_id = COALESCE(EXCLUDED.discord_user_id, twitch_streamer_identities.discord_user_id),
+                    discord_display_name = COALESCE(EXCLUDED.discord_display_name, twitch_streamer_identities.discord_display_name),
+                    is_on_discord = COALESCE(EXCLUDED.is_on_discord, twitch_streamer_identities.is_on_discord),
+                    updated_at = CURRENT_TIMESTAMP::text;
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS trg_twitch_streamers_sync_identity ON twitch_streamers")
+    conn.execute(
+        """
+        CREATE TRIGGER trg_twitch_streamers_sync_identity
+        AFTER INSERT OR UPDATE OF twitch_login, twitch_user_id, discord_user_id, discord_display_name, is_on_discord
+        ON twitch_streamers
+        FOR EACH ROW
+        EXECUTE FUNCTION sync_twitch_streamer_identity_from_streamers()
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE OR REPLACE FUNCTION sync_twitch_streamer_identity_from_partners()
+        RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.status = 'active' AND COALESCE(NEW.twitch_user_id, '') <> '' THEN
+                INSERT INTO twitch_streamer_identities (
+                    twitch_user_id,
+                    twitch_login,
+                    discord_user_id,
+                    discord_display_name,
+                    is_on_discord,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    NEW.twitch_user_id,
+                    LOWER(NEW.twitch_login),
+                    (SELECT discord_user_id FROM twitch_streamer_identities WHERE twitch_user_id = NEW.twitch_user_id),
+                    (SELECT discord_display_name FROM twitch_streamer_identities WHERE twitch_user_id = NEW.twitch_user_id),
+                    COALESCE((SELECT is_on_discord FROM twitch_streamer_identities WHERE twitch_user_id = NEW.twitch_user_id), 0),
+                    COALESCE((SELECT created_at FROM twitch_streamer_identities WHERE twitch_user_id = NEW.twitch_user_id), CURRENT_TIMESTAMP::text),
+                    CURRENT_TIMESTAMP::text
+                )
+                ON CONFLICT (twitch_user_id) DO UPDATE SET
+                    twitch_login = EXCLUDED.twitch_login,
+                    updated_at = CURRENT_TIMESTAMP::text;
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS trg_twitch_partners_sync_identity ON twitch_partners")
+    conn.execute(
+        """
+        CREATE TRIGGER trg_twitch_partners_sync_identity
+        AFTER INSERT OR UPDATE OF twitch_login, twitch_user_id, status
+        ON twitch_partners
+        FOR EACH ROW
+        EXECUTE FUNCTION sync_twitch_streamer_identity_from_partners()
         """
     )
 
@@ -2520,3 +2689,5 @@ def ensure_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_expires ON dashboard_sessions(expires_at)"
     )
+
+    migrate_legacy_partner_registry(_CompatConnection(conn))

@@ -12,7 +12,8 @@ from bot.raid.partner_raid_score_tracking import (
     resolve_partner_raid_tracking_for_session,
     track_confirmed_partner_raid,
 )
-from bot.storage import proxy as storage_proxy
+
+from tests.sqlite_twitch_schema import ensure_sqlite_twitch_schema
 
 
 def _iso_utc(value: datetime) -> str:
@@ -23,7 +24,7 @@ class PartnerRaidScoreTrackingTests(unittest.TestCase):
     def _make_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
-        storage_proxy.ensure_schema(conn)
+        ensure_sqlite_twitch_schema(conn)
         return conn
 
     def test_track_confirmed_partner_raid_stores_score_snapshot(self) -> None:
@@ -386,7 +387,7 @@ class PartnerRaidScoreTrackingHookTests(unittest.IsolatedAsyncioTestCase):
     async def test_on_raid_arrival_tracks_confirmed_partner_raid_snapshot(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
-        storage_proxy.ensure_schema(conn)
+        ensure_sqlite_twitch_schema(conn)
         conn.execute(
             """
             INSERT INTO twitch_streamers (twitch_login, twitch_user_id, silent_raid)

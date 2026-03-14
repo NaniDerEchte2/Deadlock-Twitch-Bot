@@ -9,36 +9,36 @@ export const affiliateFeatures: AffiliateFeature[] = [
     icon: "Percent",
     title: "30% Provision",
     description:
-      "Auf jede Zahlung deiner geworbenen Streamer — dauerhaft, ohne Limit.",
+      "Auf jede Zahlung deiner geworbenen Streamer — dauerhaft, ohne Obergrenze. Solange der Streamer zahlt, verdienst du mit.",
   },
   {
     icon: "UserPlus",
-    title: "Streamer reservieren",
+    title: "Streamer beanspruchen",
     description:
-      "Beanspruche Streamer, bevor sie sich registrieren — und sichere dir die Provision.",
+      "Finde Deadlock-Streamer und beanspruche sie im Portal, bevor jemand anders es tut. First come, first served.",
   },
   {
     icon: "CreditCard",
     title: "Stripe Connect",
     description:
-      "Automatische Auszahlung direkt auf dein Konto via Stripe Connect.",
+      "Verbinde dein Stripe-Konto einmalig und bekomme jede Provision automatisch auf dein Bankkonto — kein manuelles Anfordern.",
   },
   {
     icon: "Infinity",
     title: "Kein Ablaufdatum",
     description:
-      "Einmal geworben, dauerhaft provisionsberechtigt — ohne Zeitlimit.",
+      "Einmal geworben, dauerhaft provisionsberechtigt. Keine zeitliche Begrenzung, kein Verfall.",
   },
   {
     icon: "LayoutDashboard",
     title: "Echtzeit-Dashboard",
     description:
-      "Behalte den Überblick über Verdienste, Streamer und Auszahlungen in Echtzeit.",
+      "Sieh in Echtzeit was du verdienst: Beanspruchte Streamer, Provisionen, Auszahlungen und History — alles im Portal.",
   },
   {
     icon: "LogIn",
     title: "Einfache Registrierung",
     description:
-      "Melde dich mit deinem Twitch-Account an — kein extra Konto nötig.",
+      "Melde dich mit deinem Twitch-Account an, verbinde Stripe — in unter 5 Minuten startklar. Keine Adressdaten nötig.",
   },
 ];

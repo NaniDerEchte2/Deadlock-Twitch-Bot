@@ -235,19 +235,6 @@ class TwitchDashboardMixin:
                     os.getenv("TWITCH_TARGET_GAME_NAME") or TWITCH_TARGET_GAME_NAME or ""
                 ).strip()
                 with storage.get_conn() as c:
-                    c.execute(
-                        """
-                        UPDATE twitch_streamers
-                           SET is_on_discord=1
-                         WHERE is_on_discord=0
-                           AND EXISTS (
-                               SELECT 1
-                                 FROM twitch_streamers_partner_state ps
-                                WHERE LOWER(ps.twitch_login) = LOWER(twitch_streamers.twitch_login)
-                                  AND ps.is_partner = 1
-                           )
-                        """
-                    )
                     rows = c.execute(
                         """
                         SELECT s.twitch_login,
@@ -265,7 +252,7 @@ class TwitchDashboardMixin:
                                a.authorized_at AS raid_authorized_at,
                                a.token_expires_at AS raid_token_expires_at,
                                sess.last_deadlock_stream_at
-                          FROM twitch_streamers s
+                          FROM twitch_partners_all_state s
                           LEFT JOIN twitch_raid_auth a
                             ON (
                                  s.twitch_user_id IS NOT NULL
@@ -281,12 +268,12 @@ class TwitchDashboardMixin:
                                             WHEN had_deadlock_in_session
                                                  OR LOWER(COALESCE(game_name,'')) = LOWER(?)
                                             THEN COALESCE(ended_at, started_at)
-                                          END) AS last_deadlock_stream_at
+                                  END) AS last_deadlock_stream_at
                                  FROM twitch_stream_sessions
                                 GROUP BY LOWER(streamer_login)
                           ) AS sess
                             ON sess.streamer_login = LOWER(s.twitch_login)
-                         WHERE COALESCE(s.is_monitored_only, 0) = 0
+                         WHERE s.status = 'active'
                           ORDER BY s.twitch_login
                         """,
                         (target_game,),
@@ -348,14 +335,7 @@ class TwitchDashboardMixin:
 
         try:
             with storage.get_conn() as conn:
-                row = conn.execute(
-                    """
-                    SELECT discord_user_id
-                    FROM twitch_streamers
-                    WHERE lower(twitch_login) = lower(?)
-                    """,
-                    (normalized,),
-                ).fetchone()
+                row = storage.load_streamer_identity(conn, twitch_login=normalized)
         except Exception as exc:
             raise RuntimeError("Failed to load Discord link") from exc
 
@@ -363,7 +343,7 @@ class TwitchDashboardMixin:
             raise LookupError("Streamer not found")
 
         discord_user_id = str(
-            row["discord_user_id"] if hasattr(row, "keys") else row[0] or ""
+            row["discord_user_id"] if hasattr(row, "keys") else row[2] or ""
         ).strip()
         if not discord_user_id:
             raise LookupError("No Discord user linked for this streamer")
@@ -666,17 +646,13 @@ class TwitchDashboardMixin:
             raise ValueError("Ungültiger Login")
 
         with storage.get_conn() as conn:
-            row = conn.execute(
-                "SELECT twitch_login FROM twitch_streamers WHERE twitch_login=?",
-                (normalized,),
-            ).fetchone()
+            row = storage.set_streamer_discord_member(
+                conn,
+                twitch_login=normalized,
+                is_on_discord=is_on_discord,
+            )
             if not row:
                 raise ValueError(f"{normalized} ist nicht gespeichert")
-
-            conn.execute(
-                "UPDATE twitch_streamers SET is_on_discord=? WHERE twitch_login=?",
-                (1 if is_on_discord else 0, normalized),
-            )
 
         if is_on_discord:
             return f"{normalized} als Discord-Mitglied markiert"
@@ -702,39 +678,32 @@ class TwitchDashboardMixin:
 
         now_iso = datetime.utcnow().isoformat(timespec="seconds")
         with storage.get_conn() as conn:
-            row = conn.execute(
-                "SELECT archived_at FROM twitch_streamers WHERE twitch_login = ?",
-                (normalized,),
-            ).fetchone()
-            if not row:
+            active_row = storage.load_active_partner(conn, twitch_login=normalized)
+            history_row = storage.load_latest_partner_history(conn, twitch_login=normalized)
+            if not active_row and not history_row:
                 raise ValueError(f"{normalized} ist nicht gespeichert")
-            current = row[0] if hasattr(row, "keys") else row[0]
+            current = None if active_row else (
+                history_row["archived_at"] if history_row and hasattr(history_row, "keys") else (history_row[19] if history_row else None)
+            )
 
             if desired == "archive":
-                if current:
+                if not active_row:
                     return f"{normalized} ist bereits archiviert (seit {current})"
-                conn.execute(
-                    "UPDATE twitch_streamers SET archived_at = ? WHERE twitch_login = ?",
-                    (now_iso, normalized),
-                )
+                storage.archive_active_partner(conn, twitch_login=normalized)
                 return f"{normalized} archiviert"
 
             if desired == "unarchive":
-                if not current:
+                if active_row:
                     return f"{normalized} ist nicht archiviert"
-                conn.execute(
-                    "UPDATE twitch_streamers SET archived_at = NULL WHERE twitch_login = ?",
-                    (normalized,),
-                )
+                storage.reactivate_partner(conn, twitch_login=normalized)
                 return f"{normalized} ent-archiviert"
 
             # toggle
-            new_value = None if current else now_iso
-            conn.execute(
-                "UPDATE twitch_streamers SET archived_at = ? WHERE twitch_login = ?",
-                (new_value, normalized),
-            )
-            return f"{normalized} {'archiviert' if new_value else 'reaktiviert'}"
+            if active_row:
+                storage.archive_active_partner(conn, twitch_login=normalized)
+                return f"{normalized} archiviert"
+            storage.reactivate_partner(conn, twitch_login=normalized)
+            return f"{normalized} reaktiviert"
 
     async def _dashboard_save_discord_profile(
         self,
@@ -796,52 +765,14 @@ class TwitchDashboardMixin:
 
         try:
             with storage.get_conn() as conn:
-                row = conn.execute(
-                    "SELECT twitch_login FROM twitch_streamers WHERE twitch_login=?",
-                    (normalized,),
-                ).fetchone()
-
-                if row:
-                    # UPDATE: Setze auch twitch_user_id falls verfügbar
-                    if twitch_user_id:
-                        conn.execute(
-                            "UPDATE twitch_streamers "
-                            "SET discord_user_id=?, discord_display_name=?, is_on_discord=?, twitch_user_id=? "
-                            "WHERE twitch_login=?",
-                            (
-                                discord_id_clean or None,
-                                display_name_clean or None,
-                                1 if mark_member else 0,
-                                twitch_user_id,
-                                normalized,
-                            ),
-                        )
-                    else:
-                        conn.execute(
-                            "UPDATE twitch_streamers "
-                            "SET discord_user_id=?, discord_display_name=?, is_on_discord=? "
-                            "WHERE twitch_login=?",
-                            (
-                                discord_id_clean or None,
-                                display_name_clean or None,
-                                1 if mark_member else 0,
-                                normalized,
-                            ),
-                        )
-                else:
-                    # INSERT: Mit user_id falls verfügbar
-                    conn.execute(
-                        "INSERT INTO twitch_streamers "
-                        "(twitch_login, twitch_user_id, discord_user_id, discord_display_name, is_on_discord) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (
-                            normalized,
-                            twitch_user_id,
-                            discord_id_clean or None,
-                            display_name_clean or None,
-                            1 if mark_member else 0,
-                        ),
-                    )
+                storage.save_streamer_discord_profile(
+                    conn,
+                    twitch_login=normalized,
+                    twitch_user_id=twitch_user_id,
+                    discord_user_id=discord_id_clean or None,
+                    discord_display_name=display_name_clean or None,
+                    mark_member=mark_member,
+                )
         except Exception:
             raise ValueError("Discord-ID wird bereits verwendet")
 
@@ -1588,7 +1519,8 @@ class TwitchDashboardMixin:
         with storage.get_conn() as c:
             # 1. Stammdaten
             row = c.execute(
-                "SELECT * FROM twitch_streamers WHERE twitch_login=?", (login,)
+                "SELECT * FROM twitch_partners_all_state WHERE LOWER(twitch_login)=LOWER(?) AND status='active'",
+                (login,),
             ).fetchone()
             if not row:
                 return {}
@@ -1807,36 +1739,48 @@ class TwitchDashboardMixin:
             should_notify = False
             copied = 0
             with storage.get_conn() as c:
-                row = c.execute(
-                    (
-                        "SELECT discord_user_id, discord_display_name, manual_verified_at "
-                        "FROM twitch_streamers WHERE twitch_login=?"
-                    ),
+                source_row = c.execute(
+                    """
+                    SELECT twitch_user_id, discord_user_id, discord_display_name, manual_verified_at
+                    FROM twitch_streamers
+                    WHERE twitch_login=?
+                    """,
                     (login,),
                 ).fetchone()
-                if row:
-                    row_data = _row_to_dict(row)
+                partner_row = storage.load_active_partner(c, twitch_login=login)
+                twitch_user_id = ""
+                if source_row:
+                    row_data = _row_to_dict(source_row)
+                    twitch_user_id = str(row_data.get("twitch_user_id") or "").strip()
+                    should_notify = row_data.get("manual_verified_at") is None
+                elif partner_row:
+                    row_data = {
+                        "twitch_user_id": partner_row["twitch_user_id"] if hasattr(partner_row, "keys") else partner_row[1],
+                        "discord_user_id": partner_row["discord_user_id"] if hasattr(partner_row, "keys") else partner_row[21],
+                        "discord_display_name": partner_row["discord_display_name"] if hasattr(partner_row, "keys") else partner_row[22],
+                        "manual_verified_at": partner_row["manual_verified_at"] if hasattr(partner_row, "keys") else partner_row[11],
+                    }
+                    twitch_user_id = str(row_data.get("twitch_user_id") or "").strip()
                     should_notify = row_data.get("manual_verified_at") is None
 
-                if mode == "permanent":
-                    c.execute(
-                        "UPDATE twitch_streamers "
-                        "SET manual_verified_permanent=1, manual_verified_until=NULL, manual_verified_at=NOW(), "
-                        "    manual_partner_opt_out=0, is_monitored_only=0, "
-                        "    is_on_discord=1 "
-                        "WHERE twitch_login=?",
-                        (login,),
-                    )
-                    base_msg = f"{login} dauerhaft verifiziert"
-                else:
-                    c.execute(
-                        "UPDATE twitch_streamers "
-                        "SET manual_verified_permanent=0, manual_verified_until=NOW() + INTERVAL '30 days', "
-                        "    manual_verified_at=NOW(), manual_partner_opt_out=0, is_monitored_only=0, is_on_discord=1 "
-                        "WHERE twitch_login=?",
-                        (login,),
-                    )
-                    base_msg = f"{login} für 30 Tage verifiziert"
+                if not twitch_user_id:
+                    return f"{login} ist nicht gespeichert"
+
+                verification = storage.verification_payload(mode)
+                storage.promote_streamer_to_partner(
+                    c,
+                    twitch_login=login,
+                    twitch_user_id=twitch_user_id,
+                    discord_user_id=row_data.get("discord_user_id") if row_data else None,
+                    discord_display_name=row_data.get("discord_display_name") if row_data else None,
+                    is_on_discord=1 if row_data and row_data.get("discord_user_id") else 0,
+                    **verification,
+                )
+                base_msg = (
+                    f"{login} dauerhaft verifiziert"
+                    if mode == "permanent"
+                    else f"{login} für 30 Tage verifiziert"
+                )
                 copied = storage.backfill_tracked_stats_from_category(c, login)
 
             notes: list[str] = []
@@ -1854,13 +1798,9 @@ class TwitchDashboardMixin:
 
         if mode == "clear":
             with storage.get_conn() as c:
-                c.execute(
-                    "UPDATE twitch_streamers "
-                    "SET manual_verified_permanent=0, manual_verified_until=NULL, manual_verified_at=NULL, "
-                    "    manual_partner_opt_out=1, is_monitored_only=0 "
-                    "WHERE twitch_login=?",
-                    (login,),
-                )
+                result = storage.archive_active_partner(c, twitch_login=login)
+                if not result:
+                    return f"{login} ist nicht gespeichert"
 
             # "Kein Partner" ist eine rein interne Markierung – es sollen hierbei keine DMs
             # ausgelöst werden. Wir geben daher eine entsprechend klare Rückmeldung aus,
@@ -1870,19 +1810,12 @@ class TwitchDashboardMixin:
         if mode == "failed":
             row_data = None
             with storage.get_conn() as c:
-                row = c.execute(
-                    "SELECT discord_user_id, discord_display_name FROM twitch_streamers WHERE twitch_login=?",
-                    (login,),
-                ).fetchone()
-                if row:
-                    row_data = _row_to_dict(row)
-                    c.execute(
-                        "UPDATE twitch_streamers "
-                        "SET manual_verified_permanent=0, manual_verified_until=NULL, manual_verified_at=NULL, "
-                        "    manual_partner_opt_out=0, is_monitored_only=0 "
-                        "WHERE twitch_login=?",
-                        (login,),
-                    )
+                identity_row = storage.load_streamer_identity(c, twitch_login=login)
+                if identity_row:
+                    row_data = _row_to_dict(identity_row)
+                archived = storage.archive_active_partner(c, twitch_login=login)
+                if archived and row_data is None:
+                    row_data = archived
 
             if not row_data:
                 return f"{login} ist nicht gespeichert"

@@ -10,7 +10,8 @@ import aiohttp
 
 from bot.raid.bot import RaidBot
 from bot.raid.mixin import TwitchRaidMixin
-from bot.storage import proxy as storage_proxy
+
+from tests.sqlite_twitch_schema import ensure_sqlite_twitch_schema
 
 
 class _FrozenDateTime(datetime):
@@ -36,7 +37,7 @@ class RaidPartnerScoreSelectionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.conn = sqlite3.connect(":memory:")
         self.conn.row_factory = sqlite3.Row
-        storage_proxy.ensure_schema(self.conn)
+        ensure_sqlite_twitch_schema(self.conn)
         self.session = aiohttp.ClientSession()
         self.raid_bot = RaidBot(
             client_id="client-id",
@@ -316,7 +317,7 @@ class ManualRaidFlowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.conn = sqlite3.connect(":memory:")
         self.conn.row_factory = sqlite3.Row
-        storage_proxy.ensure_schema(self.conn)
+        ensure_sqlite_twitch_schema(self.conn)
         self.session = aiohttp.ClientSession()
         self.raid_bot = RaidBot(
             client_id="client-id",
@@ -339,10 +340,30 @@ class ManualRaidFlowTests(unittest.IsolatedAsyncioTestCase):
     def _insert_partner(self, login: str, user_id: str) -> None:
         self.conn.execute(
             """
-            INSERT INTO twitch_streamers (twitch_login, twitch_user_id, manual_verified_at)
-            VALUES (?, ?, ?)
+            INSERT INTO twitch_streamer_identities (twitch_login, twitch_user_id)
+            VALUES (?, ?)
+            ON CONFLICT(twitch_user_id) DO UPDATE SET
+                twitch_login = excluded.twitch_login
             """,
-            (login, user_id, "2026-03-10T19:00:00+00:00"),
+            (login, user_id),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO twitch_partners (
+                twitch_login,
+                twitch_user_id,
+                manual_verified_at,
+                raid_bot_enabled,
+                partnered_at,
+                status
+            ) VALUES (?, ?, ?, 1, ?, 'active')
+            """,
+            (
+                login,
+                user_id,
+                "2026-03-10T19:00:00+00:00",
+                "2026-03-10T19:00:00+00:00",
+            ),
         )
         self.conn.execute(
             """
@@ -915,7 +936,7 @@ class OfflineRaidSourceLoggingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.conn = sqlite3.connect(":memory:")
         self.conn.row_factory = sqlite3.Row
-        storage_proxy.ensure_schema(self.conn)
+        ensure_sqlite_twitch_schema(self.conn)
         self.session = aiohttp.ClientSession()
         self.raid_bot = RaidBot(
             client_id="client-id",

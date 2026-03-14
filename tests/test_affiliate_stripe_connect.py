@@ -92,23 +92,32 @@ class _AffiliateStripeHarness(_DashboardAffiliateMixin):
 
 
 class _AffiliateStripeCallbackHarness(_DashboardAffiliateMixin):
-    def __init__(self, *, redirect_uri: str) -> None:
+    def __init__(
+        self,
+        *,
+        redirect_uri: str,
+        session_login: str = "partner_one",
+        state_login: str = "partner_one",
+    ) -> None:
         self._affiliate_connect_states = {
             "state-123": {
                 "created_at": time.time(),
                 "redirect_uri": redirect_uri,
-                "twitch_login": "partner_one",
+                "twitch_login": state_login,
             }
         }
+        self._session_login = session_login
+        self.loader_calls: list[tuple[str, ...]] = []
 
     def _get_affiliate_session(self, _request):
         return {
-            "twitch_login": "partner_one",
+            "twitch_login": self._session_login,
             "twitch_user_id": "1001",
             "display_name": "Partner One",
         }
 
     def _load_secret_value(self, *keys: str) -> str:
+        self.loader_calls.append(tuple(keys))
         if keys == ("STRIPE_SECRET_KEY", "TWITCH_BILLING_STRIPE_SECRET_KEY"):
             return "sk_test_123"
         return ""
@@ -173,14 +182,40 @@ class AffiliateStripeConnectTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(web.HTTPFound) as ctx:
                     await handler._affiliate_connect_stripe_callback(request)
 
-        self.assertEqual(ctx.exception.location, "/twitch/affiliate/dashboard")
+        self.assertEqual(ctx.exception.location, "/twitch/affiliate/portal")
         self.assertEqual(len(http_session.calls), 1)
         _, payload = http_session.calls[0]
         self.assertEqual(payload.get("client_secret"), "sk_test_123")
         self.assertEqual(payload.get("code"), "oauth-code")
         self.assertEqual(payload.get("grant_type"), "authorization_code")
         self.assertEqual(payload.get("redirect_uri"), redirect_uri)
+        self.assertEqual(
+            handler.loader_calls,
+            [("STRIPE_SECRET_KEY", "TWITCH_BILLING_STRIPE_SECRET_KEY")],
+        )
         self.assertEqual(conn.commits, 1)
+
+    async def test_connect_callback_rejects_when_session_login_does_not_match_state(self) -> None:
+        redirect_uri = "https://twitch.earlysalty.com/twitch/affiliate/connect/stripe/callback"
+        handler = _AffiliateStripeCallbackHarness(
+            redirect_uri=redirect_uri,
+            session_login="partner_two",
+            state_login="partner_one",
+        )
+        request = SimpleNamespace(query={"state": "state-123", "code": "oauth-code"})
+
+        with patch("bot.dashboard.affiliate_mixin.aiohttp.ClientSession") as client_session:
+            with patch("bot.dashboard.affiliate_mixin.storage.get_conn") as get_conn:
+                response = await handler._affiliate_connect_stripe_callback(request)
+
+        self.assertEqual(response.status, 403)
+        self.assertEqual(
+            response.text,
+            "Affiliate-Session passt nicht zum Stripe Connect state.",
+        )
+        self.assertEqual(handler.loader_calls, [])
+        client_session.assert_not_called()
+        get_conn.assert_not_called()
 
     def test_dashboard_server_prefers_static_connect_client_id(self) -> None:
         with patch("bot.dashboard.server_v2.STATIC_STRIPE_CONNECT_CLIENT_ID", "ca_static_789"):

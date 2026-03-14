@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from aiohttp import web
@@ -32,6 +33,10 @@ DASHBOARD_AFFILIATE_PORTAL_DISCORD_LOGIN_URL = (
     "/twitch/auth/discord/login?next=%2Ftwitch%2Faffiliate%2Fportal"
 )
 ADMIN_DASHBOARD_DISCORD_LOGIN_URL = "/twitch/auth/discord/login?next=%2Ftwitch%2Fadmin"
+WEBSITE_DIST_ROOT_PATH = Path(__file__).resolve().parents[2] / "website" / "dist"
+AFFILIATE_PORTAL_INDEX_PATH = (
+    WEBSITE_DIST_ROOT_PATH / "affiliate-portal" / "index.html"
+)
 
 
 class _AnalyticsOverviewMixin:
@@ -116,6 +121,7 @@ class _AnalyticsOverviewMixin:
         router.add_get("/twitch/verwaltung", self._serve_verwaltung)
         router.add_get("/twitch/pricing", self._serve_pricing)
         router.add_get("/twitch/affiliate/portal", self._serve_affiliate_portal)
+        router.add_get("/website/{path:.*}", self._serve_website_dist_asset)
         router.add_get("/twitch/admin/", self._serve_admin_dashboard)
         router.add_get("/twitch/admin/assets/{path:.*}", self._serve_admin_dashboard_assets)
         router.add_get("/twitch/admin/{path:.*}", self._serve_admin_dashboard_path)
@@ -617,28 +623,19 @@ class _AnalyticsOverviewMixin:
         gate_response = self._admin_dashboard_host_page_gate(request)
         if gate_response is not None:
             return gate_response
-        if not self._check_v2_auth(request):
-            should_use_discord = getattr(self, "_should_use_discord_admin_login", None)
-            if callable(should_use_discord) and bool(should_use_discord(request)):
-                login_url = DASHBOARD_AFFILIATE_PORTAL_DISCORD_LOGIN_URL
-            else:
-                login_url = DASHBOARD_AFFILIATE_PORTAL_LOGIN_URL
-            response = self._dashboard_auth_redirect_or_unavailable(
-                request,
-                next_path="/twitch/affiliate/portal",
-                fallback_login_url=login_url,
-            )
-            if isinstance(response, web.HTTPException):
-                raise response
-            return response
-        import pathlib
-
-        dist_path = pathlib.Path(__file__).parent / "dashboard_v2" / "dist" / "index.html"
+        dist_path = AFFILIATE_PORTAL_INDEX_PATH
         if dist_path.exists():
             return web.FileResponse(dist_path)
         return web.Response(
-            text="Dashboard not built. Run npm run build in dashboard_v2/", status=404
+            text="Affiliate portal not built. Run npm run build in website/", status=404
         )
+
+    async def _serve_website_dist_asset(self, request: web.Request) -> web.Response:
+        """Serve static files from website/dist for embedded portal assets."""
+        gate_response = self._admin_dashboard_host_page_gate(request)
+        if gate_response is not None:
+            return gate_response
+        return self._resolve_website_dist_asset_response(request.match_info.get("path", ""))
 
     async def _serve_dashboard_v2_assets(self, request: web.Request) -> web.Response:
         """Serve static assets for the dashboard."""
@@ -687,6 +684,38 @@ class _AnalyticsOverviewMixin:
 
         # Resolve each path segment against actual directory entries to avoid
         # using untrusted input directly in filesystem path expressions.
+        for segment in raw_path.split("/"):
+            if not segment or segment in {".", ".."} or "\\" in segment:
+                return web.Response(text="Not found", status=404)
+            if not candidate.is_dir():
+                return web.Response(text="Not found", status=404)
+
+            next_candidate = None
+            for entry in candidate.iterdir():
+                if entry.name == segment:
+                    next_candidate = entry
+                    break
+            if next_candidate is None:
+                return web.Response(text="Not found", status=404)
+            candidate = next_candidate
+
+        try:
+            candidate.resolve().relative_to(dist_root)
+        except ValueError:
+            return web.Response(text="Not found", status=404)
+
+        if candidate.is_file():
+            return web.FileResponse(candidate)
+        return web.Response(text="Not found", status=404)
+
+    def _resolve_website_dist_asset_response(self, raw_path: str) -> web.StreamResponse:
+        """Resolve website/dist files with strict path validation."""
+        if not raw_path:
+            return web.Response(text="Not found", status=404)
+
+        dist_root = WEBSITE_DIST_ROOT_PATH.resolve()
+        candidate = dist_root
+
         for segment in raw_path.split("/"):
             if not segment or segment in {".", ".."} or "\\" in segment:
                 return web.Response(text="Not found", status=404)

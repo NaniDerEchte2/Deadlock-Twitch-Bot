@@ -525,6 +525,92 @@ FAQ_SECTIONS.push(
 );
 
 FAQ_SECTIONS.push({
+  id: "affiliate",
+  badge: "Affiliate",
+  title: "Vertriebler-Programm",
+  description:
+    "Alles über das Affiliate-Programm: Anmeldung, Stripe, Provisionen und wie du Streamer wirbst.",
+  items: [
+    {
+      question: "Was ist das Vertriebler-Programm?",
+      answer:
+        "Du wirbst Deadlock-Streamer für EarlySalty und bekommst dauerhaft automatisch 30% Provision auf jede Zahlung deiner geworbenen Streamer.",
+      details: [
+        "Die Provision läuft dauerhaft weiter, solange dein geworbener Streamer zahlt.",
+        "Die Zuordnung erfolgt über das Affiliate-Portal und ist eindeutig pro Streamer.",
+        "Das Modell ist auf laufende Provisionen statt einmalige Boni ausgelegt.",
+      ],
+      access: "Alle",
+      tags: ["affiliate", "vertriebler", "provision", "programm", "streamer"],
+      routes: [
+        { label: "Affiliate", href: TWITCH_AFFILIATE_URL },
+      ],
+    },
+    {
+      question: "Wie melde ich mich an?",
+      answer:
+        "Du klickst auf \"Mit Twitch einloggen\" und bist damit startklar. Kein Formular, kein Papierkram, in etwa 2 Minuten erledigt.",
+      details: [
+        "Die Anmeldung läuft direkt über deinen Twitch-Account.",
+        "Es werden keine separaten Registrierungsformulare verlangt.",
+        "Nach dem Login kannst du direkt ins Affiliate-Portal wechseln.",
+      ],
+      access: "Alle",
+      tags: ["anmeldung", "login", "twitch", "affiliate", "start"],
+      routes: [
+        { label: "Affiliate", href: TWITCH_AFFILIATE_URL },
+      ],
+    },
+    {
+      question: "Wie funktioniert Stripe Connect?",
+      answer:
+        "Du verbindest dein Stripe-Konto einmalig. Das dauert ungefähr 5 Minuten. Danach werden deine Provisionen bei jeder Streamer-Zahlung automatisch ausgezahlt.",
+      details: [
+        "Stripe Connect ist die Auszahlungsschiene für deine Provisionen.",
+        "Nach der Einrichtung landen Auszahlungen automatisch auf deinem Bankkonto.",
+        "Die Verknüpfung ist nur einmalig notwendig.",
+      ],
+      access: "Alle",
+      tags: ["stripe", "stripe connect", "auszahlung", "bankkonto", "affiliate"],
+      routes: [
+        { label: "Affiliate", href: TWITCH_AFFILIATE_URL },
+      ],
+    },
+    {
+      question: "Wie wirbt man Streamer?",
+      answer:
+        "Du findest Deadlock-Streamer auf Twitch, in Discord-Servern oder in Communities, empfiehlst EarlySalty und beanspruchst den Streamer danach im Portal. Sobald er zahlt, bekommst du 30%.",
+      details: [
+        "Geeignet sind Streamer, die noch nicht bei EarlySalty registriert sind.",
+        "Die Zuordnung erfolgt über den Twitch-Login des Streamers im Portal.",
+        "Jeder beanspruchte Streamer kann nur einem Vertriebler zugeordnet sein.",
+      ],
+      access: "Alle",
+      tags: ["streamer", "werben", "claim", "portal", "provision"],
+      routes: [
+        { label: "Affiliate", href: TWITCH_AFFILIATE_URL },
+        { label: "Discord beitreten", href: DISCORD_INVITE_URL },
+      ],
+    },
+    {
+      question: "Was passiert ohne Stripe-Konto?",
+      answer:
+        "Provisionen werden bis 50€ gespeichert. Darüber hinaus verfallen sie. Deshalb lohnt es sich, Stripe möglichst früh zu verbinden.",
+      details: [
+        "Ohne Stripe gehen kleine Provisionen nicht sofort verloren.",
+        "Die Speichergrenze liegt bei insgesamt 50€ offenen Provisionen.",
+        "Sobald Stripe verbunden ist, lohnt sich die automatische Auszahlung sofort.",
+      ],
+      access: "Alle",
+      tags: ["ohne stripe", "50 euro", "limit", "pending", "affiliate"],
+      routes: [
+        { label: "Affiliate", href: TWITCH_AFFILIATE_URL },
+      ],
+    },
+  ],
+});
+
+FAQ_SECTIONS.push({
   id: "support",
   badge: "Support",
   title: "Hilfe, Konto & Rechtliches",

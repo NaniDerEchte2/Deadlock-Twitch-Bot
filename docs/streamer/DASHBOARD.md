@@ -67,7 +67,7 @@ Gemeinsam genutzte APIs:
 | `streams` | `free` | `overview`, `session/{id}` | Session-Liste mit Drilldown auf Retention, Viewer-Verlauf und Top-Chatters |
 | `schedule` | `free` | `hourly-heatmap`, `weekly-stats` | beste Slots, Tageszeiten, Heatmap, Timing-Tipps |
 | `category` | `free` | `category-leaderboard`, `category-activity-series` | Deadlock-Leaderboards, Filter, Suche, Sortierung |
-| `chat` | `basic` | `chat-analytics`, `viewer-profiles`, `coaching`, `chat-hype-timeline`, `chat-content-analysis`, `chat-social-graph` | Chat-KPIs, Loyalitaet, Tageszeiten, Viewer-Profile, Hype-Momente, Themen, Netzwerk |
+| `chat` | `basic` | `chat-analytics`, `viewer-profiles`, `coaching`, `chat-hype-timeline`, `chat-content-analysis`, `chat-social-graph` | Chat-KPIs, Loyalitaet, Tageszeiten, Viewer-Profile, Hype-Momente, Themen. `chat-social-graph` und die sichtbare Metrik `Chat Penetration` sind derzeit im UI deaktiviert. |
 | `growth` | `basic` | `monthly-stats`, `weekly-stats`, `tag-analysis-extended`, `title-performance`, `raid-retention` | Monats-/Wochenwachstum, Titel/Tags, Scheduling, Raid-Retention |
 | `audience` | `basic` | `watch-time-distribution`, `follower-funnel`, `tag-analysis-extended`, `title-performance`, `audience-demographics`, `lurker-analysis` | Watch-Time, Funnel, Demografie, Lurker-Sicht, Titel-/Tag-Performance |
 | `compare` | `basic` | `category-comparison`, `viewer-overlap`, `audience-sharing` | Benchmark vs. Kategorie, Overlap, Audience-Sharing |
@@ -109,6 +109,8 @@ Auch in freigeschalteten Tabs koennen einzelne Cards auf `extended` limitiert se
 - Der Tab `ai` ist im Frontend als Extended-Tab modelliert.
 - Die APIs `/twitch/api/v2/ai/analysis` und `/twitch/api/v2/ai/history` sind aktuell trotzdem admin-only.
 - Fuer normale Streamer bedeutet das: UI-Tab sichtbar moeglich, produktive Daten aber derzeit nicht als normaler Partner nutzbar.
+- Das Feature `chat_social_graph` ist implementiert, aber aktuell bewusst nicht im Streamer-UI aktiv. Details: [Chat-Netzwerk deaktiviert](CHAT_NETWORK_DISABLED.md)
+- Die Metrik `Chat Penetration` wird aktuell bewusst nicht im Streamer-UI ausgespielt. Details: [Chat Penetration deaktiviert](CHAT_PENETRATION_DISABLED.md)
 
 ## `/twitch/verwaltung`
 

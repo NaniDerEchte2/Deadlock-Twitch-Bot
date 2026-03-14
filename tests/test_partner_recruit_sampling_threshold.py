@@ -16,7 +16,7 @@ class PartnerRecruitSamplingThresholdTests(unittest.TestCase):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         conn.execute("CREATE TABLE twitch_stats_category (streamer TEXT, ts_utc TEXT)")
-        conn.execute("CREATE TABLE twitch_streamers (twitch_login TEXT)")
+        conn.execute("CREATE TABLE twitch_streamer_identities (twitch_login TEXT)")
         conn.execute(
             "CREATE TABLE twitch_partner_outreach (streamer_login TEXT, cooldown_until TEXT)"
         )

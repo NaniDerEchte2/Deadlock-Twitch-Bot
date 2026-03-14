@@ -524,14 +524,36 @@ class DashboardLiveAnnouncementMixin:
             normalized = candidate.strip().lower()
 
         if not normalized:
-            if session_login:
-                return session_login
+            if not is_admin:
+                return self._la_active_partner_login(session_login)
             streamers = self._la_list_streamers(session_login=session_login, is_admin=is_admin)
             return streamers[0] if streamers else ""
 
-        if not is_admin and session_login and normalized != session_login:
-            return session_login
-        return normalized
+        if not is_admin:
+            session_partner = self._la_active_partner_login(session_login)
+            if not session_partner:
+                return ""
+            if normalized != session_partner:
+                return session_partner
+            return session_partner
+
+        return self._la_active_partner_login(normalized)
+
+    def _la_active_partner_login(self, login: str) -> str:
+        normalized = str(login or "").strip().lower()
+        if not normalized:
+            return ""
+        try:
+            with _storage.get_conn() as conn:
+                row = _storage.load_active_partner(conn, twitch_login=normalized)
+        except Exception:
+            log.debug("Could not resolve active partner login for %s", normalized, exc_info=True)
+            return ""
+        if not row:
+            return ""
+        if hasattr(row, "keys"):
+            return str(row.get("twitch_login") or normalized).strip().lower()
+        return str((row[2] if len(row) > 2 else normalized) or normalized).strip().lower()
 
     def _la_ensure_storage(self) -> None:
         if getattr(self, "_live_announcement_storage_ready", False):
@@ -552,7 +574,8 @@ class DashboardLiveAnnouncementMixin:
 
     def _la_list_streamers(self, *, session_login: str, is_admin: bool) -> list[str]:
         if not is_admin and session_login:
-            return [session_login]
+            active_login = self._la_active_partner_login(session_login)
+            return [active_login] if active_login else []
         self._la_ensure_storage()
         try:
             with _storage.get_conn() as conn:
@@ -695,15 +718,7 @@ class DashboardLiveAnnouncementMixin:
             return fallback
         try:
             with _storage.get_conn() as conn:
-                row = conn.execute(
-                    """
-                    SELECT twitch_login, discord_user_id, live_ping_role_id, COALESCE(live_ping_enabled, 1) AS live_ping_enabled
-                      FROM twitch_streamers
-                     WHERE LOWER(twitch_login) = LOWER(?)
-                     LIMIT 1
-                    """,
-                    (login,),
-                ).fetchone()
+                row = _storage.load_active_partner(conn, twitch_login=login)
         except Exception:
             log.debug("Could not load streamer entry for live ping role sync (%s)", login, exc_info=True)
             return fallback
@@ -713,14 +728,15 @@ class DashboardLiveAnnouncementMixin:
             return {
                 "twitch_login": str(row.get("twitch_login") or login).strip().lower(),
                 "discord_user_id": row.get("discord_user_id"),
-                "live_ping_role_id": row.get("live_ping_role_id"),
-                "live_ping_enabled": row.get("live_ping_enabled", 1),
+                "live_ping_role_id": row.get("live_ping_role_id") if "live_ping_role_id" in row.keys() else None,
+                "live_ping_enabled": row.get("live_ping_enabled", 1) if "live_ping_enabled" in row.keys() else 1,
             }
+        is_partner_row = len(row) > 20
         return {
-            "twitch_login": str(row[0] or login).strip().lower(),
-            "discord_user_id": row[1] if len(row) > 1 else None,
-            "live_ping_role_id": row[2] if len(row) > 2 else None,
-            "live_ping_enabled": row[3] if len(row) > 3 else 1,
+            "twitch_login": str((row[2] if is_partner_row else row[1]) or login).strip().lower(),
+            "discord_user_id": row[21] if is_partner_row and len(row) > 21 else (row[2] if len(row) > 2 else None),
+            "live_ping_role_id": row[16] if is_partner_row and len(row) > 16 else None,
+            "live_ping_enabled": row[17] if is_partner_row and len(row) > 17 else 1,
         }
 
     def _la_persist_streamer_ping_role_id(self, streamer_login: str, role_id: int) -> None:
@@ -729,13 +745,10 @@ class DashboardLiveAnnouncementMixin:
             return
         try:
             with _storage.get_conn() as conn:
-                conn.execute(
-                    """
-                    UPDATE twitch_streamers
-                       SET live_ping_role_id = ?, live_ping_enabled = COALESCE(live_ping_enabled, 1)
-                     WHERE LOWER(twitch_login) = LOWER(?)
-                    """,
-                    (role_id, login),
+                _storage.set_partner_live_ping_settings(
+                    conn,
+                    twitch_login=login,
+                    live_ping_role_id=role_id,
                 )
         except Exception:
             log.debug("Could not persist live_ping_role_id for %s", login, exc_info=True)
@@ -917,13 +930,15 @@ class DashboardLiveAnnouncementMixin:
             return None
         try:
             with _storage.get_conn() as conn:
-                row = conn.execute(
-                    "SELECT discord_user_id FROM twitch_streamers WHERE LOWER(twitch_login)=LOWER(?) LIMIT 1",
-                    (streamer_login,),
-                ).fetchone()
+                row = _storage.load_active_partner(conn, twitch_login=streamer_login)
         except Exception:
             row = None
-        value = row[0] if row and not hasattr(row, "keys") else (row["discord_user_id"] if row else "")
+        if row and hasattr(row, "keys"):
+            value = row.get("discord_user_id")
+        elif row:
+            value = row[2] if len(row) > 2 and len(row) < 10 else (row[21] if len(row) > 21 else "")
+        else:
+            value = ""
         text = str(value or "").strip()
         return int(text) if text.isdigit() else None
 

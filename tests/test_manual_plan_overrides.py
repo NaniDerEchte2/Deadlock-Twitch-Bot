@@ -35,6 +35,18 @@ def _build_conn() -> sqlite3.Connection:
     )
     conn.execute(
         """
+        CREATE VIEW twitch_streamers_partner_state AS
+        SELECT
+            twitch_user_id,
+            twitch_login,
+            manual_partner_opt_out,
+            archived_at,
+            is_on_discord
+        FROM twitch_streamers
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE streamer_plans (
             twitch_user_id TEXT PRIMARY KEY,
             twitch_login TEXT,

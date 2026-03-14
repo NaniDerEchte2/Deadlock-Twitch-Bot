@@ -31,6 +31,7 @@ class _DummyLiveAnnouncementApi(DashboardLiveAnnouncementMixin):
         self.records: dict[str, dict] = {}
         self.allow_auth = True
         self.valid_csrf = "csrf-ok"
+        self.active_partners = {"earlysalty", "otherstreamer"}
 
     def _require_token(self, _request):
         if not self.allow_auth:
@@ -57,6 +58,10 @@ class _DummyLiveAnnouncementApi(DashboardLiveAnnouncementMixin):
         if not is_admin:
             return [session_login]
         return ["earlysalty", "otherstreamer"]
+
+    def _la_active_partner_login(self, login: str) -> str:
+        normalized = self._normalize_login(login)
+        return normalized if normalized in self.active_partners else ""
 
     def _la_load(self, streamer_login: str) -> dict:
         stored = self.records.get(streamer_login)
@@ -133,6 +138,36 @@ class DashboardLiveAnnouncementApiTests(unittest.IsolatedAsyncioTestCase):
         request = _FakeRequest(query={"streamer": "earlysalty"})
         with self.assertRaises(web.HTTPUnauthorized):
             await handler.api_live_announcement_config(request)
+
+    async def test_partner_session_without_active_partner_is_rejected(self) -> None:
+        handler = _DummyLiveAnnouncementApi()
+        handler.session = {"twitch_login": "archivedstreamer"}
+        request = _FakeRequest(query={"streamer": "archivedstreamer"})
+
+        response = await handler.api_live_announcement_config(request)
+
+        self.assertEqual(response.status, 404)
+
+    async def test_non_admin_cannot_override_other_streamer_scope(self) -> None:
+        handler = _DummyLiveAnnouncementApi()
+        request = _FakeRequest(
+            query={"streamer": "otherstreamer"},
+            headers={"X-CSRF-Token": "csrf-ok"},
+            body={
+                "csrf_token": "csrf-ok",
+                "streamer_login": "otherstreamer",
+                "config": {"content": "x"},
+                "allowed_editor_role_ids": [],
+            },
+        )
+
+        response = await handler.api_live_announcement_save_config(request)
+
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.text)
+        self.assertEqual(payload["streamer_login"], "earlysalty")
+        self.assertIn("earlysalty", handler.records)
+        self.assertNotIn("otherstreamer", handler.records)
 
 
 if __name__ == "__main__":

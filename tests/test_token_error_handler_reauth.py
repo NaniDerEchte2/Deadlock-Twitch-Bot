@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+import contextlib
+import sqlite3
+import unittest
+from unittest.mock import patch
+
+from bot.api.token_error_handler import TokenErrorHandler
+
+
+def _make_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE twitch_raid_auth (
+            twitch_user_id TEXT PRIMARY KEY,
+            twitch_login TEXT,
+            raid_enabled INTEGER DEFAULT 1,
+            needs_reauth INTEGER DEFAULT 0,
+            reauth_notified_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE twitch_token_blacklist (
+            twitch_user_id TEXT PRIMARY KEY,
+            grace_expires_at TEXT,
+            notified INTEGER DEFAULT 0
+        )
+        """
+    )
+    return conn
+
+
+class TokenErrorHandlerReauthTests(unittest.TestCase):
+    def test_disable_raid_bot_marks_reauth_without_removing_auth_row(self) -> None:
+        conn = _make_conn()
+        conn.execute(
+            """
+            INSERT INTO twitch_raid_auth (twitch_user_id, twitch_login, raid_enabled, needs_reauth)
+            VALUES (?, ?, 1, 0)
+            """,
+            ("1001", "alpha"),
+        )
+        conn.execute(
+            """
+            INSERT INTO twitch_token_blacklist (twitch_user_id, grace_expires_at, notified)
+            VALUES (?, NULL, 0)
+            """,
+            ("1001",),
+        )
+
+        with (
+            patch(
+                "bot.api.token_error_handler.get_conn",
+                side_effect=lambda: contextlib.nullcontext(conn),
+            ),
+            patch("bot.api.token_error_handler.set_partner_raid_bot_enabled") as set_partner_flag,
+            patch.object(TokenErrorHandler, "_migrate_db", return_value=None),
+        ):
+            handler = TokenErrorHandler()
+            handler._disable_raid_bot("1001")
+
+        row = conn.execute(
+            """
+            SELECT raid_enabled, needs_reauth, twitch_login
+            FROM twitch_raid_auth
+            WHERE twitch_user_id = ?
+            """,
+            ("1001",),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(int(row["raid_enabled"]), 0)
+        self.assertEqual(int(row["needs_reauth"]), 1)
+        self.assertEqual(row["twitch_login"], "alpha")
+        set_partner_flag.assert_called_once_with(conn, twitch_user_id="1001", enabled=False)
+
+
+if __name__ == "__main__":
+    unittest.main()

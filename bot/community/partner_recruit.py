@@ -96,7 +96,7 @@ class TwitchPartnerRecruitMixin:
                     FROM twitch_stats_category
                     WHERE ts_utc > datetime('now', ?)
                       AND LOWER(streamer) NOT IN (
-                            SELECT LOWER(twitch_login) FROM twitch_streamers
+                            SELECT LOWER(twitch_login) FROM twitch_streamer_identities
                           )
                       AND LOWER(streamer) NOT IN (
                             SELECT streamer_login FROM twitch_partner_outreach

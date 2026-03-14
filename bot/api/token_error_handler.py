@@ -15,7 +15,7 @@ from ..discord_role_sync import (
     normalize_discord_user_id,
     schedule_streamer_role_sync as schedule_discord_role_sync,
 )
-from ..storage import get_conn
+from ..storage import get_conn, load_streamer_identity, set_partner_raid_bot_enabled
 
 log = logging.getLogger("TwitchStreams.TokenErrorHandler")
 
@@ -102,6 +102,63 @@ class TokenErrorHandler:
     # Anzahl aufeinanderfolgender Fehler, bevor der Raid-Bot wirklich deaktiviert wird
     BLACKLIST_DISABLE_THRESHOLD = 3
     CONSECUTIVE_FAILURE_WINDOW_HOURS = 12
+
+    def _mark_reauth_required(
+        self,
+        twitch_user_id: str,
+        twitch_login: str,
+        *,
+        mark_notified: bool = False,
+    ) -> None:
+        """Disables Twitch auth usage until the streamer re-authorizes in the dashboard."""
+        login_hint = str(twitch_login or "").strip().lower()
+        try:
+            with get_conn() as conn:
+                if mark_notified:
+                    conn.execute(
+                        """
+                        UPDATE twitch_raid_auth
+                        SET raid_enabled = FALSE,
+                            needs_reauth = TRUE,
+                            twitch_login = COALESCE(NULLIF(?, ''), twitch_login),
+                            reauth_notified_at = COALESCE(reauth_notified_at, ?)
+                        WHERE twitch_user_id = ?
+                        """,
+                        (
+                            login_hint,
+                            datetime.now(UTC).isoformat(),
+                            twitch_user_id,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE twitch_raid_auth
+                        SET raid_enabled = FALSE,
+                            needs_reauth = TRUE,
+                            twitch_login = COALESCE(NULLIF(?, ''), twitch_login)
+                        WHERE twitch_user_id = ?
+                        """,
+                        (
+                            login_hint,
+                            twitch_user_id,
+                        ),
+                    )
+                try:
+                    set_partner_raid_bot_enabled(conn, twitch_user_id=twitch_user_id, enabled=False)
+                except Exception:
+                    log.debug(
+                        "Could not mirror raid_bot_enabled into partner registry for user_id=%s",
+                        _mask_log_identifier(twitch_user_id),
+                        exc_info=True,
+                    )
+                conn.commit()
+        except Exception:
+            log.warning(
+                "Could not flag dashboard reauth for user_id=%s",
+                _mask_log_identifier(twitch_user_id),
+                exc_info=True,
+            )
 
     def is_token_blacklisted(self, twitch_user_id: str) -> bool:
         """
@@ -230,6 +287,7 @@ class TokenErrorHandler:
             except Exception:
                 current_count = 1
 
+            self._mark_reauth_required(twitch_user_id, twitch_login)
             log.warning(
                 "Blocked auto-refresh for %s (ID: %s) after auth failure. "
                 "Consecutive failures: %d/%d",
@@ -244,7 +302,7 @@ class TokenErrorHandler:
                 self._disable_raid_bot(twitch_user_id)
             else:
                 log.info(
-                    "OAuth refresh error for broadcaster=%s (count %d/%d) - will retry before disabling",
+                    "OAuth refresh error for broadcaster=%s (count %d/%d) - dashboard reauth required until the streamer reconnects",
                     _mask_log_identifier(twitch_login),
                     current_count,
                     self.BLACKLIST_DISABLE_THRESHOLD,
@@ -254,7 +312,7 @@ class TokenErrorHandler:
             log.error("Error adding to token blacklist", exc_info=True)
 
     def _disable_raid_bot(self, twitch_user_id: str):
-        """Deaktiviert den Raid-Bot für einen Streamer mit Token-Fehler."""
+        """Keeps raid/auth disabled for a streamer with repeated token failures."""
         login_hint = ""
         try:
             with get_conn() as conn:
@@ -269,30 +327,9 @@ class TokenErrorHandler:
                         else auth_row["twitch_login"] or ""
                     ).strip()
 
-                conn.execute(
-                    """
-                    UPDATE twitch_raid_auth
-                    SET raid_enabled = FALSE
-                    WHERE twitch_user_id = ?
-                    """,
-                    (twitch_user_id,),
-                )
-                conn.execute(
-                    """
-                    UPDATE twitch_streamers
-                    SET raid_bot_enabled = 0,
-                        manual_verified_permanent = 0,
-                        manual_verified_until = NULL,
-                        manual_verified_at = NULL,
-                        manual_partner_opt_out = 1
-                    WHERE twitch_user_id = ?
-                       OR (? <> '' AND LOWER(twitch_login) = LOWER(?))
-                    """,
-                    (twitch_user_id, login_hint, login_hint),
-                )
-                conn.commit()
+            self._mark_reauth_required(twitch_user_id, login_hint)
             log.info(
-                "Disabled raid bot for user_id=%s due to OAuth refresh error",
+                "Disabled raid bot and kept partner active for user_id=%s due to OAuth refresh error",
                 _mask_log_identifier(twitch_user_id),
             )
             # Rolle wird NICHT sofort entfernt – User hat %d Tage Grace-Period
@@ -462,8 +499,8 @@ class TokenErrorHandler:
             embed.add_field(
                 name="Aktion erforderlich",
                 value=(
-                    "Der Streamer muss sich **neu autorisieren**, damit der Raid-Bot wieder funktioniert.\n"
-                    "➡️ Verwende `/traid`, um den Auth-Link zu erhalten."
+                    "Der Streamer muss sich **neu autorisieren**, damit Raid-Bot und Twitch-Integrationen wieder funktionieren.\n"
+                    "➡️ Bitte im Dashboard einloggen und Twitch neu verbinden oder alternativ `/traid` verwenden."
                 ),
                 inline=False,
             )
@@ -480,6 +517,7 @@ class TokenErrorHandler:
 
             # User-DM senden
             await self._send_user_dm_token_error(twitch_user_id, twitch_login, error_message)
+            self._mark_reauth_required(twitch_user_id, twitch_login, mark_notified=True)
 
             # Markiere als benachrichtigt
             with get_conn() as conn:
@@ -530,8 +568,8 @@ class TokenErrorHandler:
 
         if is_reminder:
             embed = discord.Embed(
-                title="⚠️ Twitch Bot – Autorisierung weiterhin fehlgeschlagen",
-                description=f"Die Autorisierung für den Twitch Bot ist für **{twitch_login}** seit {GRACE_PERIOD_DAYS} Tagen nicht erneuert worden.",
+                title="⚠️ Twitch Bot – Re-Auth weiterhin ausstehend",
+                description=f"Die Twitch-Autorisierung für **{twitch_login}** wurde seit {GRACE_PERIOD_DAYS} Tagen noch nicht erneuert.",
                 color=discord.Color.dark_red(),
                 timestamp=datetime.now(UTC),
             )
@@ -542,14 +580,14 @@ class TokenErrorHandler:
             )
             embed.add_field(
                 name="Status",
-                value="❌ Streamer-Rolle entzogen",
+                value="⚠️ Bot-Funktionen bleiben deaktiviert bis zur Re-Autorisierung",
                 inline=True,
             )
             embed.add_field(
                 name="Lösung",
                 value=(
                     "Klicke auf den Button unten, um einen neuen Auth-Link zu erhalten.\n"
-                    "Nach erfolgreicher Autorisierung wird die Streamer-Rolle automatisch wiederhergestellt.\n\n"
+                    "Melde dich dazu im Dashboard an und verbinde Twitch erneut.\n\n"
                     "Alternativ: `/traid` auf dem Discord-Server nutzen."
                 ),
                 inline=False,
@@ -558,7 +596,7 @@ class TokenErrorHandler:
                 name="Hinweis",
                 value=(
                     "Bei Problemen oder Fragen bitte auf dem Server melden.\n"
-                    "Die Autorisierung ist erforderlich, um weiterhin am Partnerprogramm teilzunehmen."
+                    "Die Autorisierung ist erforderlich, damit Auto-Raid, Chat-Schutz und Analytics wieder laufen."
                 ),
                 inline=False,
             )
@@ -590,16 +628,16 @@ class TokenErrorHandler:
                 name="Lösung",
                 value=(
                     "Klicke auf den Button unten, um einen neuen Auth-Link zu erhalten.\n"
+                    "Melde dich dazu im Dashboard an und verbinde Twitch erneut.\n"
                     "Nach erfolgreicher Autorisierung wird der Bot automatisch wieder aktiviert.\n\n"
                 ),
                 inline=False,
             )
             embed.add_field(
-                name="Das passiert bei Nichtbehebung:",
+                name="Status",
                 value=(
-                    f"Wird die Autorisierung bis <t:{deadline_ts}:F> nicht erneuert, "
-                    f"wird die Streamer-Partnerschaft vorübergehend entzogen.\n"
-                    "Sie kann jederzeit durch eine erneute Autorisierung erneuert werden."
+                    f"Bis zur Re-Autorisierung bleiben die Twitch-Bot-Funktionen fuer **{twitch_login}** deaktiviert.\n"
+                    f"Die aktuelle Frist im System laeuft bis <t:{deadline_ts}:F>."
                 ),
                 inline=False,
             )
@@ -607,8 +645,8 @@ class TokenErrorHandler:
                 name="Hinweis",
                 value=(
                     "Bei Problemen oder Fragen bitte dich sofort bei @EarlySalty melden :).\n"
-                    "Die Autorisierung ist erforderlich, um weiterhin am Partnerprogramm teilzunehmen "
-                    "und alle Features zu nutzen (Auto-Raid, Chat-Schutz, Analytics)."
+                    "Die Autorisierung ist erforderlich, damit alle Features wieder laufen "
+                    "(Auto-Raid, Chat-Schutz, Analytics)."
                 ),
                 inline=False,
             )
@@ -662,18 +700,14 @@ class TokenErrorHandler:
         """Holt die Discord User ID eines Streamers aus der DB."""
         try:
             with get_conn() as conn:
-                row = conn.execute(
-                    """
-                    SELECT discord_user_id FROM twitch_streamers
-                    WHERE twitch_user_id = ?
-                       OR (? <> '' AND LOWER(twitch_login) = LOWER(?))
-                    LIMIT 1
-                    """,
-                    (twitch_user_id, twitch_login, twitch_login),
-                ).fetchone()
+                row = load_streamer_identity(
+                    conn,
+                    twitch_user_id=twitch_user_id,
+                    twitch_login=twitch_login,
+                )
                 if row:
                     val = str(
-                        row[0] if not hasattr(row, "keys") else row["discord_user_id"] or ""
+                        row[2] if not hasattr(row, "keys") else row["discord_user_id"] or ""
                     ).strip()
                     return val if val.isdigit() else None
         except Exception:

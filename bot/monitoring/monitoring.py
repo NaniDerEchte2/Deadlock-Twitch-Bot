@@ -648,8 +648,9 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
     @staticmethod
     def _reauth_chat_reminder_text() -> str:
         return (
-            "Kurze Erinnerung: Für den Raid-/Stats-Bot fehlt noch die neue Twitch-Autorisierung. "
-            "Du hast dazu bereits eine Discord-DM mit dem Re-Auth-Link erhalten. Danke dir!"
+            "Kurze Erinnerung: Fuer den Raid-/Stats-Bot fehlt noch die neue Twitch-Autorisierung. "
+            "Bitte im Dashboard einloggen und Twitch neu verbinden. "
+            "Falls du die DM brauchst: Der Re-Auth-Link wurde dir bereits auf Discord geschickt."
         )
 
     async def _resolve_live_stream_id_for_login(self, login_lower: str) -> str | None:
@@ -1056,11 +1057,19 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                     # Checke ob der Streamer raid_bot_enabled hat
                     try:
                         with storage.get_conn() as c:
-                            raid_enabled_row = c.execute(
-                                "SELECT raid_bot_enabled FROM twitch_streamers WHERE twitch_user_id = ?",
-                                (twitch_user_id,),
-                            ).fetchone()
-                        if raid_enabled_row and bool(raid_enabled_row[0]):
+                            partner_row = storage.load_active_partner(
+                                c,
+                                twitch_user_id=twitch_user_id,
+                            )
+                        raid_enabled = bool(
+                            (
+                                partner_row["raid_bot_enabled"]
+                                if partner_row and hasattr(partner_row, "keys")
+                                else (partner_row[13] if partner_row else 0)
+                            )
+                            or 0
+                        )
+                        if raid_enabled:
                             # Asynchron aufrufen (fire-and-forget, blockiert nicht den Tick)
                             asyncio.create_task(
                                 handler(twitch_user_id, login_lower),

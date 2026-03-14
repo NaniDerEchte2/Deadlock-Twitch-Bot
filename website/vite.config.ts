@@ -18,6 +18,7 @@ export default defineConfig({
       input: {
         main: path.resolve(__dirname, 'index.html'),
         affiliateProgram: path.resolve(__dirname, 'vertriebler/index.html'),
+        affiliatePortal: path.resolve(__dirname, 'affiliate-portal/index.html'),
         onboarding: path.resolve(__dirname, 'onboarding/index.html'),
         faq: path.resolve(__dirname, 'faq/index.html'),
       },

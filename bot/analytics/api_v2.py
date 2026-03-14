@@ -1615,7 +1615,7 @@ class AnalyticsV2Mixin(
                         WHEN COALESCE(discord_user_id, '') <> '' THEN 1
                         ELSE 0
                     END AS discord_connected
-                FROM twitch_streamers
+                FROM twitch_streamer_identities
                 WHERE (COALESCE(?, '') != '' AND LOWER(twitch_login) = ?)
                    OR (COALESCE(?, '') != '' AND twitch_user_id = ?)
                 ORDER BY CASE
@@ -2388,6 +2388,21 @@ class AnalyticsV2Mixin(
                     """
                     SELECT display_name
                     FROM twitch_streamers
+                    WHERE LOWER(twitch_login) = LOWER(?)
+                    LIMIT 1
+                    """,
+                    (login,),
+                ).fetchone()
+                value = str(_row_get_value(row, "display_name", 0, "") or "").strip()
+                if value:
+                    return value
+            except Exception:
+                pass
+            try:
+                row = conn.execute(
+                    """
+                    SELECT twitch_login AS display_name
+                    FROM twitch_streamer_identities
                     WHERE LOWER(twitch_login) = LOWER(?)
                     LIMIT 1
                     """,

@@ -110,11 +110,51 @@ export function Schedule({ streamer, days }: ScheduleProps) {
         )}
       </motion.div>
 
-      {/* Hourly Heatmap (7x24) */}
+      {/* Schedule Insights */}
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.2 }}
+        className="bg-card rounded-xl border border-border p-6"
+      >
+        <div className="flex items-center gap-3 mb-6">
+          <Zap className="w-6 h-6 text-warning" />
+          <h2 className="text-xl font-bold text-white">Tipps zur Zeitplanung</h2>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {analysis && analysis.bestSlots[0] && (
+            <InsightCard
+              type="positive"
+              title="Beste Streaming-Zeit"
+              text={`${weekdayNames[analysis.bestSlots[0].weekday]} um ${analysis.bestSlots[0].hour}:00 Uhr bringt die meisten Viewer (Ø ${Math.round(analysis.bestSlots[0].avgViewers)}).`}
+            />
+          )}
+          {analysis && analysis.worstSlots[0] && (
+            <InsightCard
+              type="warning"
+              title="Zu vermeiden"
+              text={`${weekdayNames[analysis.worstSlots[0].weekday]} um ${analysis.worstSlots[0].hour}:00 Uhr zeigt weniger Performance (Ø ${Math.round(analysis.worstSlots[0].avgViewers)} Viewer).`}
+            />
+          )}
+          <InsightCard
+            type="info"
+            title="Konsistenz ist wichtig"
+            text="Regelmäßige Streaming-Zeiten helfen deiner Community, dich zu finden. Wähle 2-3 feste Slots pro Woche."
+          />
+          <InsightCard
+            type="info"
+            title="Prime Time testen"
+            text="18:00-22:00 Uhr sind typischerweise gute Zeiten. Teste verschiedene Slots und vergleiche die Ergebnisse."
+          />
+        </div>
+      </motion.div>
+
+      {/* Hourly Heatmap (7x24) */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.3 }}
         className="bg-card rounded-xl border border-border p-6"
       >
         <div className="flex items-center gap-3 mb-6">
@@ -146,7 +186,7 @@ export function Schedule({ streamer, days }: ScheduleProps) {
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.3 }}
+        transition={{ delay: 0.4 }}
         className="bg-card rounded-xl border border-border p-6"
       >
         <div className="flex items-center gap-3 mb-6">
@@ -181,46 +221,6 @@ export function Schedule({ streamer, days }: ScheduleProps) {
               })}
           </div>
         )}
-      </motion.div>
-
-      {/* Schedule Insights */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.4 }}
-        className="bg-card rounded-xl border border-border p-6"
-      >
-        <div className="flex items-center gap-3 mb-6">
-          <Zap className="w-6 h-6 text-warning" />
-          <h2 className="text-xl font-bold text-white">Tipps zur Zeitplanung</h2>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {analysis && analysis.bestSlots[0] && (
-            <InsightCard
-              type="positive"
-              title="Beste Streaming-Zeit"
-              text={`${weekdayNames[analysis.bestSlots[0].weekday]} um ${analysis.bestSlots[0].hour}:00 Uhr bringt die meisten Viewer (Ø ${Math.round(analysis.bestSlots[0].avgViewers)}).`}
-            />
-          )}
-          {analysis && analysis.worstSlots[0] && (
-            <InsightCard
-              type="warning"
-              title="Zu vermeiden"
-              text={`${weekdayNames[analysis.worstSlots[0].weekday]} um ${analysis.worstSlots[0].hour}:00 Uhr zeigt weniger Performance (Ø ${Math.round(analysis.worstSlots[0].avgViewers)} Viewer).`}
-            />
-          )}
-          <InsightCard
-            type="info"
-            title="Konsistenz ist wichtig"
-            text="Regelmäßige Streaming-Zeiten helfen deiner Community, dich zu finden. Wähle 2-3 feste Slots pro Woche."
-          />
-          <InsightCard
-            type="info"
-            title="Prime Time testen"
-            text="18:00-22:00 Uhr sind typischerweise gute Zeiten. Teste verschiedene Slots und vergleiche die Ergebnisse."
-          />
-        </div>
       </motion.div>
     </div>
   );

@@ -109,8 +109,18 @@ export interface ChatAnalytics {
   totalTrackedViewers?: number;
   firstTimeChatters: number;
   returningChatters: number;
+  returningTrackedViewers?: number;
+  coreLoyalViewers?: number;
+  silentCoreLoyalViewers?: number;
+  coreLoyalViewerRate?: number;
+  loyaltySessionThreshold?: number;
   messagesPerMinute: number;
   messagesPer100ViewerMinutes?: number | null;
+  messagesPer100ViewerMinutesPercentile?: number | null;
+  messagesPer100ViewerMinutesMedian?: number | null;
+  messagesPer100ViewerMinutesP25?: number | null;
+  messagesPer100ViewerMinutesP75?: number | null;
+  messagesPer100ViewerMinutesBenchmarkSessions?: number;
   viewerMinutes?: number;
   chatterReturnRate: number;
   chatPenetrationPct?: number | null;

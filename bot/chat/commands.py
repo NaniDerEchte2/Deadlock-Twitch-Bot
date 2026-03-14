@@ -1,7 +1,12 @@
 import logging
 import secrets
 
-from ..storage import get_conn
+from ..storage import (
+    get_conn,
+    load_active_partner,
+    set_partner_raid_bot_enabled,
+    set_partner_silent_flags,
+)
 from .constants import TWITCHIO_AVAILABLE, twitchio_commands
 
 log = logging.getLogger("TwitchStreams.ChatBot")
@@ -106,10 +111,7 @@ if TWITCHIO_AVAILABLE:
                     "UPDATE twitch_raid_auth SET raid_enabled = ? WHERE twitch_user_id = ?",
                     (True, twitch_user_id),
                 )
-                conn.execute(
-                    "UPDATE twitch_streamers SET raid_bot_enabled = 1 WHERE twitch_user_id = ?",
-                    (twitch_user_id,),
-                )
+                set_partner_raid_bot_enabled(conn, twitch_user_id=twitch_user_id, enabled=True)
                 conn.commit()
 
             await ctx.send(
@@ -147,10 +149,7 @@ if TWITCHIO_AVAILABLE:
                     "UPDATE twitch_raid_auth SET raid_enabled = ? WHERE twitch_user_id = ?",
                     (False, twitch_user_id),
                 )
-                conn.execute(
-                    "UPDATE twitch_streamers SET raid_bot_enabled = 0 WHERE twitch_user_id = ?",
-                    (twitch_user_id,),
-                )
+                set_partner_raid_bot_enabled(conn, twitch_user_id=twitch_user_id, enabled=False)
                 conn.commit()
 
             await ctx.send(
@@ -494,16 +493,10 @@ if TWITCHIO_AVAILABLE:
                     )
 
             with get_conn() as conn:
-                row = conn.execute(
-                    "SELECT silent_ban FROM twitch_streamers WHERE LOWER(twitch_login) = ?",
-                    (twitch_login.lower(),),
-                ).fetchone()
-                current = int(row[0] or 0) if row else 0
+                partner_row = load_active_partner(conn, twitch_login=twitch_login)
+                current = int((partner_row["silent_ban"] if partner_row and hasattr(partner_row, "keys") else (partner_row[14] if partner_row else 0)) or 0)
                 new_value = 0 if current else 1
-                conn.execute(
-                    "UPDATE twitch_streamers SET silent_ban = ? WHERE LOWER(twitch_login) = ?",
-                    (new_value, twitch_login.lower()),
-                )
+                set_partner_silent_flags(conn, twitch_login=twitch_login, silent_ban=new_value)
                 conn.commit()
 
             if new_value:
@@ -557,16 +550,10 @@ if TWITCHIO_AVAILABLE:
                     )
 
             with get_conn() as conn:
-                row = conn.execute(
-                    "SELECT silent_raid FROM twitch_streamers WHERE LOWER(twitch_login) = ?",
-                    (twitch_login.lower(),),
-                ).fetchone()
-                current = int(row[0] or 0) if row else 0
+                partner_row = load_active_partner(conn, twitch_login=twitch_login)
+                current = int((partner_row["silent_raid"] if partner_row and hasattr(partner_row, "keys") else (partner_row[15] if partner_row else 0)) or 0)
                 new_value = 0 if current else 1
-                conn.execute(
-                    "UPDATE twitch_streamers SET silent_raid = ? WHERE LOWER(twitch_login) = ?",
-                    (new_value, twitch_login.lower()),
-                )
+                set_partner_silent_flags(conn, twitch_login=twitch_login, silent_raid=new_value)
                 conn.commit()
 
             if new_value:

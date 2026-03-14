@@ -150,31 +150,40 @@ class DashboardLiveMixin:
     def _resolve_streamer_user_id_from_db(self, login: str) -> str:
         try:
             with _storage.get_conn() as conn:
-                row = conn.execute(
+                partner_row = _storage.load_active_partner(conn, twitch_login=login)
+                if partner_row:
+                    raw = (
+                        partner_row.get("twitch_user_id")
+                        if hasattr(partner_row, "keys")
+                        else partner_row[1]
+                    )
+                    resolved = self._coerce_twitch_user_id(raw)
+                    if resolved:
+                        return resolved
+
+                identity_row = _storage.load_streamer_identity(conn, twitch_login=login)
+                if identity_row:
+                    raw = (
+                        identity_row.get("twitch_user_id")
+                        if hasattr(identity_row, "keys")
+                        else identity_row[0]
+                    )
+                    resolved = self._coerce_twitch_user_id(raw)
+                    if resolved:
+                        return resolved
+
+                auth_row = conn.execute(
                     """
-                    SELECT COALESCE(NULLIF(TRIM(s.twitch_user_id), ''), NULLIF(TRIM(a.twitch_user_id), ''))
-                      FROM twitch_streamers s
-                      LEFT JOIN twitch_raid_auth a
-                        ON (
-                             s.twitch_user_id IS NOT NULL
-                             AND s.twitch_user_id = a.twitch_user_id
-                           )
-                        OR (
-                             s.twitch_user_id IS NULL
-                             AND LOWER(s.twitch_login) = LOWER(a.twitch_login)
-                           )
-                     WHERE LOWER(s.twitch_login) = LOWER(?)
-                     LIMIT 1
+                    SELECT twitch_user_id
+                    FROM twitch_raid_auth
+                    WHERE LOWER(COALESCE(twitch_login, '')) = LOWER(?)
+                    LIMIT 1
                     """,
                     (login,),
                 ).fetchone()
-            if not row:
+            if not auth_row:
                 return ""
-            if hasattr(row, "keys"):
-                keys = list(row.keys())
-                raw = row[keys[0]] if keys else ""
-            else:
-                raw = row[0]
+            raw = auth_row["twitch_user_id"] if hasattr(auth_row, "keys") else auth_row[0]
             return self._coerce_twitch_user_id(raw)
         except Exception:
             log.debug("Could not resolve twitch_user_id from DB for %s", login, exc_info=True)
@@ -201,14 +210,19 @@ class DashboardLiveMixin:
             return
         try:
             with _storage.get_conn() as conn:
-                conn.execute(
-                    """
-                    UPDATE twitch_streamers
-                       SET twitch_user_id = ?
-                     WHERE LOWER(twitch_login) = LOWER(?)
-                       AND (twitch_user_id IS NULL OR TRIM(twitch_user_id) = '')
-                    """,
-                    (user_id, login),
+                existing = _storage.load_streamer_identity(conn, twitch_login=login)
+                canonical_login = str(
+                    (
+                        existing.get("twitch_login")
+                        if existing and hasattr(existing, "keys")
+                        else (existing[1] if existing else login)
+                    )
+                    or login
+                ).strip().lower()
+                _storage.upsert_streamer_identity(
+                    conn,
+                    twitch_user_id=user_id,
+                    twitch_login=canonical_login,
                 )
         except Exception:
             log.debug("Could not persist twitch_user_id for %s", login, exc_info=True)

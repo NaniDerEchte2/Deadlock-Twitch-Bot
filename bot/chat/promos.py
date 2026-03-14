@@ -140,7 +140,7 @@ class PromoMixin:
                 streamer_row = conn.execute(
                     """
                     SELECT twitch_user_id, twitch_login
-                      FROM twitch_streamers
+                      FROM twitch_streamer_identities
                      WHERE LOWER(twitch_login) = LOWER(?)
                      LIMIT 1
                     """,
@@ -1181,7 +1181,7 @@ class PromoMixin:
                     rows = _pg_query_all(
                         """
                         SELECT s.twitch_login, s.twitch_user_id
-                          FROM twitch_streamers s
+                          FROM twitch_streamer_identities s
                           JOIN twitch_live_state l ON s.twitch_user_id = l.twitch_user_id
                           LEFT JOIN streamer_plans p ON s.twitch_user_id = p.twitch_user_id
                          WHERE l.is_live = 1
@@ -1194,7 +1194,7 @@ class PromoMixin:
                     rows = _pg_query_all(
                         """
                         SELECT s.twitch_login, s.twitch_user_id
-                          FROM twitch_streamers s
+                          FROM twitch_streamer_identities s
                           JOIN twitch_live_state l ON s.twitch_user_id = l.twitch_user_id
                          WHERE l.is_live = 1
                            AND LOWER(COALESCE(l.last_game, '')) = ?

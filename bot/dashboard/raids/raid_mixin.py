@@ -395,6 +395,35 @@ new Chart(ctx, {{
     # Raid routes                                                          #
     # ------------------------------------------------------------------ #
 
+    def _raid_dashboard_auth_context(self, request: web.Request) -> tuple[str, bool, str]:
+        auth_level = ""
+        auth_level_getter = getattr(self, "_get_auth_level", None)
+        if callable(auth_level_getter):
+            try:
+                auth_level = str(auth_level_getter(request) or "").strip().lower()
+            except Exception:
+                auth_level = ""
+        is_admin = auth_level in {"admin", "localhost"}
+
+        session_login = ""
+        session_getter = getattr(self, "_get_dashboard_auth_session", None)
+        if callable(session_getter):
+            try:
+                dashboard_session = session_getter(request)
+            except Exception:
+                dashboard_session = None
+            if isinstance(dashboard_session, dict):
+                session_login = str(dashboard_session.get("twitch_login") or "").strip().lower()
+        return auth_level, is_admin, session_login
+
+    @staticmethod
+    def _raid_active_partner_login(row: Any, fallback: str = "") -> str:
+        if not row:
+            return ""
+        if hasattr(row, "keys"):
+            return str(row.get("twitch_login") or fallback).strip().lower()
+        return str((row[2] if len(row) > 2 else fallback) or fallback).strip().lower()
+
     async def raid_auth_start(self, request: web.Request) -> web.StreamResponse:
         """Create OAuth URL for raid bot authorization.
 
@@ -490,10 +519,37 @@ new Chart(ctx, {{
     async def raid_requirements(self, request: web.Request) -> web.StreamResponse:
         """Send raid OAuth requirement DM with one-click fresh link generation."""
         self._require_token(request)
+        _auth_level, is_admin, session_login = self._raid_dashboard_auth_context(request)
 
         login = (request.query.get("login") or "").strip().lower()
         if not login:
             return web.Response(text="Missing login parameter", status=400)
+
+        try:
+            with storage.get_conn() as conn:
+                row = storage.load_active_partner(conn, twitch_login=login)
+                session_partner = (
+                    storage.load_active_partner(conn, twitch_login=session_login)
+                    if session_login
+                    else None
+                )
+        except Exception:
+            log.exception(
+                "Failed to load partner authorization for raid requirements (%s)",
+                self._sanitize_log_value(login),
+            )
+            return web.Response(text="Failed to load Discord link", status=500)
+
+        if not row:
+            return web.Response(text="Streamer not found", status=404)
+
+        login = self._raid_active_partner_login(row, login)
+        session_partner_login = self._raid_active_partner_login(session_partner, session_login)
+        if not is_admin:
+            if not session_partner_login:
+                return web.Response(text="Dashboard streamer session required", status=403)
+            if login != session_partner_login:
+                return web.Response(text="Forbidden streamer scope", status=403)
 
         auth_manager = getattr(getattr(self, "_raid_bot", None), "auth_manager", None)
         if not auth_manager:
@@ -512,29 +568,10 @@ new Chart(ctx, {{
             safe_location = self._safe_internal_redirect(location, fallback="/twitch/admin")
             raise web.HTTPFound(location=safe_location)
 
-        try:
-            with storage.get_conn() as conn:
-                row = conn.execute(
-                    """
-                    SELECT discord_user_id
-                    FROM twitch_streamers
-                    WHERE lower(twitch_login) = lower(?)
-                    """,
-                    (login,),
-                ).fetchone()
-        except Exception:
-            log.exception(
-                "Failed to load Discord link for raid requirements (%s)",
-                self._sanitize_log_value(login),
-            )
-            return web.Response(text="Failed to load Discord link", status=500)
-
-        if not row:
-            return web.Response(text="Streamer not found", status=404)
-
-        discord_user_id = str(
-            row["discord_user_id"] if hasattr(row, "keys") else row[0] or ""
-        ).strip()
+        if hasattr(row, "keys"):
+            discord_user_id = str(row.get("discord_user_id") or "").strip()
+        else:
+            discord_user_id = str((row[21] if len(row) > 21 else "") or "").strip()
         if not discord_user_id:
             return web.Response(text="No Discord user linked for this streamer", status=404)
 

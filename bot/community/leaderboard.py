@@ -525,7 +525,8 @@ class TwitchLeaderboardMixin:
                            discord_display_name,
                            manual_verified_permanent,
                            manual_verified_until
-                      FROM twitch_streamers
+                      FROM twitch_streamers_partner_state
+                     WHERE is_partner_active = 1
                     """
                 ).fetchall()
             for row in rows:

@@ -524,13 +524,10 @@ class _EmbedsMixin:
         if role_id:
             try:
                 with storage.get_conn() as c:
-                    c.execute(
-                        """
-                        UPDATE twitch_streamers
-                           SET live_ping_role_id = ?, live_ping_enabled = COALESCE(live_ping_enabled, 1)
-                         WHERE LOWER(twitch_login) = LOWER(?)
-                        """,
-                        (role_id, login),
+                    storage.set_partner_live_ping_settings(
+                        c,
+                        twitch_login=login,
+                        live_ping_role_id=role_id,
                     )
             except Exception:
                 log.debug("Could not persist live ping role_id for %s", login, exc_info=True)

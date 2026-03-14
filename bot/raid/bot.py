@@ -22,7 +22,13 @@ import discord
 
 from ..core.constants import TWITCH_TARGET_GAME_NAME
 from ..discord_role_sync import normalize_discord_user_id, sync_streamer_role
-from ..storage import backfill_tracked_stats_from_category, get_conn
+from ..storage import (
+    backfill_tracked_stats_from_category,
+    get_conn,
+    load_active_partner,
+    load_streamer_identity,
+    promote_streamer_to_partner,
+)
 try:
     from .partner_scores import (
         load_partner_raid_score_map,
@@ -815,13 +821,10 @@ class RaidBot:
             return None
         try:
             with get_conn() as conn:
-                row = conn.execute(
-                    "SELECT twitch_user_id FROM twitch_streamers WHERE LOWER(twitch_login) = ?",
-                    (login_key,),
-                ).fetchone()
+                row = load_active_partner(conn, twitch_login=login_key)
             if not row:
                 return None
-            resolved = row["twitch_user_id"] if hasattr(row, "keys") else row[0]
+            resolved = row["twitch_user_id"] if hasattr(row, "keys") else row[1]
             resolved_key = str(resolved or "").strip()
             return resolved_key or None
         except Exception:
@@ -906,23 +909,18 @@ class RaidBot:
         existing_display_name: str | None = None
 
         with get_conn() as conn:
-            row = conn.execute(
-                """
-                SELECT discord_user_id, discord_display_name
-                FROM twitch_streamers
-                WHERE twitch_user_id = ?
-                   OR lower(twitch_login) = lower(?)
-                LIMIT 1
-                """,
-                (twitch_user_id, twitch_login),
-            ).fetchone()
+            row = load_streamer_identity(
+                conn,
+                twitch_user_id=twitch_user_id,
+                twitch_login=twitch_login,
+            )
             if row:
                 existing_discord_id = self._normalize_discord_user_id(
-                    row[0] if not hasattr(row, "keys") else row["discord_user_id"]
+                    row[2] if not hasattr(row, "keys") else row["discord_user_id"]
                 )
                 existing_display_name = (
                     str(
-                        row[1] if not hasattr(row, "keys") else row["discord_display_name"] or ""
+                        row[3] if not hasattr(row, "keys") else row["discord_display_name"] or ""
                     ).strip()
                     or None
                 )
@@ -934,50 +932,18 @@ class RaidBot:
 
         is_on_discord_value = 1 if final_discord_id else 0
         with get_conn() as conn:
-            conn.execute(
-                """
-                INSERT INTO twitch_streamers
-                    (twitch_login, twitch_user_id, discord_user_id, discord_display_name,
-                     is_on_discord, manual_verified_permanent, manual_verified_until,
-                     manual_verified_at, manual_partner_opt_out, raid_bot_enabled)
-                VALUES (?, ?, ?, ?, ?, 1, NULL, CURRENT_TIMESTAMP, 0, 1)
-                ON CONFLICT DO NOTHING
-                """,
-                (
-                    twitch_login,
-                    twitch_user_id,
-                    final_discord_id,
-                    final_display_name,
-                    is_on_discord_value,
-                ),
-            )
-            conn.execute(
-                """
-                UPDATE twitch_streamers
-                   SET twitch_login = ?,
-                       twitch_user_id = ?,
-                       discord_user_id = ?,
-                       discord_display_name = ?,
-                       is_on_discord = ?,
-                       manual_verified_permanent = 1,
-                       manual_verified_until = NULL,
-                       manual_verified_at = COALESCE(manual_verified_at, CURRENT_TIMESTAMP),
-                       manual_partner_opt_out = 0,
-                       archived_at = NULL,
-                       is_monitored_only = 0,
-                       raid_bot_enabled = 1
-                 WHERE twitch_user_id = ?
-                    OR lower(twitch_login) = lower(?)
-                """,
-                (
-                    twitch_login,
-                    twitch_user_id,
-                    final_discord_id,
-                    final_display_name,
-                    is_on_discord_value,
-                    twitch_user_id,
-                    twitch_login,
-                ),
+            promote_streamer_to_partner(
+                conn,
+                twitch_login=twitch_login,
+                twitch_user_id=twitch_user_id,
+                discord_user_id=final_discord_id,
+                discord_display_name=final_display_name,
+                is_on_discord=is_on_discord_value,
+                manual_verified_permanent=1,
+                manual_verified_until=None,
+                manual_verified_at=datetime.now(UTC).isoformat(),
+                manual_partner_opt_out=0,
+                raid_bot_enabled=1,
             )
             copied = backfill_tracked_stats_from_category(conn, twitch_login)
             if copied:
@@ -1330,11 +1296,17 @@ class RaidBot:
         silent_raid = False
         try:
             with get_conn() as conn:
-                _sr_row = conn.execute(
-                    "SELECT silent_raid FROM twitch_streamers WHERE LOWER(twitch_login) = ?",
-                    (to_broadcaster_login.lower(),),
-                ).fetchone()
-                silent_raid = bool(int((_sr_row[0] if _sr_row else 0) or 0))
+                _sr_row = load_active_partner(conn, twitch_login=to_broadcaster_login.lower())
+                silent_raid = bool(
+                    int(
+                        (
+                            _sr_row["silent_raid"]
+                            if _sr_row and hasattr(_sr_row, "keys")
+                            else (_sr_row[15] if _sr_row else 0)
+                        )
+                        or 0
+                    )
+                )
         except Exception:
             log.debug(
                 "Raid arrival: silent_raid lookup failed for %s",
@@ -2515,17 +2487,14 @@ class RaidBot:
 
         # Prüfen, ob Streamer Auto-Raid aktiviert hat
         with get_conn() as conn:
-            _s_row = conn.execute(
-                "SELECT raid_bot_enabled FROM twitch_streamers WHERE twitch_user_id = ?",
-                (broadcaster_id,),
-            ).fetchone()
+            _s_row = load_active_partner(conn, twitch_user_id=broadcaster_id)
         with get_conn() as conn:
             _a_row = conn.execute(
                 "SELECT raid_enabled FROM twitch_raid_auth WHERE twitch_user_id = ?",
                 (broadcaster_id,),
             ).fetchone()
         row = (
-            (_s_row[0] if _s_row else None),
+            ((_s_row["raid_bot_enabled"] if hasattr(_s_row, "keys") else _s_row[13]) if _s_row else None),
             (_a_row[0] if _a_row else None),
         ) if (_s_row is not None or _a_row is not None) else None
 

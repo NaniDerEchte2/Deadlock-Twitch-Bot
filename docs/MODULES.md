@@ -134,7 +134,6 @@ Alle Python-Dateien mit Pfad, Zweck und Zugriffslevel (A=Admin, S=Streamer, I=In
 |-------|-------|-------|
 | `pg.py` | PostgreSQL-Verbindung, Schema-Migration, SQLite-Compat-Layer | I |
 | `sessions_db.py` | Web-Session-Storage (aktuell SQLite, Migration geplant) | I |
-| `proxy.py` | Storage-Proxy fuer transparente Backend-Wechsel | I |
 
 ## bot/api/
 

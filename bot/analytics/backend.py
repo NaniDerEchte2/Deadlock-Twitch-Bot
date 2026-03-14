@@ -579,13 +579,13 @@ class AnalyticsBackend:
                 # Get streamer metadata
                 meta_query = """
                     SELECT 
-                        s.twitch_login,
-                        s.twitch_user_id,
-                        s.discord_display_name,
-                        s.discord_user_id,
-                        s.is_on_discord
-                    FROM twitch_streamers s
-                    WHERE LOWER(s.twitch_login) = ?
+                        i.twitch_login,
+                        i.twitch_user_id,
+                        i.discord_display_name,
+                        i.discord_user_id,
+                        i.is_on_discord
+                    FROM twitch_streamer_identities i
+                    WHERE LOWER(i.twitch_login) = ?
                 """
                 meta_row = conn.execute(meta_query, [normalized_login]).fetchone()
 

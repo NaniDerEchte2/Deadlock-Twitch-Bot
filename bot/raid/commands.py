@@ -8,7 +8,13 @@ import discord
 from discord.ext import commands
 
 from ..chat.constants import PROMO_MESSAGES
-from ..storage import get_conn
+from ..storage import (
+    get_conn,
+    load_active_partner,
+    load_partner_by_discord_user_id,
+    load_streamer_identity,
+    set_partner_raid_bot_enabled,
+)
 from .auth import RAID_SCOPES
 from .views import RaidAuthGenerateView, build_raid_requirements_embed
 
@@ -29,14 +35,7 @@ class RaidCommandsMixin:
         discord_user_id = str(ctx.author.id)
 
         with get_conn() as conn:
-            row = conn.execute(
-                """
-                SELECT twitch_login, twitch_user_id
-                FROM twitch_streamers
-                WHERE discord_user_id = ?
-                """,
-                (discord_user_id,),
-            ).fetchone()
+            row = load_partner_by_discord_user_id(conn, discord_user_id)
 
         if not row:
             await ctx.send(
@@ -45,7 +44,8 @@ class RaidCommandsMixin:
             )
             return
 
-        twitch_login, twitch_user_id = row
+        twitch_login = row["twitch_login"] if hasattr(row, "keys") else row[2]
+        twitch_user_id = row["twitch_user_id"] if hasattr(row, "keys") else row[1]
         required_scopes = [scope.strip().lower() for scope in RAID_SCOPES if scope.strip()]
 
         with get_conn() as conn:
@@ -138,14 +138,7 @@ class RaidCommandsMixin:
         discord_user_id = str(ctx.author.id)
 
         with get_conn() as conn:
-            row = conn.execute(
-                """
-                SELECT twitch_login, twitch_user_id
-                FROM twitch_streamers
-                WHERE discord_user_id = ?
-                """,
-                (discord_user_id,),
-            ).fetchone()
+            row = load_partner_by_discord_user_id(conn, discord_user_id)
 
         if not row:
             await ctx.send(
@@ -154,7 +147,8 @@ class RaidCommandsMixin:
             )
             return
 
-        twitch_login, twitch_user_id = row
+        twitch_login = row["twitch_login"] if hasattr(row, "keys") else row[2]
+        twitch_user_id = row["twitch_user_id"] if hasattr(row, "keys") else row[1]
 
         if not hasattr(self, "_raid_bot") or not self._raid_bot:
             await ctx.send(
@@ -182,14 +176,7 @@ class RaidCommandsMixin:
 
         # Finde Streamer in DB über Discord-ID
         with get_conn() as conn:
-            row = conn.execute(
-                """
-                SELECT twitch_login, twitch_user_id, raid_bot_enabled
-                FROM twitch_streamers
-                WHERE discord_user_id = ?
-                """,
-                (discord_user_id,),
-            ).fetchone()
+            row = load_partner_by_discord_user_id(conn, discord_user_id)
 
         if not row:
             await ctx.send(
@@ -199,7 +186,9 @@ class RaidCommandsMixin:
             )
             return
 
-        twitch_login, twitch_user_id, raid_bot_enabled = row
+        twitch_login = row["twitch_login"] if hasattr(row, "keys") else row[2]
+        twitch_user_id = row["twitch_user_id"] if hasattr(row, "keys") else row[1]
+        raid_bot_enabled = row["raid_bot_enabled"] if hasattr(row, "keys") else row[9]
 
         # Prüfen, ob bereits autorisiert
         with get_conn() as conn:
@@ -243,10 +232,7 @@ class RaidCommandsMixin:
             )
             # autocommit – no explicit commit needed
         with get_conn() as conn:
-            conn.execute(
-                "UPDATE twitch_streamers SET raid_bot_enabled = 1 WHERE twitch_user_id = ?",
-                (twitch_user_id,),
-            )
+            set_partner_raid_bot_enabled(conn, twitch_user_id=twitch_user_id, enabled=True)
 
         await ctx.send(
             f"✅ Auto-Raid wurde für **{twitch_login}** aktiviert!\n"
@@ -261,10 +247,7 @@ class RaidCommandsMixin:
         discord_user_id = str(ctx.author.id)
 
         with get_conn() as conn:
-            row = conn.execute(
-                "SELECT twitch_login, twitch_user_id FROM twitch_streamers WHERE discord_user_id = ?",
-                (discord_user_id,),
-            ).fetchone()
+            row = load_partner_by_discord_user_id(conn, discord_user_id)
 
         if not row:
             await ctx.send(
@@ -273,7 +256,8 @@ class RaidCommandsMixin:
             )
             return
 
-        twitch_login, twitch_user_id = row
+        twitch_login = row["twitch_login"] if hasattr(row, "keys") else row[2]
+        twitch_user_id = row["twitch_user_id"] if hasattr(row, "keys") else row[1]
 
         with get_conn() as conn:
             conn.execute(
@@ -282,10 +266,7 @@ class RaidCommandsMixin:
             )
             # autocommit – no explicit commit needed
         with get_conn() as conn:
-            conn.execute(
-                "UPDATE twitch_streamers SET raid_bot_enabled = 0 WHERE twitch_user_id = ?",
-                (twitch_user_id,),
-            )
+            set_partner_raid_bot_enabled(conn, twitch_user_id=twitch_user_id, enabled=False)
 
         await ctx.send(
             f"🛑 Auto-Raid wurde für **{twitch_login}** deaktiviert.\n"
@@ -300,10 +281,7 @@ class RaidCommandsMixin:
         discord_user_id = str(ctx.author.id)
 
         with get_conn() as conn:
-            _s_row = conn.execute(
-                "SELECT twitch_login, twitch_user_id, raid_bot_enabled FROM twitch_streamers WHERE discord_user_id = ?",
-                (discord_user_id,),
-            ).fetchone()
+            _s_row = load_partner_by_discord_user_id(conn, discord_user_id)
 
         if not _s_row:
             await ctx.send(
@@ -312,7 +290,9 @@ class RaidCommandsMixin:
             )
             return
 
-        twitch_login, twitch_user_id, raid_bot_enabled = _s_row[0], _s_row[1], _s_row[2]
+        twitch_login = _s_row["twitch_login"] if hasattr(_s_row, "keys") else _s_row[2]
+        twitch_user_id = _s_row["twitch_user_id"] if hasattr(_s_row, "keys") else _s_row[1]
+        raid_bot_enabled = _s_row["raid_bot_enabled"] if hasattr(_s_row, "keys") else _s_row[9]
 
         with get_conn() as conn:
             _a_row = conn.execute(
@@ -400,10 +380,7 @@ class RaidCommandsMixin:
         limit = min(max(1, limit), 20)  # Zwischen 1 und 20
 
         with get_conn() as conn:
-            row = conn.execute(
-                "SELECT twitch_login, twitch_user_id FROM twitch_streamers WHERE discord_user_id = ?",
-                (discord_user_id,),
-            ).fetchone()
+            row = load_partner_by_discord_user_id(conn, discord_user_id)
 
         if not row:
             await ctx.send(
@@ -412,7 +389,8 @@ class RaidCommandsMixin:
             )
             return
 
-        twitch_login, twitch_user_id = row
+        twitch_login = row["twitch_login"] if hasattr(row, "keys") else row[2]
+        twitch_user_id = row["twitch_user_id"] if hasattr(row, "keys") else row[1]
 
         with get_conn() as conn:
             raids = conn.execute(
@@ -482,16 +460,16 @@ class RaidCommandsMixin:
 
         # Streamer-ID aus DB holen
         with get_conn() as conn:
-            row = conn.execute(
-                "SELECT twitch_user_id FROM twitch_streamers WHERE LOWER(twitch_login) = ?",
-                (login,),
-            ).fetchone()
+            row = load_active_partner(conn, twitch_login=login)
 
-        if not row or not row[0]:
+        twitch_user_id = (
+            row["twitch_user_id"] if row and hasattr(row, "keys") else (row[1] if row else None)
+        )
+        if not twitch_user_id:
             await ctx.send(f"Streamer **{login}** nicht in der DB gefunden.", ephemeral=True)
             return
 
-        channel_id = str(row[0])
+        channel_id = str(twitch_user_id)
 
         # Invite ermitteln
         invite, is_specific = await chat_bot._get_promo_invite(login)
@@ -545,7 +523,7 @@ class RaidCommandsMixin:
             _ph = ",".join("?" * len(_uids))
             with get_conn() as conn:
                 _discord_rows = conn.execute(
-                    f"SELECT twitch_user_id, discord_user_id FROM twitch_streamers WHERE twitch_user_id IN ({_ph})",
+                    f"SELECT twitch_user_id, discord_user_id FROM twitch_streamer_identities WHERE twitch_user_id IN ({_ph})",
                     _uids,
                 ).fetchall()
             _discord_map = {str(r[0]): r[1] for r in _discord_rows}
@@ -680,16 +658,15 @@ class RaidCommandsMixin:
         # User angegeben → echte Daten aus DB holen
         discord_user_id = str(target.id)
         with get_conn() as conn:
-            _s_row = conn.execute(
-                "SELECT twitch_user_id FROM twitch_streamers WHERE discord_user_id = ? LIMIT 1",
-                (discord_user_id,),
-            ).fetchone()
+            _s_row = load_streamer_identity(conn, discord_user_id=discord_user_id)
 
-        if not _s_row or not _s_row[0]:
+        twitch_user_id = (
+            _s_row["twitch_user_id"] if _s_row and hasattr(_s_row, "keys") else (_s_row[0] if _s_row else None)
+        )
+        if not twitch_user_id:
             await ctx.send(f"❌ Kein Twitch-Account für <@{target.id}> gefunden.", ephemeral=True)
             return
 
-        twitch_user_id = _s_row[0]
         with get_conn() as conn:
             _a_row = conn.execute(
                 "SELECT twitch_login FROM twitch_raid_auth WHERE twitch_user_id = ?",

@@ -4,7 +4,8 @@ import unittest
 from datetime import UTC, datetime, timedelta
 
 from bot.raid.partner_scores import BERLIN_TZ, PartnerRaidScoreService
-from bot.storage import proxy as storage_proxy
+
+from tests.sqlite_twitch_schema import ensure_sqlite_twitch_schema
 
 
 def _iso_utc(value: datetime) -> str:
@@ -15,7 +16,7 @@ class PartnerRaidScoreCacheTests(unittest.TestCase):
     def _make_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
-        storage_proxy.ensure_schema(conn)
+        ensure_sqlite_twitch_schema(conn)
         return conn
 
     def _make_service(self, conn: sqlite3.Connection) -> PartnerRaidScoreService:
@@ -24,14 +25,32 @@ class PartnerRaidScoreCacheTests(unittest.TestCase):
     def _insert_partner(self, conn: sqlite3.Connection, login: str, user_id: str) -> None:
         conn.execute(
             """
-            INSERT INTO twitch_streamers (
+            INSERT INTO twitch_streamer_identities (
+                twitch_login,
+                twitch_user_id
+            ) VALUES (?, ?)
+            ON CONFLICT(twitch_user_id) DO UPDATE SET
+                twitch_login = excluded.twitch_login
+            """,
+            (login, user_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO twitch_partners (
                 twitch_login,
                 twitch_user_id,
                 manual_verified_at,
-                raid_bot_enabled
-            ) VALUES (?, ?, ?, 1)
+                raid_bot_enabled,
+                partnered_at,
+                status
+            ) VALUES (?, ?, ?, 1, ?, 'active')
             """,
-            (login, user_id, "2026-03-01T10:00:00+00:00"),
+            (
+                login,
+                user_id,
+                "2026-03-01T10:00:00+00:00",
+                "2026-03-01T10:00:00+00:00",
+            ),
         )
 
     def _insert_session(

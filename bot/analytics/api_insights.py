@@ -83,6 +83,17 @@ class _AnalyticsInsightsMixin:
         equal = sum(1 for v in sorted_avgs if v == value)
         return (below + 0.5 * equal) / len(sorted_avgs)
 
+    @staticmethod
+    def _interpolated_percentile(values: list[float], pct: float) -> float:
+        """Return an interpolated percentile for a numeric list."""
+        if not values:
+            return 0.0
+        s = sorted(values)
+        idx = (len(s) - 1) * pct
+        lo = int(idx)
+        hi = min(lo + 1, len(s) - 1)
+        return s[lo] + (s[hi] - s[lo]) * (idx - lo)
+
     def _generate_insights(self, metrics: dict[str, Any]) -> list[dict[str, str]]:
         """Generate findings/insights from metrics."""
         insights = []
@@ -356,6 +367,67 @@ class _AnalyticsInsightsMixin:
                 )
                 viewer_minutes_has_real_samples = viewer_sample_count > 0
 
+                session_benchmark_rows = conn.execute(
+                    f"""
+                    WITH session_messages AS (
+                        SELECT
+                            cm.session_id,
+                            COUNT(*) AS message_count
+                        FROM twitch_chat_messages cm
+                        JOIN twitch_stream_sessions s ON s.id = cm.session_id
+                        WHERE s.started_at >= ?
+                          AND LOWER(s.streamer_login) = ?
+                          AND s.ended_at IS NOT NULL
+                          AND {msg_bot_clause_cm}
+                        GROUP BY cm.session_id
+                    ),
+                    session_viewer_samples AS (
+                        SELECT
+                            sv.session_id,
+                            COUNT(*) AS sample_count,
+                            COALESCE(SUM(GREATEST(sv.viewer_count, 0)), 0) AS viewer_minutes
+                        FROM twitch_session_viewers sv
+                        JOIN twitch_stream_sessions s ON s.id = sv.session_id
+                        WHERE s.started_at >= ?
+                          AND LOWER(s.streamer_login) = ?
+                          AND s.ended_at IS NOT NULL
+                        GROUP BY sv.session_id
+                    )
+                    SELECT
+                        s.id,
+                        COALESCE(sm.message_count, 0) AS message_count,
+                        CASE
+                            WHEN COALESCE(svs.sample_count, 0) > 0
+                            THEN COALESCE(svs.viewer_minutes, 0)
+                            ELSE COALESCE(s.avg_viewers, 0) * GREATEST(COALESCE(s.duration_seconds, 0), 0) / 60.0
+                        END AS viewer_minutes
+                    FROM twitch_stream_sessions s
+                    LEFT JOIN session_messages sm ON sm.session_id = s.id
+                    LEFT JOIN session_viewer_samples svs ON svs.session_id = s.id
+                    WHERE s.started_at >= ?
+                      AND LOWER(s.streamer_login) = ?
+                      AND s.ended_at IS NOT NULL
+                    """,
+                    [
+                        since_date,
+                        streamer_login,
+                        *msg_bot_params,
+                        since_date,
+                        streamer_login,
+                        since_date,
+                        streamer_login,
+                    ],
+                ).fetchall()
+                session_message_density_values: list[float] = []
+                for row in session_benchmark_rows:
+                    session_viewer_minutes = float(row[2] or 0.0)
+                    if session_viewer_minutes <= 0:
+                        continue
+                    session_messages = int(row[1] or 0)
+                    session_message_density_values.append(
+                        (session_messages / session_viewer_minutes) * 100.0
+                    )
+
                 # True message counts from raw chat events in the selected time range.
                 all_messages = conn.execute(
                     f"""
@@ -511,10 +583,20 @@ class _AnalyticsInsightsMixin:
                 seen_before_count = sum(1 for c in chatter_entries if c["seen_before"])
                 cold_rollup = len(chatter_entries) > 0 and (seen_before_count / len(chatter_entries)) < 0.1
 
+                if days <= 7:
+                    loyal_session_threshold = 2
+                elif days <= 30:
+                    loyal_session_threshold = 3
+                elif days <= 90:
+                    loyal_session_threshold = 8
+                else:
+                    loyal_session_threshold = 12
+
                 first_time_chatters = 0
+                returning_viewers = 0
+                core_loyal_viewers = 0
+                silent_core_loyal_viewers = 0
                 for c in chatter_entries:
-                    if not c["active_flag"]:
-                        continue
                     if cold_rollup:
                         is_first = c.get("session_count", 1) < 2
                     elif has_first_flag_data and c["has_first_flag"]:
@@ -523,13 +605,27 @@ class _AnalyticsInsightsMixin:
                             is_first = True
                     else:
                         is_first = not c["seen_before"] if c["chatter_login"] else True
-                    if is_first:
+
+                    is_returning = not is_first
+                    if c["active_flag"] and is_first:
                         first_time_chatters += 1
+                    if is_returning:
+                        returning_viewers += 1
+                        if (
+                            c["session_count"] >= loyal_session_threshold
+                            and (c["active_flag"] or c["lurker_flag"] or c["seen_flag"])
+                        ):
+                            core_loyal_viewers += 1
+                            if not c["active_flag"]:
+                                silent_core_loyal_viewers += 1
 
                 # Fallback for older rows where session_chatters may be sparse.
                 if active_chatters_count == 0 and distinct_chatters_from_messages > 0:
                     active_chatters_count = distinct_chatters_from_messages
                     first_time_chatters = distinct_chatters_from_messages
+                    returning_viewers = 0
+                    core_loyal_viewers = 0
+                    silent_core_loyal_viewers = 0
                     lurker_count = 0
                     chatters_api_seen = 0
                     tracked_unique_viewers = distinct_chatters_from_messages
@@ -549,6 +645,19 @@ class _AnalyticsInsightsMixin:
                 chatter_return_rate = (
                     (returning_chatters / unique_chatters) * 100.0 if unique_chatters > 0 else 0.0
                 )
+                core_loyal_viewer_rate = (
+                    (core_loyal_viewers / total_unique_viewers) * 100.0
+                    if total_unique_viewers > 0
+                    else 0.0
+                )
+                session_message_density_sorted = sorted(session_message_density_values)
+                messages_per_100_viewer_minutes_benchmark_sessions = len(
+                    session_message_density_sorted
+                )
+                messages_per_100_viewer_minutes_percentile = None
+                messages_per_100_viewer_minutes_median = None
+                messages_per_100_viewer_minutes_p25 = None
+                messages_per_100_viewer_minutes_p75 = None
 
                 engagement = calculate_engagement(
                     EngagementInputs(
@@ -563,6 +672,30 @@ class _AnalyticsInsightsMixin:
                         sessions_with_chat=sessions_with_chat,
                     )
                 )
+                if (
+                    engagement.messages_per_100_viewer_minutes is not None
+                    and messages_per_100_viewer_minutes_benchmark_sessions > 0
+                ):
+                    messages_per_100_viewer_minutes_percentile = round(
+                        self._percentile_of(
+                            session_message_density_sorted,
+                            engagement.messages_per_100_viewer_minutes,
+                        )
+                        * 100.0,
+                        1,
+                    )
+                    messages_per_100_viewer_minutes_median = round(
+                        self._interpolated_percentile(session_message_density_sorted, 0.5),
+                        2,
+                    )
+                    messages_per_100_viewer_minutes_p25 = round(
+                        self._interpolated_percentile(session_message_density_sorted, 0.25),
+                        2,
+                    )
+                    messages_per_100_viewer_minutes_p75 = round(
+                        self._interpolated_percentile(session_message_density_sorted, 0.75),
+                        2,
+                    )
                 active_ratio = engagement.active_ratio
                 chat_session_coverage_ratio = engagement.chat_session_coverage
                 chat_session_coverage_pct = round(chat_session_coverage_ratio * 100.0, 1)
@@ -619,11 +752,21 @@ class _AnalyticsInsightsMixin:
                         "totalTrackedViewers": total_unique_viewers,
                         "firstTimeChatters": first_time_chatters,
                         "returningChatters": returning_chatters,
+                        "returningTrackedViewers": returning_viewers,
+                        "coreLoyalViewers": core_loyal_viewers,
+                        "silentCoreLoyalViewers": silent_core_loyal_viewers,
+                        "coreLoyalViewerRate": round(core_loyal_viewer_rate, 1),
+                        "loyaltySessionThreshold": loyal_session_threshold,
                         "messagesPerMinute": round(messages_per_minute, 2),
                         "chatterReturnRate": round(chatter_return_rate, 1),
                         "chatPenetrationPct": engagement.chat_penetration_pct,
                         "chatPenetrationReliable": engagement.chat_penetration_reliable,
                         "messagesPer100ViewerMinutes": engagement.messages_per_100_viewer_minutes,
+                        "messagesPer100ViewerMinutesPercentile": messages_per_100_viewer_minutes_percentile,
+                        "messagesPer100ViewerMinutesMedian": messages_per_100_viewer_minutes_median,
+                        "messagesPer100ViewerMinutesP25": messages_per_100_viewer_minutes_p25,
+                        "messagesPer100ViewerMinutesP75": messages_per_100_viewer_minutes_p75,
+                        "messagesPer100ViewerMinutesBenchmarkSessions": messages_per_100_viewer_minutes_benchmark_sessions,
                         "viewerMinutes": engagement.viewer_minutes,
                         # Legacy compatibility (deprecated)
                         "legacyInteractionActivePerAvgViewer": engagement.legacy_interaction_active_per_avg_viewer,

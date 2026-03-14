@@ -16,6 +16,7 @@ const NAV_LINKS = [
   { label: "Analytics", href: "#analytics" },
   { label: "Raids", href: "#raids" },
   { label: "Community", href: "#community" },
+  { label: "Affiliate", href: "#affiliate" },
   { label: "Support", href: "#support" },
 ];
 
@@ -295,5 +296,4 @@ export function BotFaqPage() {
     </>
   );
 }
-
 

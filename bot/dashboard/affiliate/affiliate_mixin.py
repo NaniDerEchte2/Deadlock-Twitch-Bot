@@ -1,11 +1,12 @@
-"""Affiliate system mixin for DashboardV2Server — OAuth, signup, Stripe Connect, claims, commissions."""
+"""Affiliate system mixin for DashboardV2Server - OAuth, signup, Stripe Connect, claims, commissions."""
 
 from __future__ import annotations
 
-import html
+import contextlib
 import re
 import secrets
 import time
+import zlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,8 @@ _LOGIN_RE = re.compile(r"^[A-Za-z0-9_]{3,25}$")
 _AFFILIATE_SESSION_TTL = 7 * 24 * 3600  # 7 days
 _AFFILIATE_COOKIE = "twitch_affiliate_session"
 _COMMISSION_RATE = 0.30
+_MAX_PENDING_COMMISSION_CENTS = 5000
+_AFFILIATE_COMMISSION_LOCK_NAMESPACE = 1_103_151_689
 
 
 class _DashboardAffiliateMixin:
@@ -113,6 +116,157 @@ class _DashboardAffiliateMixin:
             path="/",
         )
 
+    @staticmethod
+    def _affiliate_import_stripe() -> tuple[Any | None, str | None]:
+        try:
+            import stripe
+        except Exception as exc:
+            return None, str(exc)
+        return stripe, None
+
+    @staticmethod
+    def _affiliate_commission_lock_key(affiliate_login: str) -> tuple[int, int]:
+        normalized = str(affiliate_login or "").strip().lower().encode("utf-8")
+        lock_key = zlib.crc32(normalized)
+        if lock_key >= 2**31:
+            lock_key -= 2**32
+        return _AFFILIATE_COMMISSION_LOCK_NAMESPACE, lock_key
+
+    @contextlib.contextmanager
+    def _affiliate_commission_lock(self, conn: Any, affiliate_login: str):
+        transaction_factory = getattr(conn, "transaction", None)
+        if not affiliate_login or not callable(transaction_factory):
+            yield
+            return
+
+        namespace, lock_key = self._affiliate_commission_lock_key(affiliate_login)
+        conn.execute("SELECT pg_advisory_lock(?, ?)", (namespace, lock_key))
+        try:
+            yield
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(?, ?)", (namespace, lock_key))
+
+    @contextlib.contextmanager
+    def _affiliate_db_transaction(self, conn: Any):
+        transaction_factory = getattr(conn, "transaction", None)
+        if callable(transaction_factory):
+            with transaction_factory():
+                yield
+            return
+
+        raw_conn = getattr(conn, "_conn", conn)
+        began_transaction = raw_conn.__class__.__module__.startswith("sqlite3")
+        if began_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+
+        try:
+            yield
+        except Exception:
+            if began_transaction:
+                rollback = getattr(conn, "rollback", None)
+                if callable(rollback):
+                    rollback()
+            raise
+        else:
+            if began_transaction:
+                commit = getattr(conn, "commit", None)
+                if callable(commit):
+                    commit()
+
+    def _affiliate_replay_pending_commissions(
+        self,
+        conn: Any,
+        *,
+        stripe: Any | None,
+        stripe_account_id: str,
+        affiliate_login: str,
+        error_message: str | None = None,
+        commit: bool = True,
+    ) -> None:
+        pending_result = conn.execute(
+            """SELECT id, stripe_event_id, commission_cents, currency
+               FROM affiliate_commissions
+               WHERE affiliate_twitch_login = ?
+                 AND status IN ('pending', 'failed')
+                 AND stripe_transfer_id IS NULL
+                 AND transferred_at IS NULL
+               ORDER BY created_at ASC, id ASC""",
+            (affiliate_login,),
+        )
+        pending_rows = pending_result.fetchall() if pending_result else []
+
+        for row in pending_rows:
+            self._affiliate_transfer_commission(
+                conn,
+                stripe=stripe,
+                stripe_account_id=stripe_account_id,
+                commission_id=int(row["id"]),
+                stripe_event_id=str(row["stripe_event_id"] or ""),
+                commission_cents=int(row["commission_cents"] or 0),
+                currency=str(row["currency"] or "eur"),
+                error_message=error_message,
+                commit=commit,
+            )
+
+    def _affiliate_transfer_commission(
+        self,
+        conn: Any,
+        *,
+        stripe: Any | None,
+        stripe_account_id: str,
+        commission_id: int,
+        stripe_event_id: str,
+        commission_cents: int,
+        currency: str,
+        error_message: str | None = None,
+        commit: bool = True,
+    ) -> str:
+        idempotency_key = f"affiliate-transfer:{int(commission_id)}"
+
+        if error_message:
+            conn.execute(
+                """UPDATE affiliate_commissions
+                   SET status = 'pending', stripe_transfer_id = NULL, transferred_at = NULL,
+                       error_message = ?
+                   WHERE id = ?""",
+                (str(error_message)[:500], commission_id),
+            )
+            if commit:
+                conn.commit()
+            return "pending"
+
+        try:
+            transfer = stripe.Transfer.create(
+                amount=commission_cents,
+                currency=currency,
+                destination=stripe_account_id,
+                transfer_group=stripe_event_id,
+                idempotency_key=idempotency_key,
+            )
+        except Exception as exc:
+            log.warning("Affiliate Stripe transfer failed for commission %s: %s", commission_id, exc)
+            conn.execute(
+                """UPDATE affiliate_commissions
+                   SET status = 'pending', stripe_transfer_id = NULL, transferred_at = NULL,
+                       error_message = ?
+                   WHERE id = ?""",
+                (str(exc)[:500], commission_id),
+            )
+            if commit:
+                conn.commit()
+            return "pending"
+
+        conn.execute(
+            """UPDATE affiliate_commissions
+               SET status = 'transferred', stripe_transfer_id = ?, transferred_at = ?,
+                   error_message = NULL
+               WHERE id = ?""",
+            (transfer.id, datetime.now(UTC).isoformat(), commission_id),
+        )
+        if commit:
+            conn.commit()
+        return "transferred"
+
     # ------------------------------------------------------------------ #
     # Twitch OAuth (affiliate-specific)                                    #
     # ------------------------------------------------------------------ #
@@ -146,7 +300,7 @@ class _DashboardAffiliateMixin:
 
         existing = self._get_affiliate_session(request)
         if existing:
-            raise web.HTTPFound("/twitch/affiliate/dashboard")
+            raise web.HTTPFound("/twitch/affiliate/portal")
 
         if not hasattr(self, "_affiliate_oauth_states"):
             self._affiliate_oauth_states = {}
@@ -203,18 +357,41 @@ class _DashboardAffiliateMixin:
             email=email,
         )
 
-        # Check if account exists in DB
+        now = datetime.now(UTC).isoformat()
         with storage.get_conn() as conn:
             self._affiliate_ensure_tables(conn)
-            row = conn.execute(
+            result = conn.execute(
                 "SELECT twitch_login FROM affiliate_accounts WHERE twitch_login = ?",
                 (twitch_login,),
-            ).fetchone()
+            )
+            row = result.fetchone() if result else None
+            if not row:
+                try:
+                    conn.execute(
+                        """INSERT INTO affiliate_accounts
+                           (twitch_login, twitch_user_id, display_name, email, full_name,
+                            address_line1, address_city, address_zip, address_country,
+                            created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DE', ?, ?)""",
+                        (
+                            twitch_login,
+                            twitch_user_id,
+                            display_name,
+                            email,
+                            "",
+                            "",
+                            "",
+                            "",
+                            now,
+                            now,
+                        ),
+                    )
+                    conn.commit()
+                except Exception as _dup_exc:
+                    if "unique" not in str(_dup_exc).lower() and "duplicate" not in str(_dup_exc).lower():
+                        raise
 
-        if row:
-            destination = "/twitch/affiliate/dashboard"
-        else:
-            destination = "/twitch/affiliate/signup"
+        destination = "/twitch/affiliate/portal"
 
         response = web.HTTPFound(destination)
         self._set_affiliate_cookie(response, request, session_id)
@@ -274,92 +451,13 @@ class _DashboardAffiliateMixin:
         session = self._get_affiliate_session(request)
         if not session:
             raise web.HTTPFound("/twitch/auth/affiliate/login")
-
-        twitch_login = session.get("twitch_login", "")
-
-        with storage.get_conn() as conn:
-            self._affiliate_ensure_tables(conn)
-            row = conn.execute(
-                "SELECT twitch_login FROM affiliate_accounts WHERE twitch_login = ?",
-                (twitch_login,),
-            ).fetchone()
-
-        if row:
-            raise web.HTTPFound("/twitch/affiliate/dashboard")
-
-        display_name = html.escape(session.get("display_name", twitch_login))
-        email_prefill = html.escape(session.get("email", ""))
-
-        form_html = f"""
-        <h2>Affiliate Registrierung</h2>
-        <p>Willkommen, <strong>{display_name}</strong>! Bitte vervollstaendige deine Daten.</p>
-        <form method="POST" action="/twitch/affiliate/signup/complete"
-              style="display:flex;flex-direction:column;gap:12px;max-width:400px;">
-            <label>E-Mail<br><input type="email" name="email" required value="{email_prefill}"
-                   style="width:100%;padding:8px;border:1px solid #334155;border-radius:6px;background:#1e293b;color:#e2e8f0;"></label>
-            <label>Vollstaendiger Name<br><input type="text" name="full_name" required
-                   style="width:100%;padding:8px;border:1px solid #334155;border-radius:6px;background:#1e293b;color:#e2e8f0;"></label>
-            <label>Adresse (Strasse + Nr.)<br><input type="text" name="address_line1" required
-                   style="width:100%;padding:8px;border:1px solid #334155;border-radius:6px;background:#1e293b;color:#e2e8f0;"></label>
-            <label>Stadt<br><input type="text" name="address_city" required
-                   style="width:100%;padding:8px;border:1px solid #334155;border-radius:6px;background:#1e293b;color:#e2e8f0;"></label>
-            <label>PLZ<br><input type="text" name="address_zip" required
-                   style="width:100%;padding:8px;border:1px solid #334155;border-radius:6px;background:#1e293b;color:#e2e8f0;"></label>
-            <button type="submit" style="padding:10px 20px;background:#3b82f6;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:16px;">
-                Registrierung abschliessen
-            </button>
-        </form>
-        """
-        page_html = self._render_oauth_page("Affiliate Registrierung", form_html)
-        return web.Response(text=page_html, content_type="text/html")
+        raise web.HTTPFound("/twitch/affiliate/portal")
 
     async def _affiliate_signup_complete(self, request: web.Request) -> web.StreamResponse:
         session = self._get_affiliate_session(request)
         if not session:
             raise web.HTTPFound("/twitch/auth/affiliate/login")
-
-        twitch_login = session.get("twitch_login", "")
-        twitch_user_id = session.get("twitch_user_id", "")
-        display_name = session.get("display_name", twitch_login)
-
-        data = await request.post()
-        email = str(data.get("email") or "").strip()[:255]
-        full_name = str(data.get("full_name") or "").strip()[:255]
-        address_line1 = str(data.get("address_line1") or "").strip()[:255]
-        address_city = str(data.get("address_city") or "").strip()[:255]
-        address_zip = str(data.get("address_zip") or "").strip()[:20]
-
-        if not all([email, full_name, address_line1, address_city, address_zip]):
-            return web.Response(
-                text=self._render_oauth_page(
-                    "Fehler", "<p>Bitte alle Felder ausfuellen.</p>"
-                    '<p><a href="/twitch/affiliate/signup">Zurueck</a></p>'
-                ),
-                content_type="text/html",
-                status=400,
-            )
-
-        now = datetime.now(UTC).isoformat()
-        with storage.get_conn() as conn:
-            self._affiliate_ensure_tables(conn)
-            try:
-                conn.execute(
-                    """INSERT INTO affiliate_accounts
-                       (twitch_login, twitch_user_id, display_name, email, full_name,
-                        address_line1, address_city, address_zip, address_country,
-                        created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DE', ?, ?)""",
-                    (twitch_login, twitch_user_id, display_name, email, full_name,
-                     address_line1, address_city, address_zip, now, now),
-                )
-                conn.commit()
-            except Exception as _dup_exc:
-                if "unique" in str(_dup_exc).lower() or "duplicate" in str(_dup_exc).lower():
-                    pass  # already exists
-                else:
-                    raise
-
-        raise web.HTTPFound("/twitch/affiliate/dashboard")
+        raise web.HTTPFound("/twitch/affiliate/portal")
 
     # ------------------------------------------------------------------ #
     # Stripe Connect                                                       #
@@ -410,6 +508,13 @@ class _DashboardAffiliateMixin:
             return web.Response(text="State ungueltig oder abgelaufen.", status=400)
         if time.time() - float(state_data.get("created_at", 0)) > 600:
             return web.Response(text="State abgelaufen.", status=400)
+        session_login = str(session.get("twitch_login") or "").strip().lower()
+        state_login = str(state_data.get("twitch_login") or "").strip().lower()
+        if not state_login or session_login != state_login:
+            return web.Response(
+                text="Affiliate-Session passt nicht zum Stripe Connect state.",
+                status=403,
+            )
         redirect_uri = str(state_data.get("redirect_uri") or "").strip()
 
         stripe_secret_key = self._load_secret_value(
@@ -438,21 +543,34 @@ class _DashboardAffiliateMixin:
         if not stripe_user_id:
             return web.Response(text="Keine Stripe Account ID erhalten.", status=502)
 
-        twitch_login = session.get("twitch_login", "")
+        twitch_login = session_login
         now = datetime.now(UTC).isoformat()
 
         with storage.get_conn() as conn:
             self._affiliate_ensure_tables(conn)
-            conn.execute(
-                """UPDATE affiliate_accounts
-                   SET stripe_account_id = ?, stripe_connected_at = ?,
-                       stripe_connect_status = 'connected', updated_at = ?
-                   WHERE twitch_login = ?""",
-                (stripe_user_id, now, now, twitch_login),
-            )
-            conn.commit()
+            with self._affiliate_commission_lock(conn, twitch_login):
+                conn.execute(
+                    """UPDATE affiliate_accounts
+                       SET stripe_account_id = ?, stripe_connected_at = ?,
+                           stripe_connect_status = 'connected', updated_at = ?
+                       WHERE twitch_login = ?""",
+                    (stripe_user_id, now, now, twitch_login),
+                )
+                conn.commit()
 
-        raise web.HTTPFound("/twitch/affiliate/dashboard")
+                stripe, stripe_import_error = self._affiliate_import_stripe()
+                if stripe is not None:
+                    stripe.api_key = stripe_secret_key
+
+                self._affiliate_replay_pending_commissions(
+                    conn,
+                    stripe=stripe,
+                    stripe_account_id=stripe_user_id,
+                    affiliate_login=twitch_login,
+                    error_message=stripe_import_error or None,
+                )
+
+        raise web.HTTPFound("/twitch/affiliate/portal")
 
     # ------------------------------------------------------------------ #
     # Claim route                                                          #
@@ -480,7 +598,7 @@ class _DashboardAffiliateMixin:
 
             # Check if streamer is already a registered partner
             row = conn.execute(
-                "SELECT twitch_login FROM twitch_streamers WHERE LOWER(twitch_login) = LOWER(?)",
+                "SELECT twitch_login FROM twitch_streamers_partner_state WHERE LOWER(twitch_login) = LOWER(?) AND is_partner_active = 1",
                 (streamer_login,),
             ).fetchone()
             if row:
@@ -667,63 +785,65 @@ class _DashboardAffiliateMixin:
             return "skipped"
         now = datetime.now(UTC).isoformat()
 
-        try:
-            conn.execute(
-                """INSERT INTO affiliate_commissions
-                   (affiliate_twitch_login, streamer_login, stripe_event_id, stripe_invoice_id,
-                    stripe_customer_id, brutto_cents, commission_cents, currency,
-                    status, period_start, period_end, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
-                (affiliate_login, streamer_login, stripe_event_id, invoice_id,
-                 stripe_customer_id, amount_paid_cents, commission_cents, currency,
-                 period_start, period_end, now),
-            )
-            conn.commit()
-        except Exception as _dup_exc:
-            if "unique" in str(_dup_exc).lower() or "duplicate" in str(_dup_exc).lower():
-                return "duplicate"
-            raise
+        initial_status = "pending"
 
-        # Check if affiliate has Stripe account for transfer
-        acct = conn.execute(
-            "SELECT stripe_account_id FROM affiliate_accounts WHERE twitch_login = ?",
-            (affiliate_login,),
-        ).fetchone()
-        stripe_account_id = str((acct["stripe_account_id"] if acct else None) or "").strip()
-
-        if stripe_account_id:
+        with self._affiliate_commission_lock(conn, affiliate_login):
             try:
-                transfer = stripe.Transfer.create(
-                    amount=commission_cents,
-                    currency=currency,
-                    destination=stripe_account_id,
-                    transfer_group=stripe_event_id,
-                )
-                conn.execute(
-                    """UPDATE affiliate_commissions
-                       SET status = 'transferred', stripe_transfer_id = ?, transferred_at = ?
-                       WHERE stripe_event_id = ?""",
-                    (transfer.id, datetime.now(UTC).isoformat(), stripe_event_id),
-                )
-                conn.commit()
-                return "transferred"
-            except Exception as exc:
-                log.warning("Affiliate Stripe transfer failed: %s", exc)
-                conn.execute(
-                    """UPDATE affiliate_commissions
-                       SET status = 'failed', error_message = ?
-                       WHERE stripe_event_id = ?""",
-                    (str(exc)[:500], stripe_event_id),
-                )
-                conn.commit()
-                return "failed"
-        else:
-            conn.execute(
-                "UPDATE affiliate_commissions SET status = 'skipped' WHERE stripe_event_id = ?",
+                with self._affiliate_db_transaction(conn):
+                    acct_result = conn.execute(
+                        "SELECT stripe_account_id FROM affiliate_accounts WHERE twitch_login = ?",
+                        (affiliate_login,),
+                    )
+                    acct = acct_result.fetchone() if acct_result else None
+                    stripe_account_id = str(
+                        (acct["stripe_account_id"] if acct else None) or ""
+                    ).strip()
+
+                    if not stripe_account_id:
+                        pending_total_result = conn.execute(
+                            """SELECT COALESCE(SUM(commission_cents), 0) AS pending_total
+                               FROM affiliate_commissions
+                               WHERE affiliate_twitch_login = ? AND status = 'pending'""",
+                            (affiliate_login,),
+                        )
+                        pending_total_row = pending_total_result.fetchone() if pending_total_result else None
+                        current_pending_total = int(
+                            (pending_total_row["pending_total"] if pending_total_row else 0) or 0
+                        )
+                        if current_pending_total + commission_cents > _MAX_PENDING_COMMISSION_CENTS:
+                            initial_status = "skipped"
+
+                    conn.execute(
+                        """INSERT INTO affiliate_commissions
+                           (affiliate_twitch_login, streamer_login, stripe_event_id, stripe_invoice_id,
+                            stripe_customer_id, brutto_cents, commission_cents, currency,
+                            status, period_start, period_end, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (affiliate_login, streamer_login, stripe_event_id, invoice_id,
+                         stripe_customer_id, amount_paid_cents, commission_cents, currency,
+                         initial_status, period_start, period_end, now),
+                    )
+            except Exception as _dup_exc:
+                if "unique" in str(_dup_exc).lower() or "duplicate" in str(_dup_exc).lower():
+                    return "duplicate"
+                raise
+
+            if not stripe_account_id:
+                return initial_status
+
+            self._affiliate_replay_pending_commissions(
+                conn,
+                stripe=stripe,
+                stripe_account_id=stripe_account_id,
+                affiliate_login=affiliate_login,
+            )
+
+            status_result = conn.execute(
+                "SELECT status FROM affiliate_commissions WHERE stripe_event_id = ?",
                 (stripe_event_id,),
             )
-            conn.commit()
-            return "skipped"
+            status_row = status_result.fetchone() if status_result else None
+            return str((status_row["status"] if status_row else None) or "pending")
 
     # ------------------------------------------------------------------ #
     # Route registration                                                   #

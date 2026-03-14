@@ -24,7 +24,14 @@ from ..api.twitch_auth import (
     normalize_twitch_credential,
 )
 from ..api.token_error_handler import TokenErrorHandler
-from ..storage import backfill_tracked_stats_from_category, get_conn
+from ..storage import (
+    backfill_tracked_stats_from_category,
+    get_conn,
+    load_active_partner,
+    load_streamer_identity,
+    promote_streamer_to_partner,
+    set_partner_raid_bot_enabled,
+)
 
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"  # noqa: S105
 TWITCH_AUTHORIZE_URL = "https://id.twitch.tv/oauth2/authorize"
@@ -664,6 +671,7 @@ class RaidAuthManager:
                        enc_version, token_expires_at
                 FROM twitch_raid_auth
                 WHERE raid_enabled IS TRUE
+                  AND COALESCE(needs_reauth, 0) <> 1
                 """
             ).fetchall()
 
@@ -883,40 +891,24 @@ class RaidAuthManager:
                 ),
             )
             # Aktivieren, damit Auto-Raid unmittelbar nach OAuth freigeschaltet ist
-            conn.execute(
-                """
-                UPDATE twitch_streamers
-                   SET twitch_login = ?,
-                       twitch_user_id = ?,
-                       raid_bot_enabled = 1,
-                       manual_verified_permanent = 1,
-                       manual_verified_until = NULL,
-                       manual_verified_at = COALESCE(manual_verified_at, CURRENT_TIMESTAMP),
-                       manual_partner_opt_out = 0,
-                       archived_at = NULL,
-                       is_monitored_only = 0,
-                       is_on_discord = CASE
-                           WHEN COALESCE(discord_user_id, '') <> '' THEN 1
-                           ELSE is_on_discord
-                       END
-                 WHERE twitch_user_id = ?
-                    OR lower(twitch_login) = lower(?)
-                """,
-                (twitch_login, twitch_user_id, twitch_user_id, twitch_login),
-            )
-            conn.execute(
-                """
-                INSERT INTO twitch_streamers
-                    (twitch_login, twitch_user_id, raid_bot_enabled, manual_verified_permanent,
-                     manual_verified_until, manual_verified_at, manual_partner_opt_out)
-                VALUES (?, ?, 1, 1, NULL, CURRENT_TIMESTAMP, 0)
-                ON CONFLICT DO NOTHING
-                """,
-                (twitch_login, twitch_user_id),
+            promote_streamer_to_partner(
+                conn,
+                twitch_login=twitch_login,
+                twitch_user_id=twitch_user_id,
+                manual_verified_permanent=1,
+                manual_verified_until=None,
+                manual_verified_at=authorized_at,
+                manual_partner_opt_out=0,
+                raid_bot_enabled=1,
             )
             # Re-Auth abgeschlossen: needs_reauth zurücksetzen
             conn.execute(
-                "UPDATE twitch_raid_auth SET needs_reauth = FALSE WHERE twitch_user_id = %s",
+                """
+                UPDATE twitch_raid_auth
+                SET needs_reauth = FALSE,
+                    reauth_notified_at = NULL
+                WHERE twitch_user_id = ?
+                """,
                 (twitch_user_id,),
             )
             copied = backfill_tracked_stats_from_category(conn, twitch_login)
@@ -959,7 +951,7 @@ class RaidAuthManager:
             row = conn.execute(
                 """
                 SELECT access_token_enc, refresh_token_enc,
-                       enc_version, token_expires_at, twitch_login
+                       enc_version, token_expires_at, twitch_login, needs_reauth
                 FROM twitch_raid_auth
                 WHERE twitch_user_id = ?
                 """,
@@ -967,6 +959,14 @@ class RaidAuthManager:
             ).fetchone()
 
         if not row:
+            return None
+
+        needs_reauth = bool(row["needs_reauth"] if hasattr(row, "keys") else row[5])
+        if needs_reauth:
+            log.info(
+                "Auth lookup denied for user_id=%s: dashboard reauth required",
+                _mask_log_identifier(twitch_user_id),
+            )
             return None
 
         _enc_v = row["enc_version"] or 1
@@ -1005,12 +1005,19 @@ class RaidAuthManager:
                     """SELECT token_expires_at,
                               access_token_enc,
                               refresh_token_enc,
-                              enc_version
+                              enc_version,
+                              needs_reauth
                        FROM twitch_raid_auth WHERE twitch_user_id = ?""",
                     (twitch_user_id,),
                 ).fetchone()
 
             if row_check:
+                if bool(row_check["needs_reauth"] if hasattr(row_check, "keys") else row_check[4]):
+                    log.info(
+                        "Auth lookup denied for user_id=%s inside refresh lock: dashboard reauth required",
+                        _mask_log_identifier(twitch_user_id),
+                    )
+                    return None
                 _dc_uid = str(twitch_user_id)
                 _dc_v = row_check["enc_version"] or 1
                 curr_expires_iso = row_check["token_expires_at"]
@@ -1096,7 +1103,7 @@ class RaidAuthManager:
             row = conn.execute(
                 """
                 SELECT access_token_enc, refresh_token_enc,
-                       enc_version, token_expires_at, twitch_login
+                       enc_version, token_expires_at, twitch_login, needs_reauth
                 FROM twitch_raid_auth
                 WHERE twitch_user_id = ? AND raid_enabled IS TRUE
                 """,
@@ -1104,6 +1111,14 @@ class RaidAuthManager:
             ).fetchone()
 
         if not row:
+            return None
+
+        needs_reauth = bool(row["needs_reauth"] if hasattr(row, "keys") else row[5])
+        if needs_reauth:
+            log.info(
+                "OAuth grant for user_id=%s requires dashboard reauth - returning None",
+                _mask_log_identifier(twitch_user_id),
+            )
             return None
 
         _enc_v = row["enc_version"] or 1
@@ -1140,12 +1155,17 @@ class RaidAuthManager:
             with get_conn() as conn:
                 row_check = conn.execute(
                     """SELECT token_expires_at,
-                              access_token_enc, enc_version
+                              access_token_enc, enc_version,
+                              raid_enabled, needs_reauth
                        FROM twitch_raid_auth WHERE twitch_user_id = ?""",
                     (twitch_user_id,),
                 ).fetchone()
 
             if row_check:
+                raid_enabled = bool(row_check["raid_enabled"] if hasattr(row_check, "keys") else row_check[3])
+                needs_reauth = bool(row_check["needs_reauth"] if hasattr(row_check, "keys") else row_check[4])
+                if not raid_enabled or needs_reauth:
+                    return None
                 _dc_uid = str(twitch_user_id)
                 _dc_v = row_check["enc_version"] or 1
                 curr_expires_iso = row_check["token_expires_at"]
@@ -1209,13 +1229,10 @@ class RaidAuthManager:
         if not login:
             return None
         with get_conn() as conn:
-            row = conn.execute(
-                "SELECT twitch_user_id FROM twitch_streamers WHERE LOWER(twitch_login) = ?",
-                (login,),
-            ).fetchone()
+            row = load_active_partner(conn, twitch_login=login)
         if not row:
             return None
-        twitch_user_id = row[0] if not hasattr(row, "keys") else row["twitch_user_id"]
+        twitch_user_id = row[1] if not hasattr(row, "keys") else row["twitch_user_id"]
         token = await self.get_valid_token(str(twitch_user_id), session)
         if token:
             return str(twitch_user_id), token
@@ -1235,39 +1252,24 @@ class RaidAuthManager:
                     auth_row[0] if not hasattr(auth_row, "keys") else auth_row["twitch_login"] or ""
                 )
 
-            streamer_row = conn.execute(
-                """
-                SELECT discord_user_id
-                FROM twitch_streamers
-                WHERE twitch_user_id = ?
-                   OR (? <> '' AND LOWER(twitch_login) = LOWER(?))
-                LIMIT 1
-                """,
-                (twitch_user_id, login_hint, login_hint),
-            ).fetchone()
+            streamer_row = load_streamer_identity(
+                conn,
+                twitch_user_id=twitch_user_id,
+                twitch_login=login_hint,
+            )
             if streamer_row:
                 discord_user_id = str(
-                    streamer_row[0]
-                    if not hasattr(streamer_row, "keys")
-                    else streamer_row["discord_user_id"] or ""
+                    streamer_row["discord_user_id"]
+                    if hasattr(streamer_row, "keys")
+                    else streamer_row[2]
+                    or ""
                 ).strip()
+
+            set_partner_raid_bot_enabled(conn, twitch_user_id=twitch_user_id, enabled=False)
 
             conn.execute(
                 "DELETE FROM twitch_raid_auth WHERE twitch_user_id = ?",
                 (twitch_user_id,),
-            )
-            conn.execute(
-                """
-                UPDATE twitch_streamers
-                   SET raid_bot_enabled = 0,
-                       manual_verified_permanent = 0,
-                       manual_verified_until = NULL,
-                       manual_verified_at = NULL,
-                       manual_partner_opt_out = 1
-                 WHERE twitch_user_id = ?
-                    OR (? <> '' AND LOWER(twitch_login) = LOWER(?))
-                """,
-                (twitch_user_id, login_hint, login_hint),
             )
             # autocommit – no explicit commit needed
 
@@ -1286,11 +1288,7 @@ class RaidAuthManager:
                 "UPDATE twitch_raid_auth SET raid_enabled = ? WHERE twitch_user_id = ?",
                 (bool(enabled), twitch_user_id),
             )
-            # Flag im Streamer-Datensatz spiegeln, damit der Auto-Raid-Check konsistent bleibt
-            conn.execute(
-                "UPDATE twitch_streamers SET raid_bot_enabled = ? WHERE twitch_user_id = ?",
-                (1 if enabled else 0, twitch_user_id),
-            )
+            set_partner_raid_bot_enabled(conn, twitch_user_id=twitch_user_id, enabled=enabled)
             # autocommit – no explicit commit needed
         log.info("Set raid_enabled=%s for user_id=%s", enabled, twitch_user_id)
 

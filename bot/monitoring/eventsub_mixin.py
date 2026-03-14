@@ -71,7 +71,7 @@ class _EventSubMixin:
                 rows = c.execute(
                     """
                     SELECT twitch_user_id, twitch_login
-                    FROM twitch_streamers
+                    FROM twitch_streamer_identities
                     WHERE twitch_login IS NOT NULL
                     """
                 ).fetchall()
@@ -464,8 +464,9 @@ class _EventSubMixin:
                 rows = c.execute(
                     """
                     SELECT twitch_user_id, twitch_login
-                      FROM twitch_streamers
-                     WHERE raid_bot_enabled = 1
+                      FROM twitch_streamers_partner_state
+                     WHERE is_partner_active = 1
+                       AND COALESCE(raid_bot_enabled, 0) = 1
                        AND twitch_user_id IS NOT NULL
                        AND twitch_login IS NOT NULL
                     """
@@ -523,7 +524,12 @@ class _EventSubMixin:
         try:
             with storage.get_conn() as c:
                 rows = c.execute(
-                    "SELECT twitch_login FROM twitch_streamers WHERE twitch_login IS NOT NULL"
+                    """
+                    SELECT twitch_login
+                    FROM twitch_streamers_partner_state
+                    WHERE is_partner_active = 1
+                      AND twitch_login IS NOT NULL
+                    """
                 ).fetchall()
             return [str(r["twitch_login"] if hasattr(r, "keys") else r[0]).lower() for r in rows]
         except Exception:
@@ -996,12 +1002,11 @@ class _EventSubMixin:
                     if not login_norm:
                         try:
                             with storage.get_conn() as c:
-                                row = c.execute(
-                                    "SELECT twitch_login FROM twitch_streamers WHERE twitch_user_id = ?",
-                                    (bid,),
-                                ).fetchone()
+                                row = storage.load_streamer_identity(c, twitch_user_id=bid)
                             if row:
-                                login_norm = str(row[0]).lower()
+                                login_norm = str(
+                                    row["twitch_login"] if hasattr(row, "keys") else row[1]
+                                ).lower()
                         except Exception:
                             log.debug(
                                 "Polling: login lookup for user id %s failed",

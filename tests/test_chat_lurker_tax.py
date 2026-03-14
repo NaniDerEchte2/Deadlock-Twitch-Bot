@@ -112,6 +112,14 @@ def _build_conn() -> sqlite3.Connection:
     )
     conn.execute(
         """
+        CREATE TABLE twitch_streamer_identities (
+            twitch_user_id TEXT PRIMARY KEY,
+            twitch_login TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE streamer_plans (
             twitch_user_id TEXT PRIMARY KEY,
             twitch_login TEXT,
@@ -222,6 +230,10 @@ class ChatLurkerTaxReminderTests(unittest.IsolatedAsyncioTestCase):
         self.now = now
         self.conn.execute(
             "INSERT INTO twitch_streamers (twitch_user_id, twitch_login) VALUES (?, ?)",
+            ("1001", "partner_one"),
+        )
+        self.conn.execute(
+            "INSERT INTO twitch_streamer_identities (twitch_user_id, twitch_login) VALUES (?, ?)",
             ("1001", "partner_one"),
         )
         self.conn.execute(
@@ -498,6 +510,10 @@ class ChatLurkerTaxReminderTests(unittest.IsolatedAsyncioTestCase):
     async def test_login_only_lookup_ignores_unrelated_blank_user_id_rows(self) -> None:
         self.conn.execute(
             "INSERT INTO twitch_streamers (twitch_user_id, twitch_login) VALUES (?, ?)",
+            ("", "legacy_partner"),
+        )
+        self.conn.execute(
+            "INSERT INTO twitch_streamer_identities (twitch_user_id, twitch_login) VALUES (?, ?)",
             ("", "legacy_partner"),
         )
         self.conn.execute(

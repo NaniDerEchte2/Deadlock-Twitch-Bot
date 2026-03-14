@@ -446,13 +446,11 @@ class _AnalyticsAdminMixin:
         normalized = str(raw_value).strip().lower()
         if normalized not in _ADMIN_MANAGED_SCOPES:
             return None
-        return normalized
+        return _ADMIN_MANAGED_SCOPE_ACTIVE
 
     @staticmethod
     def _admin_scope_filter_sql(scope: str) -> str:
-        if scope == _ADMIN_MANAGED_SCOPE_ALL:
-            return "1=1"
-        return "archived_at IS NULL"
+        return "status = 'active'"
 
     @classmethod
     def _admin_load_polling_config(
@@ -512,7 +510,7 @@ class _AnalyticsAdminMixin:
                 COUNT(*) FILTER (WHERE COALESCE(live_ping_enabled, 1) = 1) AS live_ping_enabled_count,
                 COUNT(*) FILTER (WHERE silent_ban = 1) AS silent_ban_count,
                 COUNT(*) FILTER (WHERE silent_raid = 1) AS silent_raid_count
-            FROM twitch_streamers
+            FROM twitch_partners
             WHERE {where_clause}
             """
         ).fetchone()
@@ -710,8 +708,8 @@ class _AnalyticsAdminMixin:
                         s.silent_ban,
                         s.silent_raid,
                         s.is_monitored_only,
-                        COALESCE(ps.is_verified, 0) AS is_verified,
-                        COALESCE(ps.is_partner_active, 0) AS is_partner_active,
+                        COALESCE(s.is_verified, 0) AS is_verified,
+                        COALESCE(s.is_partner_active, 0) AS is_partner_active,
                         COALESCE(l.is_live, 0) AS is_live,
                         l.last_seen_at,
                         l.last_viewer_count,
@@ -726,9 +724,7 @@ class _AnalyticsAdminMixin:
                         lb.plan_id AS billing_plan_id,
                         lb.status AS billing_status,
                         lb.updated_at AS billing_updated_at
-                    FROM twitch_streamers s
-                    LEFT JOIN twitch_streamers_partner_state ps
-                        ON LOWER(ps.twitch_login) = LOWER(s.twitch_login)
+                    FROM twitch_partners_all_state s
                     LEFT JOIN twitch_live_state l
                         ON s.twitch_user_id = l.twitch_user_id
                         OR LOWER(s.twitch_login) = LOWER(l.streamer_login)
@@ -737,6 +733,7 @@ class _AnalyticsAdminMixin:
                     LEFT JOIN latest_billing lb
                         ON LOWER(lb.customer_reference) = LOWER(s.twitch_login)
                        AND lb.rn = 1
+                    WHERE s.status = 'active'
                     ORDER BY LOWER(s.twitch_login) ASC
                     """
                 ).fetchall()
@@ -820,8 +817,8 @@ class _AnalyticsAdminMixin:
                         s.silent_ban,
                         s.silent_raid,
                         s.is_monitored_only,
-                        COALESCE(ps.is_verified, 0) AS is_verified,
-                        COALESCE(ps.is_partner_active, 0) AS is_partner_active,
+                        COALESCE(s.is_verified, 0) AS is_verified,
+                        COALESCE(s.is_partner_active, 0) AS is_partner_active,
                         COALESCE(l.is_live, 0) AS is_live,
                         l.last_seen_at,
                         l.last_viewer_count,
@@ -839,9 +836,7 @@ class _AnalyticsAdminMixin:
                         lb.plan_id AS billing_plan_id,
                         lb.status AS billing_status,
                         lb.updated_at AS billing_updated_at
-                    FROM twitch_streamers s
-                    LEFT JOIN twitch_streamers_partner_state ps
-                        ON LOWER(ps.twitch_login) = LOWER(s.twitch_login)
+                    FROM twitch_partners_all_state s
                     LEFT JOIN twitch_live_state l
                         ON s.twitch_user_id = l.twitch_user_id
                         OR LOWER(s.twitch_login) = LOWER(l.streamer_login)
@@ -851,6 +846,7 @@ class _AnalyticsAdminMixin:
                         ON LOWER(lb.customer_reference) = LOWER(s.twitch_login)
                        AND lb.rn = 1
                     WHERE LOWER(s.twitch_login) = LOWER(?)
+                      AND s.status = 'active'
                     LIMIT 1
                     """,
                     (login,),
@@ -1473,26 +1469,13 @@ class _AnalyticsAdminMixin:
 
         try:
             with storage.get_conn() as conn:
-                target_row = conn.execute(
-                    f"SELECT COUNT(*) AS total FROM twitch_streamers WHERE {where_clause}"
-                ).fetchone()
-                target_count = _safe_int(_row_get_value(target_row, "total", 0, 0), default=0)
-                update_result = conn.execute(
-                    f"""
-                    UPDATE twitch_streamers
-                    SET
-                        raid_bot_enabled = ?,
-                        live_ping_enabled = ?
-                    WHERE {where_clause}
-                    """,
-                    (int(raid_bot_enabled), int(live_ping_enabled)),
+                target_count = storage.bulk_update_partner_flags(
+                    conn,
+                    scope=scope,
+                    raid_bot_enabled=raid_bot_enabled,
+                    live_ping_enabled=live_ping_enabled,
                 )
-                raw_rowcount = getattr(update_result, "rowcount", target_count)
-                updated_count = (
-                    target_count
-                    if not isinstance(raw_rowcount, int) or raw_rowcount < 0
-                    else raw_rowcount
-                )
+                updated_count = target_count
                 raid_snapshot, chat_snapshot = self._admin_load_streamer_config_snapshots(
                     conn,
                     scope=scope,
@@ -1561,26 +1544,13 @@ class _AnalyticsAdminMixin:
 
         try:
             with storage.get_conn() as conn:
-                target_row = conn.execute(
-                    f"SELECT COUNT(*) AS total FROM twitch_streamers WHERE {where_clause}"
-                ).fetchone()
-                target_count = _safe_int(_row_get_value(target_row, "total", 0, 0), default=0)
-                update_result = conn.execute(
-                    f"""
-                    UPDATE twitch_streamers
-                    SET
-                        silent_ban = ?,
-                        silent_raid = ?
-                    WHERE {where_clause}
-                    """,
-                    (int(silent_ban), int(silent_raid)),
+                target_count = storage.bulk_update_partner_flags(
+                    conn,
+                    scope=scope,
+                    silent_ban=silent_ban,
+                    silent_raid=silent_raid,
                 )
-                raw_rowcount = getattr(update_result, "rowcount", target_count)
-                updated_count = (
-                    target_count
-                    if not isinstance(raw_rowcount, int) or raw_rowcount < 0
-                    else raw_rowcount
-                )
+                updated_count = target_count
                 raid_snapshot, chat_snapshot = self._admin_load_streamer_config_snapshots(
                     conn,
                     scope=scope,
