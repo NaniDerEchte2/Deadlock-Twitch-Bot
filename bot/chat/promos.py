@@ -1049,11 +1049,12 @@ class PromoMixin:
 
         self._lurker_tax_mentions_for_session(int(session_id)).update(selected_logins)
         self._mark_promo_sent(login, now, reason="lurker_tax")
+        safe_login = str(login or "").replace("\r", "\\r").replace("\n", "\\n")
         log.info(
-            "Lurker-Steuer Reminder gesendet in %s (session=%s, mentions=%s)",
-            login,
+            "Lurker-Steuer Reminder gesendet in %s (session=%s, mention_count=%d)",
+            safe_login,
             session_id,
-            ",".join(selected_logins),
+            len(selected_logins),
         )
         return True
 

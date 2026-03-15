@@ -138,7 +138,8 @@ class FieldCrypto:
             plaintext_bytes = aesgcm.decrypt(nonce, ciphertext, aad.encode("utf-8"))
             return plaintext_bytes.decode("utf-8")
         except Exception as exc:
-            log.error("Decryption failed for kid=%s, aad=%s: %s", kid, aad, exc)
+            safe_kid = kid.replace("\r", "\\r").replace("\n", "\\n")
+            log.error("Decryption failed for kid=%s", safe_kid, exc_info=True)
             raise DecryptFailed(f"Decryption failed: {exc}") from exc
 
 

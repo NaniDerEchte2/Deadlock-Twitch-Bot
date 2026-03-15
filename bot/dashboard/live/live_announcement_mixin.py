@@ -547,7 +547,8 @@ class DashboardLiveAnnouncementMixin:
             with _storage.get_conn() as conn:
                 row = _storage.load_active_partner(conn, twitch_login=normalized)
         except Exception:
-            log.debug("Could not resolve active partner login for %s", normalized, exc_info=True)
+            safe_login = normalized.replace("\r", "\\r").replace("\n", "\\n")
+            log.debug("Could not resolve active partner login for %s", safe_login, exc_info=True)
             return ""
         if not row:
             return ""
@@ -607,7 +608,8 @@ class DashboardLiveAnnouncementMixin:
                     (login,),
                 ).fetchone()
         except Exception:
-            log.debug("Could not load live announcement config for %s", login, exc_info=True)
+            safe_login = login.replace("\r", "\\r").replace("\n", "\\n")
+            log.debug("Could not load live announcement config for %s", safe_login, exc_info=True)
             row = None
 
         if not row:
@@ -720,7 +722,12 @@ class DashboardLiveAnnouncementMixin:
             with _storage.get_conn() as conn:
                 row = _storage.load_active_partner(conn, twitch_login=login)
         except Exception:
-            log.debug("Could not load streamer entry for live ping role sync (%s)", login, exc_info=True)
+            safe_login = login.replace("\r", "\\r").replace("\n", "\\n")
+            log.debug(
+                "Could not load streamer entry for live ping role sync (%s)",
+                safe_login,
+                exc_info=True,
+            )
             return fallback
         if not row:
             return fallback
@@ -751,7 +758,8 @@ class DashboardLiveAnnouncementMixin:
                     live_ping_role_id=role_id,
                 )
         except Exception:
-            log.debug("Could not persist live_ping_role_id for %s", login, exc_info=True)
+            safe_login = login.replace("\r", "\\r").replace("\n", "\\n")
+            log.debug("Could not persist live_ping_role_id for %s", safe_login, exc_info=True)
 
     async def _la_ensure_streamer_ping_role(
         self,
@@ -807,7 +815,12 @@ class DashboardLiveAnnouncementMixin:
                 )
                 created = True
             except Exception:
-                log.debug("Could not create live ping role for %s via dashboard", login, exc_info=True)
+                safe_login = login.replace("\r", "\\r").replace("\n", "\\n")
+                log.debug(
+                    "Could not create live ping role for %s via dashboard",
+                    safe_login,
+                    exc_info=True,
+                )
                 role = None
 
         if role is None:
@@ -829,7 +842,12 @@ class DashboardLiveAnnouncementMixin:
                     reason=f"Enable mentions for Twitch live ping role ({login})",
                 )
             except Exception:
-                log.debug("Could not set live ping role mentionable for %s", login, exc_info=True)
+                safe_login = login.replace("\r", "\\r").replace("\n", "\\n")
+                log.debug(
+                    "Could not set live ping role mentionable for %s",
+                    safe_login,
+                    exc_info=True,
+                )
 
         discord_user_id = self._la_coerce_role_id(entry.get("discord_user_id"))
         if role is not None and discord_user_id:

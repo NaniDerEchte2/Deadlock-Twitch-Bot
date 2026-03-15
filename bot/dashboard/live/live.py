@@ -186,7 +186,8 @@ class DashboardLiveMixin:
             raw = auth_row["twitch_user_id"] if hasattr(auth_row, "keys") else auth_row[0]
             return self._coerce_twitch_user_id(raw)
         except Exception:
-            log.debug("Could not resolve twitch_user_id from DB for %s", login, exc_info=True)
+            safe_login = str(login or "").replace("\r", "\\r").replace("\n", "\\n")
+            log.debug("Could not resolve twitch_user_id from DB for %s", safe_login, exc_info=True)
             return ""
 
     async def _resolve_streamer_user_id_from_twitch(self, chat_bot: Any, login: str) -> str:
@@ -200,7 +201,8 @@ class DashboardLiveMixin:
             except TypeError:
                 user = await fetch_user(login)
         except Exception:
-            log.debug("Could not resolve twitch_user_id via Twitch API for %s", login, exc_info=True)
+            safe_login = str(login or "").replace("\r", "\\r").replace("\n", "\\n")
+            log.debug("Could not resolve twitch_user_id via Twitch API for %s", safe_login, exc_info=True)
             return ""
 
         return self._coerce_twitch_user_id(user)
@@ -225,7 +227,8 @@ class DashboardLiveMixin:
                     twitch_login=canonical_login,
                 )
         except Exception:
-            log.debug("Could not persist twitch_user_id for %s", login, exc_info=True)
+            safe_login = str(login or "").replace("\r", "\\r").replace("\n", "\\n")
+            log.debug("Could not persist twitch_user_id for %s", safe_login, exc_info=True)
 
     @staticmethod
     def _billing_admin_source_badge(source: str) -> str:
@@ -1424,8 +1427,9 @@ class DashboardLiveMixin:
                 err=error_map.get(str(exc), str(exc)),
                 default_path="/twitch/admin",
             )
-        except Exception as exc:
-            log.exception("dashboard manual plan save failed for %s: %s", login, exc)
+        except Exception:
+            safe_login = str(login or "").replace("\r", "\\r").replace("\n", "\\n")
+            log.exception("dashboard manual plan save failed for %s", safe_login)
             location = self._redirect_location(
                 request,
                 err="Manueller Plan konnte nicht gespeichert werden",
@@ -1468,8 +1472,9 @@ class DashboardLiveMixin:
                 err=error_map.get(str(exc), str(exc)),
                 default_path="/twitch/admin",
             )
-        except Exception as exc:
-            log.exception("dashboard manual plan clear failed for %s: %s", login, exc)
+        except Exception:
+            safe_login = str(login or "").replace("\r", "\\r").replace("\n", "\\n")
+            log.exception("dashboard manual plan clear failed for %s", safe_login)
             location = self._redirect_location(
                 request,
                 err="Manueller Override konnte nicht entfernt werden",
@@ -1576,10 +1581,11 @@ class DashboardLiveMixin:
 
         discord_user_id = self._get_discord_admin_user_id(request)
         if discord_user_id != _DASHBOARD_OWNER_DISCORD_ID:
+            safe_path = str(request.path or "").replace("\r", "\\r").replace("\n", "\\n")
             log.warning(
                 "AUDIT dashboard chat action denied: discord_user_id=%s path=%s",
-                discord_user_id or "none",
-                request.path,
+                "present" if discord_user_id else "none",
+                safe_path,
             )
             location = self._redirect_location(
                 request,
@@ -1701,8 +1707,9 @@ class DashboardLiveMixin:
                 send_chat = getattr(chat_bot, "_send_chat_message", None)
                 if callable(send_chat):
                     ok = bool(await send_chat(channel, send_text, source="admin_dashboard_manual"))
-        except Exception as exc:
-            log.exception("dashboard chat action failed for %s: %s", login, exc)
+        except Exception:
+            safe_login = str(login or "").replace("\r", "\\r").replace("\n", "\\n")
+            log.exception("dashboard chat action failed for %s", safe_login)
             ok = False
 
         if not ok:

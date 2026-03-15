@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
+import hmac
 import logging
 import os
 import time
@@ -43,6 +43,7 @@ log = logging.getLogger("TwitchStreams.StoragePG")
 
 KEYRING_SERVICE = "DeadlockBot"
 ENV_DSN = "TWITCH_ANALYTICS_DSN"
+_DB_FINGERPRINT_NAMESPACE = b"deadlock.analytics-db-fingerprint.v1"
 
 
 def _normalize_conninfo_value(value: object) -> str:
@@ -89,7 +90,8 @@ def analytics_db_fingerprint(dsn: str | None = None) -> str:
     dbname = (info.get("dbname") or info.get("database") or "").strip().lower()
     port = (info.get("port") or "").strip().lower()
     basis = f"{host}|{port}|{dbname}".encode("utf-8", errors="ignore")
-    return f"pg:{hashlib.sha256(basis).hexdigest()[:12]}"
+    digest = hmac.digest(_DB_FINGERPRINT_NAMESPACE, basis, "sha256").hex()[:12]
+    return f"pg:{digest}"
 
 
 def analytics_db_fingerprint_details(dsn: str | None = None) -> dict[str, str]:
@@ -100,7 +102,11 @@ def analytics_db_fingerprint_details(dsn: str | None = None) -> dict[str, str]:
     port = (info.get("port") or "").strip().lower()
 
     def _digest(value: str) -> str:
-        return hashlib.sha256(value.encode("utf-8", errors="ignore")).hexdigest()[:12]
+        return hmac.digest(
+            _DB_FINGERPRINT_NAMESPACE,
+            value.encode("utf-8", errors="ignore"),
+            "sha256",
+        ).hex()[:12]
 
     return {
         "fingerprint": analytics_db_fingerprint(dsn),

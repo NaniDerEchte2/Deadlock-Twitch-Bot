@@ -1,7 +1,11 @@
 import unittest
 from types import SimpleNamespace
 
-from bot.storage.pg import _CompatConnection
+from bot.storage.pg import (
+    _CompatConnection,
+    analytics_db_fingerprint,
+    analytics_db_fingerprint_details,
+)
 
 
 class _RecordingConnection:
@@ -41,6 +45,23 @@ class CompatConnectionExecuteScriptTests(unittest.TestCase):
         self.assertIn("RETURN 'hello;world'", raw.executed[0][0])
         self.assertIn("CREATE TABLE affiliate_demo", raw.executed[1][0])
         self.assertIn("DEFAULT 'semi;colon'", raw.executed[1][0])
+
+
+class AnalyticsDbFingerprintTests(unittest.TestCase):
+    def test_fingerprint_is_stable_and_obfuscated(self) -> None:
+        dsn = "postgresql://demo:supersecret@example.internal:5432/analytics"
+
+        fingerprint_first = analytics_db_fingerprint(dsn)
+        fingerprint_second = analytics_db_fingerprint(dsn)
+        details = analytics_db_fingerprint_details(dsn)
+
+        self.assertEqual(fingerprint_first, fingerprint_second)
+        self.assertTrue(fingerprint_first.startswith("pg:"))
+        self.assertEqual(details["fingerprint"], fingerprint_first)
+        self.assertNotIn("example.internal", fingerprint_first)
+        self.assertNotIn("analytics", fingerprint_first)
+        self.assertNotIn("example.internal", details["hostHash"])
+        self.assertNotIn("analytics", details["databaseHash"])
 
 
 if __name__ == "__main__":

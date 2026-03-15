@@ -48,6 +48,8 @@ class _DashboardBillingMixin:
         twitch_user_key = str(twitch_user_id or "").strip()
         if not twitch_user_key:
             return
+        safe_reason = str(reason or "").replace("\r", "\\r").replace("\n", "\\n")[:64] or "unknown"
+        subject_kind = "login" if str(twitch_login or "").strip() else "user_id"
         if callable(refresh_partner_raid_score_async):
             try:
                 loop = asyncio.get_running_loop()
@@ -59,16 +61,16 @@ class _DashboardBillingMixin:
                         await refresh_partner_raid_score_async(twitch_user_key)
                     except Exception:
                         log.debug(
-                            "billing: partner raid score refresh failed for %s (%s)",
-                            twitch_login or twitch_user_key,
-                            reason,
+                            "billing: partner raid score refresh failed (subject=%s, reason=%s)",
+                            subject_kind,
+                            safe_reason,
                             exc_info=True,
                         )
                     else:
                         log.info(
-                            "billing: partner raid score refreshed for %s (%s)",
-                            twitch_login or twitch_user_key,
-                            reason,
+                            "billing: partner raid score refreshed (subject=%s, reason=%s)",
+                            subject_kind,
+                            safe_reason,
                         )
 
                 loop.create_task(
@@ -82,16 +84,16 @@ class _DashboardBillingMixin:
             refresh_partner_raid_score(twitch_user_key)
         except Exception:
             log.debug(
-                "billing: partner raid score refresh failed for %s (%s)",
-                twitch_login or twitch_user_key,
-                reason,
+                "billing: partner raid score refresh failed (subject=%s, reason=%s)",
+                subject_kind,
+                safe_reason,
                 exc_info=True,
             )
         else:
             log.info(
-                "billing: partner raid score refreshed for %s (%s)",
-                twitch_login or twitch_user_key,
-                reason,
+                "billing: partner raid score refreshed (subject=%s, reason=%s)",
+                subject_kind,
+                safe_reason,
             )
 
     @staticmethod

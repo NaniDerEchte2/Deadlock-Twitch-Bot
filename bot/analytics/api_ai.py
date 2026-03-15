@@ -175,7 +175,7 @@ class _AnalyticsAIMixin:
         try:
             ctx = self._collect_ai_context(streamer, days, since, game_filter)
         except Exception as exc:
-            log.exception("Error collecting AI context for %s", streamer)
+            log.exception("Error collecting AI context")
             return web.json_response(
                 {"error": f"Datensammlung fehlgeschlagen: {str(exc)[:300]}"}, status=500
             )
@@ -186,7 +186,7 @@ class _AnalyticsAIMixin:
         except RuntimeError as exc:
             return web.json_response({"error": str(exc)[:300]}, status=503)
         except Exception as exc:
-            log.exception("Error calling Claude Opus for %s", streamer)
+            log.exception("Error calling Claude Opus")
             err_str = str(exc)
             if "credit balance is too low" in err_str:
                 return web.json_response(

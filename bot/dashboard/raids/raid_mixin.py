@@ -534,9 +534,10 @@ new Chart(ctx, {{
                     else None
                 )
         except Exception:
+            safe_login = str(login or "").replace("\r", "\\r").replace("\n", "\\n")
             log.exception(
                 "Failed to load partner authorization for raid requirements (%s)",
-                self._sanitize_log_value(login),
+                safe_login,
             )
             return web.Response(text="Failed to load Discord link", status=500)
 
@@ -591,10 +592,11 @@ new Chart(ctx, {{
             except discord.NotFound:
                 user = None
             except discord.HTTPException:
+                safe_login = str(login or "").replace("\r", "\\r").replace("\n", "\\n")
                 log.exception(
                     "Failed to fetch Discord user %s for %s",
                     user_id_int,
-                    self._sanitize_log_value(login),
+                    safe_login,
                 )
                 user = None
 
@@ -607,16 +609,18 @@ new Chart(ctx, {{
         try:
             await user.send(embed=embed, view=view)
         except discord.Forbidden:
+            safe_login = str(login or "").replace("\r", "\\r").replace("\n", "\\n")
             log.warning(
                 "Discord DM blocked for %s (%s)",
-                self._sanitize_log_value(login),
+                safe_login,
                 user_id_int,
             )
             return web.Response(text="Discord DM blocked", status=403)
         except discord.HTTPException:
+            safe_login = str(login or "").replace("\r", "\\r").replace("\n", "\\n")
             log.exception(
                 "Failed to send raid requirements DM to %s (%s)",
-                self._sanitize_log_value(login),
+                safe_login,
                 user_id_int,
             )
             return web.Response(text="Failed to send Discord DM", status=502)
