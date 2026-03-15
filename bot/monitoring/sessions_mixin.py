@@ -339,6 +339,8 @@ class _SessionsMixin:
                 if mins < minutes:
                     peak_before = max(peak_before, val)
             if peak_before <= 0:
+                peak_before = int(_row_val(viewer_rows[0], "viewer_count", 1, 0) or 0)
+            if peak_before <= 0:
                 return None
             # Find closest viewer count AT or AFTER target minute
             best: tuple[int, int] | None = None
@@ -358,7 +360,17 @@ class _SessionsMixin:
                 )
             if best is None:
                 return None
-            return max(0.0, min(1.0, best[1] / peak_before))
+            raw_retention = best[1] / peak_before
+            if raw_retention > 1.0:
+                log.warning(
+                    "Retention capped above 100%% for session %s at %sm: current=%s baseline=%s raw=%.3f",
+                    session_id,
+                    minutes,
+                    best[1],
+                    peak_before,
+                    raw_retention,
+                )
+            return max(0.0, min(1.0, raw_retention))
 
         start_viewers = int(_row_val(session_row, "start_viewers", 6, 0) or 0)
         end_viewers = int(_row_val(session_row, "end_viewers", 8, 0) or 0)

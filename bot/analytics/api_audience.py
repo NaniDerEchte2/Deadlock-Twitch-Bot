@@ -341,6 +341,7 @@ class _AnalyticsAudienceMixin:
                         SELECT CAST(value AS BIGINT)
                         FROM json_array_elements_text(%s) AS t(value)
                     )
+                      AND first_message_at IS NOT NULL
                       AND last_seen_at IS NOT NULL
                       AND {session_bot_clause}
                     """,

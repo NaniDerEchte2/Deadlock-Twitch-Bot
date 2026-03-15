@@ -69,7 +69,7 @@ export function Overview({ streamer, days, onSessionClick }: OverviewProps) {
           title="Ø Viewers"
           value={formatNumber(summary.avgViewers, 1)}
           subValue={`Peak: ${formatNumber(summary.peakViewers)}`}
-          trend={summary.avgViewersTrend}
+          trend={summary.avgViewersTrend ?? undefined}
           icon={Users}
           color="blue"
         />

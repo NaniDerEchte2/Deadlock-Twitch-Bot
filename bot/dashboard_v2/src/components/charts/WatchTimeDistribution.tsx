@@ -41,9 +41,9 @@ export function WatchTimeDistribution({ data }: WatchTimeDistributionProps) {
     );
   }
 
-  const totalLoyalViewers = data.min30to60 + data.over60min;
+  const totalLoyalViewers = (data.min30to60 ?? 0) + (data.over60min ?? 0);
   const hasPrevious = data.previous && data.previous.sessionCount !== undefined && data.previous.sessionCount > 0;
-  const prevLoyalViewers = hasPrevious ? (data.previous!.min30to60 + data.previous!.over60min) : 0;
+  const prevLoyalViewers = hasPrevious ? ((data.previous!.min30to60 ?? 0) + (data.previous!.over60min ?? 0)) : 0;
 
   const avgDelta = data.deltas?.avgWatchTime;
   const avgTrendUp = avgDelta != null && avgDelta >= 0;

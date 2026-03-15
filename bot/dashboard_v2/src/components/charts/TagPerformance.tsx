@@ -15,6 +15,7 @@ export function TagPerformanceChart({ tagData, titleData }: TagPerformanceProps)
   // Sort by avgViewers
   const sortedTags = [...tagData].sort((a, b) => b.avgViewers - a.avgViewers);
   const sortedTitles = titleData ? [...titleData].sort((a, b) => b.avgViewers - a.avgViewers) : [];
+  const strongestGrowingTag = sortedTags.find(t => t.trend === 'up' && (t.trendValue ?? 0) > 10);
 
   const maxViewers = Math.max(...sortedTags.map(t => t.avgViewers), 1);
   const maxTitleViewers = sortedTitles.length > 0 ? Math.max(...sortedTitles.map(t => t.avgViewers), 1) : 1;
@@ -129,11 +130,11 @@ export function TagPerformanceChart({ tagData, titleData }: TagPerformanceProps)
               icon={<Trophy className="w-4 h-4" />}
               text={`"${sortedTags[0].tagName}" ist dein Top-Tag mit Ø ${sortedTags[0].avgViewers.toFixed(0)} Viewern`}
             />
-            {sortedTags.some(t => t.trend === 'up' && t.trendValue > 10) && (
+            {strongestGrowingTag && (
               <InsightBadge
                 type="info"
                 icon={<TrendingUp className="w-4 h-4" />}
-                text={`"${sortedTags.find(t => t.trend === 'up' && t.trendValue > 10)?.tagName}" wächst stark (+${sortedTags.find(t => t.trend === 'up')?.trendValue.toFixed(0)}%)`}
+                text={`"${strongestGrowingTag.tagName}" wächst stark (+${(strongestGrowingTag.trendValue ?? 0).toFixed(0)}%)`}
               />
             )}
           </div>
@@ -221,7 +222,7 @@ function TagRow({ tag, index, maxViewers, isExpanded, onToggle }: TagRowProps) {
           <div className="flex items-center gap-3">
             <span className={`flex items-center gap-1 text-xs ${trendColor}`}>
               <TrendIcon className="w-3 h-3" />
-              {tag.trendValue > 0 ? '+' : ''}{tag.trendValue.toFixed(0)}%
+              {(tag.trendValue ?? 0) > 0 ? '+' : ''}{(tag.trendValue ?? 0).toFixed(0)}%
             </span>
             {isExpanded ? (
               <ChevronUp className="w-4 h-4 text-text-secondary" />
@@ -269,7 +270,7 @@ function TagRow({ tag, index, maxViewers, isExpanded, onToggle }: TagRowProps) {
           >
             <div className="p-3 grid grid-cols-2 md:grid-cols-4 gap-3">
               <DetailBox label="Beste Zeit" value={tag.bestTimeSlot} icon={<Clock className="w-4 h-4" />} />
-              <DetailBox label="Ø Stream-Dauer" value={`${(tag.avgStreamDuration / 60).toFixed(1)}h`} icon={<Clock className="w-4 h-4" />} />
+              <DetailBox label="Ø Stream-Dauer" value={`${(tag.avgStreamDuration / 3600).toFixed(1)}h`} icon={<Clock className="w-4 h-4" />} />
               <DetailBox label="Kategorie-Rang" value={`#${tag.categoryRank}`} icon={<Trophy className="w-4 h-4" />} />
               <DetailBox label="Nutzungen" value={tag.usageCount.toString()} icon={<Tag className="w-4 h-4" />} />
             </div>

@@ -123,7 +123,7 @@ class _AnalyticsPerformanceMixin:
 
         try:
             with storage.get_conn() as conn:
-                since_date = (datetime.now(UTC) - timedelta(days=months * 30)).isoformat()
+                since_date = (datetime.now(UTC) - timedelta(days=round(months * 30.44))).isoformat()
                 streamer_login = streamer.lower() if streamer else None
                 rows = conn.execute(
                     """

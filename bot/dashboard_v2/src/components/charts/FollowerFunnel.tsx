@@ -49,6 +49,8 @@ export function FollowerFunnel({ data, previousConversionRate }: FollowerFunnelP
     : null;
 
   const rating = rateConversion(data.conversionRate);
+  const avgTimeToFollow = data.avgTimeToFollow ?? 0;
+  const hasFastConversion = (data.avgTimeToFollow ?? Infinity) < 30;
 
   const funnelStages = [
     {
@@ -194,7 +196,7 @@ export function FollowerFunnel({ data, previousConversionRate }: FollowerFunnelP
           </div>
           <div className="text-right">
             <div className="text-sm text-text-secondary mb-1">Ø Zeit bis Follow</div>
-            <div className="text-2xl font-bold text-white">{data.avgTimeToFollow.toFixed(0)} Min</div>
+            <div className="text-2xl font-bold text-white">{avgTimeToFollow.toFixed(0)} Min</div>
           </div>
         </div>
 
@@ -319,10 +321,10 @@ export function FollowerFunnel({ data, previousConversionRate }: FollowerFunnelP
               text={`${((data.followersBySource.raids / totalSourceFollowers) * 100).toFixed(0)}% der Follower kommen über Raids - pflege dein Netzwerk!`}
             />
           )}
-          {data.avgTimeToFollow < 30 && (
+          {hasFastConversion && (
             <InsightBadge
               type="success"
-              text={`Schnelle Conversion! Viewer folgen im Schnitt nach ${data.avgTimeToFollow.toFixed(0)} Min`}
+              text={`Schnelle Conversion! Viewer folgen im Schnitt nach ${avgTimeToFollow.toFixed(0)} Min`}
             />
           )}
         </div>
