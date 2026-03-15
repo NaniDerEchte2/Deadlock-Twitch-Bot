@@ -1669,9 +1669,17 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
 
         # 2) Session samples – alle Spiele erfassen, nicht nur Deadlock
         try:
+            seen_logins: set[str] = set()
             for stream in streams_by_login.values():
                 login = (stream.get("user_login") or "").lower()
                 self._record_session_sample(login=login, stream=stream)
+                seen_logins.add(login)
+            # Also record viewer timeline for category-discovered streams
+            for stream in category_streams:
+                login = (stream.get("user_login") or "").lower()
+                if login and login not in seen_logins:
+                    self._record_session_sample(login=login, stream=stream)
+                    seen_logins.add(login)
         except Exception:
             log.debug("Konnte Session-Metrik nicht loggen", exc_info=True)
 
