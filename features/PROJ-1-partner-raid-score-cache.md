@@ -1,6 +1,6 @@
 # PROJ-1: Vorgecachte Partner-Raid-Scores mit Eventgetriebenem Refresh
 
-## Status: 🔵 Planned
+## Status: 🔵 Done
 
 ## Summary
 - Die Partner-Raid-Auswahl wird von einer On-Demand-Berechnung auf einen persistenten Score-Cache umgestellt.
