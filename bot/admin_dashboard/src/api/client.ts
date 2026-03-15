@@ -1,4 +1,5 @@
 import type {
+  AddStreamerPayload,
   AdminActionResult,
   AdminAuthStatus,
   AdminConfigScope,
@@ -10,15 +11,22 @@ import type {
   ChatConfigUpdatePayload,
   ConfigOverview,
   DatabaseStatsResponse,
+  DiscordFlagMode,
   ErrorLogsResponse,
   EventSubStatusResponse,
   GutschriftDocument,
   InternalHomeOverview,
+  LegacyVerifyMode,
+  ManualPlanPayload,
+  PartnerChatActionPayload,
   PiiReadiness,
   RaidConfigSnapshot,
   RaidConfigUpdatePayload,
+  ScopeStatusResponse,
   StreamerDetail,
   StreamerRow,
+  StreamerDiscordProfilePayload,
+  StreamerView,
   SubscriptionRecord,
   SystemHealth,
 } from '@/api/types';
@@ -77,6 +85,14 @@ function sanitizeNextPath(rawPath: string): string {
 export function buildDiscordAdminLoginUrl(nextPath?: string): string {
   const next = sanitizeNextPath(nextPath || `${window.location.pathname}${window.location.search}`);
   return `/twitch/auth/discord/login?next=${encodeURIComponent(next)}`;
+}
+
+export function buildRaidAuthUrl(login: string): string {
+  return `/twitch/raid/auth?login=${encodeURIComponent(login.trim())}`;
+}
+
+export function buildRaidRequirementsUrl(login: string): string {
+  return `/twitch/raid/requirements?login=${encodeURIComponent(login.trim())}`;
 }
 
 async function parsePayload(response: Response): Promise<unknown> {
@@ -181,10 +197,27 @@ function readScope(record: Record<string, unknown>, ...keys: string[]): AdminCon
   return undefined;
 }
 
+function readPartnerStatus(
+  record: Record<string, unknown>,
+  ...keys: string[]
+): 'active' | 'archived' | 'non_partner' | undefined {
+  const candidate = readString(record, ...keys).trim().toLowerCase();
+  if (candidate === 'active' || candidate === 'archived' || candidate === 'non_partner') {
+    return candidate;
+  }
+  return undefined;
+}
+
 function readStringArray(value: unknown): string[] {
   return coerceArray<unknown>(value)
     .map((entry) => (typeof entry === 'string' ? entry.trim() : String(entry ?? '').trim()))
     .filter(Boolean);
+}
+
+function readStringRecord(value: unknown): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(coerceRecord(value)).map(([key, entry]) => [key, String(entry ?? '').trim()]),
+  );
 }
 
 function normalizeAffiliateStatus(active: boolean): string {
@@ -520,8 +553,9 @@ export async function fetchDashboardOverview(): Promise<InternalHomeOverview> {
   };
 }
 
-export async function fetchAdminStreamers(): Promise<StreamerRow[]> {
-  const payload = await admin<unknown>('/streamers');
+export async function fetchAdminStreamers(view: StreamerView = 'active'): Promise<StreamerRow[]> {
+  const query = view ? `?view=${encodeURIComponent(view)}` : '';
+  const payload = await admin<unknown>(`/streamers${query}`);
   const rows = Array.isArray(payload)
     ? payload
     : coerceArray<Record<string, unknown>>(coerceRecord(payload).items ?? coerceRecord(payload).streamers);
@@ -531,13 +565,29 @@ export async function fetchAdminStreamers(): Promise<StreamerRow[]> {
       login: readString(record, 'login', 'twitch_login', 'streamer_login'),
       displayName: readString(record, 'displayName', 'display_name', 'login') || undefined,
       twitchUserId: readString(record, 'twitchUserId', 'twitch_user_id') || undefined,
+      discordUserId: readString(record, 'discordUserId', 'discord_user_id') || undefined,
+      discordDisplayName: readString(record, 'discordDisplayName', 'discord_display_name') || undefined,
       verified: readBoolean(record, 'verified', 'is_verified'),
       archived: readBoolean(record, 'archived', 'is_archived'),
+      archivedAt: readString(record, 'archivedAt', 'archived_at') || null,
+      createdAt: readString(record, 'createdAt', 'created_at') || null,
       isLive: readBoolean(record, 'isLive', 'is_live'),
+      isOnDiscord: readBoolean(record, 'isOnDiscord', 'is_on_discord'),
+      manualPartnerOptOut: readBoolean(record, 'manualPartnerOptOut', 'manual_partner_opt_out'),
+      partnerStatus: readPartnerStatus(record, 'partnerStatus', 'partner_status'),
       viewerCount: readNumber(record, 'viewerCount', 'viewer_count'),
       activeSessionId: readNumber(record, 'activeSessionId', 'active_session_id') ?? null,
       lastSeenAt: readString(record, 'lastSeenAt', 'last_seen_at') || null,
+      lastGame: readString(record, 'lastGame', 'last_game') || null,
+      lastStreamAt: readString(record, 'lastStreamAt', 'last_stream_at') || null,
       planId: readString(record, 'planId', 'plan_id') || undefined,
+      billingStatus: readString(record, 'billingStatus', 'billing_status') || undefined,
+      oauthConnected: readBoolean(record, 'oauthConnected', 'oauth_connected'),
+      oauthNeedsReauth: readBoolean(record, 'oauthNeedsReauth', 'oauth_needs_reauth'),
+      oauthStatus: readString(record, 'oauthStatus', 'oauth_status') || undefined,
+      grantedScopes: readStringArray(record.grantedScopes ?? record.granted_scopes),
+      missingScopes: readStringArray(record.missingScopes ?? record.missing_scopes),
+      oauthAuthorizedAt: readString(record, 'oauthAuthorizedAt', 'oauth_authorized_at') || null,
       promoDisabled: readBoolean(record, 'promoDisabled', 'promo_disabled'),
       notes: readString(record, 'notes', 'manual_plan_notes') || undefined,
       status: readString(record, 'status') || undefined,
@@ -565,7 +615,10 @@ export async function fetchAdminStreamerDetail(login: string): Promise<StreamerD
     twitchUserId: readString(payload, 'twitchUserId', 'twitch_user_id') || undefined,
     verified: readBoolean(payload, 'verified', 'is_verified'),
     archived: readBoolean(payload, 'archived', 'is_archived'),
+    archivedAt: readString(payload, 'archivedAt', 'archived_at') || null,
+    createdAt: readString(payload, 'createdAt', 'created_at') || null,
     isLive: readBoolean(payload, 'isLive', 'is_live'),
+    partnerStatus: readPartnerStatus(payload, 'partnerStatus', 'partner_status'),
     planId: readString(payload, 'planId', 'plan_id') || undefined,
     stats: coerceRecord(payload.stats),
     settings: coerceRecord(payload.settings),
@@ -599,6 +652,34 @@ export async function fetchSystemHealth(): Promise<SystemHealth> {
   };
 }
 
+export async function fetchScopeStatus(): Promise<ScopeStatusResponse> {
+  const payload = await admin<Record<string, unknown>>('/system/oauth-scopes');
+  const summaryRecord = coerceRecord(payload.summary);
+  return {
+    requiredScopes: readStringArray(payload.requiredScopes ?? payload.required_scopes),
+    criticalScopes: readStringArray(payload.criticalScopes ?? payload.critical_scopes),
+    labels: readStringRecord(payload.labels),
+    summary: {
+      totalAuthorized: readNumber(summaryRecord, 'totalAuthorized', 'total_authorized') ?? 0,
+      fullScopeCount: readNumber(summaryRecord, 'fullScopeCount', 'full_scope_count') ?? 0,
+      missingScopeCount: readNumber(summaryRecord, 'missingScopeCount', 'missing_scope_count') ?? 0,
+    },
+    items: coerceArray<Record<string, unknown>>(payload.items).map((record) => {
+      const item = coerceRecord(record);
+      return {
+        login: readString(item, 'login', 'twitch_login') || '—',
+        displayName: readString(item, 'displayName', 'display_name', 'login') || undefined,
+        partnerStatus: readPartnerStatus(item, 'partnerStatus', 'partner_status'),
+        archivedAt: readString(item, 'archivedAt', 'archived_at') || null,
+        oauthStatus: readString(item, 'oauthStatus', 'oauth_status') || undefined,
+        oauthNeedsReauth: readBoolean(item, 'oauthNeedsReauth', 'oauth_needs_reauth'),
+        grantedScopes: readStringArray(item.grantedScopes ?? item.granted_scopes),
+        missingScopes: readStringArray(item.missingScopes ?? item.missing_scopes),
+      };
+    }),
+  };
+}
+
 export async function fetchEventSubStatus(): Promise<EventSubStatusResponse> {
   return admin<EventSubStatusResponse>('/system/eventsub');
 }
@@ -617,7 +698,6 @@ export async function fetchConfigOverview(scope?: AdminConfigScope): Promise<Con
   const csrfToken = cacheCsrfToken(readString(payload, 'csrfToken', 'csrf_token')) || undefined;
   return {
     promo: coerceRecord(payload.promo),
-    polling: coerceRecord(payload.polling),
     raids: parseRaidSnapshot(coerceRecord(payload.raids)),
     chat: parseChatSnapshot(coerceRecord(payload.chat)),
     announcements: coerceRecord(payload.announcements),
@@ -700,10 +780,6 @@ async function postAdminFirstJson<T, TBody extends object = Record<string, unkno
 
 export async function updatePromoConfig(body: Record<string, unknown>) {
   return postAdminJson<Record<string, unknown>>('/config/promo', body);
-}
-
-export async function updatePollingConfig(body: Record<string, unknown>) {
-  return postAdminJson<Record<string, unknown>>('/config/polling', body);
 }
 
 export async function updateRaidConfig(body: RaidConfigUpdatePayload) {
@@ -885,18 +961,62 @@ async function submitLegacyAction(path: string, fields: Record<string, string>):
   };
 }
 
-export function addStreamer(login: string) {
-  return submitLegacyAction('/twitch/add_any', { login });
+export function addStreamer(payload: string | AddStreamerPayload) {
+  const normalized: Record<string, string> =
+    typeof payload === 'string'
+      ? { login: payload }
+      : {
+          login: payload.login,
+          discord_user_id: payload.discordUserId?.trim() || '',
+          discord_display_name: payload.discordDisplayName?.trim() || '',
+          member_flag: payload.memberFlag ? '1' : '',
+        };
+  return submitLegacyAction('/twitch/add_streamer', normalized);
 }
 
 export function removeStreamer(login: string) {
   return submitLegacyAction('/twitch/remove', { login });
 }
 
-export function verifyStreamer(login: string, mode: 'verified' | 'unverified' = 'verified') {
+export function verifyStreamer(login: string, mode: LegacyVerifyMode = 'permanent') {
   return submitLegacyAction('/twitch/verify', { login, mode });
 }
 
 export function archiveStreamer(login: string, mode: 'archive' | 'unarchive' | 'toggle' = 'toggle') {
   return submitLegacyAction('/twitch/archive', { login, mode });
+}
+
+export function updateStreamerDiscordProfile(payload: StreamerDiscordProfilePayload) {
+  return submitLegacyAction('/twitch/discord_link', {
+    login: payload.login,
+    discord_user_id: payload.discordUserId?.trim() || '',
+    discord_display_name: payload.discordDisplayName?.trim() || '',
+    member_flag: payload.memberFlag ? '1' : '',
+  });
+}
+
+export function toggleStreamerDiscordFlag(login: string, mode: DiscordFlagMode) {
+  return submitLegacyAction('/twitch/discord_flag', { login, mode });
+}
+
+export function saveManualPlanOverride(payload: ManualPlanPayload) {
+  return submitLegacyAction('/twitch/admin/manual-plan', {
+    login: payload.login,
+    plan_id: payload.planId,
+    expires_at: payload.expiresAt?.trim() || '',
+    notes: payload.notes?.trim() || '',
+  });
+}
+
+export function clearManualPlanOverride(login: string) {
+  return submitLegacyAction('/twitch/admin/manual-plan/clear', { login });
+}
+
+export function sendPartnerChatAction(payload: PartnerChatActionPayload) {
+  return submitLegacyAction('/twitch/admin/chat_action', {
+    login: payload.login,
+    mode: payload.mode,
+    color: payload.color || 'purple',
+    message: payload.message,
+  });
 }

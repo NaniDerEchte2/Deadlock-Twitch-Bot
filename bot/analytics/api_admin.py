@@ -23,6 +23,11 @@ from ..app_keys import (
 )
 from ..dashboard.affiliate.affiliate_pii import AffiliatePII
 from ..dashboard.affiliate.gutschrift import AffiliateGutschriftService
+from ..dashboard.live.live import (
+    _CRITICAL_SCOPES as _ADMIN_CRITICAL_SCOPES,
+    _REQUIRED_SCOPES as _ADMIN_REQUIRED_SCOPES,
+    _SCOPE_COLUMN_LABELS as _ADMIN_SCOPE_COLUMN_LABELS,
+)
 from ..logging_setup import log_path, logs_dir
 from ..promo_mode import (
     evaluate_global_promo_mode,
@@ -35,15 +40,22 @@ from ..storage import pg as storage
 LOGIN_RE = re.compile(r"^[A-Za-z0-9_]{3,25}$")
 _ERROR_LOG_MAX_SCAN_LINES = 4000
 _ERROR_LOG_MAX_RETURNED = 200
-_POLLING_INTERVAL_SETTINGS_TABLE = "twitch_global_settings"
-_POLLING_INTERVAL_SETTING_KEY = "poll_interval_seconds"
-_DEFAULT_ADMIN_POLLING_INTERVAL_SECONDS = 60
-_MIN_ADMIN_POLLING_INTERVAL_SECONDS = 5
-_MAX_ADMIN_POLLING_INTERVAL_SECONDS = 3600
 _RAW_CHAT_LAG_WARNING_SECONDS = 900
 _ADMIN_MANAGED_SCOPE_ACTIVE = "active"
 _ADMIN_MANAGED_SCOPE_ALL = "all"
 _ADMIN_MANAGED_SCOPES = frozenset({_ADMIN_MANAGED_SCOPE_ACTIVE, _ADMIN_MANAGED_SCOPE_ALL})
+_ADMIN_STREAMER_VIEW_ACTIVE = "active"
+_ADMIN_STREAMER_VIEW_ARCHIVED = "archived"
+_ADMIN_STREAMER_VIEW_NON_PARTNER = "non_partner"
+_ADMIN_STREAMER_VIEW_ALL = "all"
+_ADMIN_STREAMER_VIEWS = frozenset(
+    {
+        _ADMIN_STREAMER_VIEW_ACTIVE,
+        _ADMIN_STREAMER_VIEW_ARCHIVED,
+        _ADMIN_STREAMER_VIEW_NON_PARTNER,
+        _ADMIN_STREAMER_VIEW_ALL,
+    }
+)
 _AFFILIATE_REVENUE_STATUSES: tuple[str, ...] = ("pending", "transferred")
 _AFFILIATE_REVENUE_STATUS_PLACEHOLDERS = ", ".join(
     ["%s"] * len(_AFFILIATE_REVENUE_STATUSES)
@@ -128,8 +140,75 @@ def _coerce_utc_datetime(value: Any) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
-def _admin_partner_live_state_cte_sql() -> str:
+def _json_safe_datetime(value: Any) -> str | None:
+    parsed = _coerce_utc_datetime(value)
+    if parsed is not None:
+        return parsed.isoformat()
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _admin_partner_state_cte_sql() -> str:
+    """Deduplicate partner state rows so one canonical row exists per login."""
+    return """
+                    , partner_state AS (
+                        SELECT
+                            twitch_login,
+                            twitch_user_id,
+                            require_discord_link,
+                            discord_user_id,
+                            discord_display_name,
+                            is_on_discord,
+                            manual_partner_opt_out,
+                            created_at,
+                            archived_at,
+                            raid_bot_enabled,
+                            silent_ban,
+                            silent_raid,
+                            is_monitored_only,
+                            is_verified,
+                            is_partner_active,
+                            live_ping_enabled,
+                            status
+                        FROM (
+                            SELECT
+                                s.*,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY LOWER(s.twitch_login)
+                                    ORDER BY
+                                        CASE
+                                            WHEN s.status = 'active' THEN 0
+                                            ELSE 1
+                                        END,
+                                        CASE
+                                            WHEN s.created_at IS NULL AND s.archived_at IS NULL THEN 1
+                                            ELSE 0
+                                        END,
+                                        CASE
+                                            WHEN s.created_at IS NOT NULL THEN s.created_at
+                                            ELSE s.archived_at
+                                        END DESC,
+                                        CASE WHEN s.archived_at IS NULL THEN 1 ELSE 0 END,
+                                        s.archived_at DESC,
+                                        LOWER(s.twitch_login) ASC
+                                ) AS rn
+                            FROM twitch_partners_all_state s
+                            WHERE COALESCE(TRIM(s.twitch_login), '') <> ''
+                        ) ranked_partner_state
+                        WHERE rn = 1
+                    )
+    """
+
+
+def _admin_partner_live_state_cte_sql(
+    *,
+    source_table: str = "twitch_partners_all_state",
+    active_only: bool = True,
+) -> str:
     """Rank live-state rows so each partner resolves to one canonical row."""
+    active_filter = "WHERE s.status = 'active'" if active_only else ""
     return """
                     , partner_live_state AS (
                         SELECT
@@ -157,23 +236,94 @@ def _admin_partner_live_state_cte_sql() -> str:
                                     PARTITION BY LOWER(s.twitch_login)
                                     ORDER BY
                                         CASE
-                                            WHEN s.twitch_user_id IS NOT NULL
-                                                 AND s.twitch_user_id = l.twitch_user_id
+                                            WHEN NULLIF(TRIM(COALESCE(s.twitch_user_id, '')), '') IS NOT NULL
+                                                 AND NULLIF(TRIM(COALESCE(l.twitch_user_id, '')), '') IS NOT NULL
+                                                 AND LOWER(TRIM(s.twitch_user_id)) = LOWER(TRIM(l.twitch_user_id))
                                             THEN 0
                                             WHEN LOWER(COALESCE(l.twitch_user_id, ''))
                                                  = LOWER(COALESCE(l.streamer_login, ''))
                                             THEN 2
                                             ELSE 1
                                         END,
-                                        COALESCE(l.last_seen_at, l.last_started_at, '') DESC
+                                        CASE
+                                            WHEN l.last_seen_at IS NULL AND l.last_started_at IS NULL THEN 1
+                                            ELSE 0
+                                        END,
+                                        CASE
+                                            WHEN l.last_seen_at IS NOT NULL THEN l.last_seen_at
+                                            ELSE l.last_started_at
+                                        END DESC
                                 ) AS rn
-                            FROM twitch_partners_all_state s
+                            FROM {source_table} s
                             LEFT JOIN twitch_live_state l
-                                ON s.twitch_user_id = l.twitch_user_id
+                                ON (
+                                    NULLIF(TRIM(COALESCE(s.twitch_user_id, '')), '') IS NOT NULL
+                                    AND NULLIF(TRIM(COALESCE(l.twitch_user_id, '')), '') IS NOT NULL
+                                    AND LOWER(TRIM(s.twitch_user_id)) = LOWER(TRIM(l.twitch_user_id))
+                                )
                                 OR LOWER(s.twitch_login) = LOWER(l.streamer_login)
-                            WHERE s.status = 'active'
+                            {active_filter}
                         ) ranked_live_state
                         WHERE rn = 1
+                    )
+    """.format(source_table=source_table, active_filter=active_filter)
+
+
+def _admin_partner_oauth_cte_sql(*, source_table: str = "partner_state") -> str:
+    """Resolve at most one OAuth row per canonical partner login."""
+    return """
+                    , partner_oauth AS (
+                        SELECT
+                            partner_login,
+                            scopes,
+                            needs_reauth,
+                            raid_enabled,
+                            authorized_at
+                        FROM (
+                            SELECT
+                                s.twitch_login AS partner_login,
+                                a.scopes,
+                                a.needs_reauth,
+                                a.raid_enabled,
+                                a.authorized_at,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY LOWER(s.twitch_login)
+                                    ORDER BY
+                                        CASE
+                                            WHEN NULLIF(TRIM(COALESCE(s.twitch_user_id, '')), '') IS NOT NULL
+                                                 AND NULLIF(TRIM(COALESCE(a.twitch_user_id, '')), '') IS NOT NULL
+                                                 AND LOWER(TRIM(s.twitch_user_id)) = LOWER(TRIM(a.twitch_user_id))
+                                            THEN 0
+                                            WHEN LOWER(COALESCE(a.twitch_login, ''))
+                                                 = LOWER(s.twitch_login)
+                                            THEN 1
+                                            ELSE 2
+                                        END,
+                                        CASE WHEN a.authorized_at IS NULL THEN 1 ELSE 0 END,
+                                        a.authorized_at DESC
+                                ) AS rn
+                            FROM {source_table} s
+                            LEFT JOIN twitch_raid_auth a
+                                ON (
+                                    NULLIF(TRIM(COALESCE(s.twitch_user_id, '')), '') IS NOT NULL
+                                    AND NULLIF(TRIM(COALESCE(a.twitch_user_id, '')), '') IS NOT NULL
+                                    AND LOWER(TRIM(s.twitch_user_id)) = LOWER(TRIM(a.twitch_user_id))
+                                )
+                                OR LOWER(COALESCE(a.twitch_login, '')) = LOWER(s.twitch_login)
+                        ) ranked_oauth
+                        WHERE rn = 1
+                    )
+    """.format(source_table=source_table)
+
+
+def _admin_last_stream_session_cte_sql() -> str:
+    return """
+                    , last_stream_session AS (
+                        SELECT
+                            LOWER(streamer_login) AS streamer_login,
+                            MAX(COALESCE(ended_at, started_at)) AS last_stream_at
+                        FROM twitch_stream_sessions
+                        GROUP BY LOWER(streamer_login)
                     )
     """
 
@@ -282,12 +432,12 @@ class _AnalyticsAdminMixin:
         router.add_get("/twitch/api/admin/streamers", self._api_admin_streamers)
         router.add_get("/twitch/api/admin/streamers/{login}", self._api_admin_streamer_detail)
         router.add_get("/twitch/api/admin/system/health", self._api_admin_system_health)
+        router.add_get("/twitch/api/admin/system/oauth-scopes", self._api_admin_system_oauth_scopes)
         router.add_get("/twitch/api/admin/system/eventsub", self._api_admin_system_eventsub)
         router.add_get("/twitch/api/admin/system/database", self._api_admin_system_database)
         router.add_get("/twitch/api/admin/system/errors", self._api_admin_system_errors)
         router.add_get("/twitch/api/admin/config/overview", self._api_admin_config_overview)
         router.add_post("/twitch/api/admin/config/promo", self._api_admin_config_promo)
-        router.add_post("/twitch/api/admin/config/polling", self._api_admin_config_polling)
         router.add_post("/twitch/api/admin/config/raids", self._api_admin_config_raids)
         router.add_post("/twitch/api/admin/config/chat", self._api_admin_config_chat)
         router.add_get(
@@ -529,92 +679,6 @@ class _AnalyticsAdminMixin:
         return sanitized[:max_length]
 
     @staticmethod
-    def _admin_settings_ensure_table(conn: Any) -> None:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS twitch_global_settings (
-                setting_key   TEXT PRIMARY KEY,
-                setting_value TEXT NOT NULL,
-                updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_by    TEXT
-            )
-            """
-        )
-        conn.execute(
-            "ALTER TABLE twitch_global_settings ADD COLUMN IF NOT EXISTS updated_by TEXT"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_twitch_global_settings_updated_at "
-            "ON twitch_global_settings(updated_at)"
-        )
-
-    @classmethod
-    def _admin_get_setting(
-        cls,
-        conn: Any,
-        setting_key: str,
-        *,
-        ensure_table: bool = True,
-    ) -> dict[str, Any] | None:
-        if ensure_table:
-            cls._admin_settings_ensure_table(conn)
-        try:
-            row = conn.execute(
-                f"""
-                SELECT setting_key, setting_value, updated_at, updated_by
-                FROM {_POLLING_INTERVAL_SETTINGS_TABLE}
-                WHERE setting_key = ?
-                LIMIT 1
-                """,
-                (setting_key,),
-            ).fetchone()
-        except Exception as exc:
-            if ensure_table:
-                raise
-            normalized_error = str(exc).strip().lower()
-            if any(marker in normalized_error for marker in ("no such table", "does not exist", "undefined table")):
-                return None
-            raise
-        if row is None:
-            return None
-        return {
-            "key": str(_row_get_value(row, "setting_key", 0, "") or "").strip(),
-            "value": str(_row_get_value(row, "setting_value", 1, "") or "").strip(),
-            "updatedAt": _row_get_value(row, "updated_at", 2, None),
-            "updatedBy": _row_get_value(row, "updated_by", 3, None),
-        }
-
-    @classmethod
-    def _admin_upsert_setting(
-        cls,
-        conn: Any,
-        *,
-        setting_key: str,
-        setting_value: str,
-        updated_by: str | None,
-    ) -> dict[str, Any]:
-        cls._admin_settings_ensure_table(conn)
-        row = conn.execute(
-            f"""
-            INSERT INTO {_POLLING_INTERVAL_SETTINGS_TABLE} (setting_key, setting_value, updated_at, updated_by)
-            VALUES (?, ?, CURRENT_TIMESTAMP, ?)
-            ON CONFLICT (setting_key) DO UPDATE
-            SET
-                setting_value = EXCLUDED.setting_value,
-                updated_at = CURRENT_TIMESTAMP,
-                updated_by = EXCLUDED.updated_by
-            RETURNING setting_key, setting_value, updated_at, updated_by
-            """,
-            (setting_key, setting_value, updated_by),
-        ).fetchone()
-        return {
-            "key": str(_row_get_value(row, "setting_key", 0, "") or "").strip(),
-            "value": str(_row_get_value(row, "setting_value", 1, "") or "").strip(),
-            "updatedAt": _row_get_value(row, "updated_at", 2, None),
-            "updatedBy": _row_get_value(row, "updated_by", 3, None),
-        }
-
-    @staticmethod
     def _admin_normalize_bool(value: Any) -> bool | None:
         if isinstance(value, bool):
             return value
@@ -635,52 +699,82 @@ class _AnalyticsAdminMixin:
         normalized = str(raw_value).strip().lower()
         if normalized not in _ADMIN_MANAGED_SCOPES:
             return None
-        return _ADMIN_MANAGED_SCOPE_ACTIVE
+        return normalized
 
     @staticmethod
     def _admin_scope_filter_sql(scope: str) -> str:
+        if scope == _ADMIN_MANAGED_SCOPE_ALL:
+            return "1=1"
         return "status = 'active'"
 
-    @classmethod
-    def _admin_load_polling_config(
-        cls,
-        conn: Any,
-        *,
-        runtime_default: int,
-    ) -> dict[str, Any]:
-        clamped_default = min(
-            _MAX_ADMIN_POLLING_INTERVAL_SECONDS,
-            max(_MIN_ADMIN_POLLING_INTERVAL_SECONDS, runtime_default),
-        )
-        setting = cls._admin_get_setting(
-            conn,
-            _POLLING_INTERVAL_SETTING_KEY,
-            ensure_table=False,
-        )
-        if setting is None:
-            return {
-                "intervalSeconds": clamped_default,
-                "persisted": False,
-                "source": "runtime_fallback",
-                "updatedAt": None,
-                "updatedBy": None,
-            }
+    @staticmethod
+    def _admin_parse_streamer_view(raw_value: Any) -> str | None:
+        if raw_value is None or str(raw_value).strip() == "":
+            return _ADMIN_STREAMER_VIEW_ACTIVE
+        normalized = str(raw_value).strip().lower()
+        if normalized not in _ADMIN_STREAMER_VIEWS:
+            return None
+        return normalized
 
-        interval_seconds = _safe_int(setting.get("value", clamped_default), default=clamped_default)
-        source = "db"
-        if (
-            interval_seconds < _MIN_ADMIN_POLLING_INTERVAL_SECONDS
-            or interval_seconds > _MAX_ADMIN_POLLING_INTERVAL_SECONDS
-        ):
-            interval_seconds = clamped_default
-            source = "db_invalid_fallback"
+    @staticmethod
+    def _admin_streamer_view_filter_sql(view: str) -> str:
+        if view == _ADMIN_STREAMER_VIEW_ARCHIVED:
+            return (
+                "COALESCE(s.manual_partner_opt_out, 0) = 0 "
+                "AND COALESCE(s.status, 'archived') <> 'active'"
+            )
+        if view == _ADMIN_STREAMER_VIEW_NON_PARTNER:
+            return "COALESCE(s.manual_partner_opt_out, 0) = 1"
+        if view == _ADMIN_STREAMER_VIEW_ALL:
+            return "1=1"
+        return (
+            "COALESCE(s.status, 'archived') = 'active' "
+            "AND COALESCE(s.manual_partner_opt_out, 0) = 0"
+        )
+
+    @staticmethod
+    def _admin_scope_snapshot(scopes_raw: Any, needs_reauth: Any) -> dict[str, Any]:
+        granted_scopes = sorted(
+            {
+                str(scope or "").strip().lower()
+                for scope in str(scopes_raw or "").split()
+                if str(scope or "").strip()
+            }
+        )
+        granted_scope_set = set(granted_scopes)
+        missing_scopes = [
+            scope for scope in _ADMIN_REQUIRED_SCOPES if scope not in granted_scope_set
+        ]
+        needs_reauth_bool = bool(needs_reauth)
+        oauth_connected = bool(granted_scopes)
+        if needs_reauth_bool:
+            oauth_status = "reauth"
+        elif not oauth_connected:
+            oauth_status = "missing"
+        elif missing_scopes:
+            oauth_status = "partial"
+        else:
+            oauth_status = "connected"
         return {
-            "intervalSeconds": interval_seconds,
-            "persisted": True,
-            "source": source,
-            "updatedAt": setting.get("updatedAt"),
-            "updatedBy": setting.get("updatedBy"),
+            "connected": oauth_connected,
+            "status": oauth_status,
+            "needsReauth": needs_reauth_bool,
+            "grantedScopes": granted_scopes,
+            "missingScopes": missing_scopes,
         }
+
+    @staticmethod
+    def _admin_partner_status(
+        *,
+        status: Any,
+        archived_at: Any,
+        manual_partner_opt_out: Any,
+    ) -> str:
+        if bool(manual_partner_opt_out):
+            return "non_partner"
+        if bool(archived_at) or str(status or "").strip().lower() != "active":
+            return "archived"
+        return "active"
 
     @classmethod
     def _admin_load_streamer_config_snapshots(
@@ -869,6 +963,14 @@ class _AnalyticsAdminMixin:
         if auth_error is not None:
             return auth_error
 
+        view = self._admin_parse_streamer_view(request.query.get("view"))
+        if view is None:
+            return web.json_response(
+                {"error": "invalid_view", "supported": sorted(_ADMIN_STREAMER_VIEWS)},
+                status=400,
+            )
+        where_clause = self._admin_streamer_view_filter_sql(view)
+
         try:
             with storage.get_conn() as conn:
                 rows = conn.execute(
@@ -885,7 +987,10 @@ class _AnalyticsAdminMixin:
                             ) AS rn
                         FROM twitch_billing_subscriptions
                     )
-                    {_admin_partner_live_state_cte_sql()}
+                    {_admin_partner_state_cte_sql()}
+                    {_admin_partner_live_state_cte_sql(source_table="partner_state", active_only=False)}
+                    {_admin_partner_oauth_cte_sql(source_table="partner_state")}
+                    {_admin_last_stream_session_cte_sql()}
                     SELECT
                         s.twitch_login,
                         s.twitch_user_id,
@@ -895,6 +1000,8 @@ class _AnalyticsAdminMixin:
                         s.archived_at,
                         s.require_discord_link,
                         s.is_on_discord,
+                        s.manual_partner_opt_out,
+                        s.status,
                         s.raid_bot_enabled,
                         s.silent_ban,
                         s.silent_raid,
@@ -906,6 +1013,10 @@ class _AnalyticsAdminMixin:
                         pls.last_viewer_count,
                         pls.active_session_id,
                         pls.last_game,
+                        lss.last_stream_at,
+                        po.scopes,
+                        po.needs_reauth,
+                        po.authorized_at,
                         sp.promo_disabled,
                         sp.promo_message,
                         sp.raid_boost_enabled,
@@ -915,16 +1026,27 @@ class _AnalyticsAdminMixin:
                         lb.plan_id AS billing_plan_id,
                         lb.status AS billing_status,
                         lb.updated_at AS billing_updated_at
-                    FROM twitch_partners_all_state s
+                    FROM partner_state s
                     LEFT JOIN partner_live_state pls
                         ON LOWER(pls.partner_login) = LOWER(s.twitch_login)
+                    LEFT JOIN partner_oauth po
+                        ON LOWER(po.partner_login) = LOWER(s.twitch_login)
+                    LEFT JOIN last_stream_session lss
+                        ON lss.streamer_login = LOWER(s.twitch_login)
                     LEFT JOIN streamer_plans sp
                         ON LOWER(sp.twitch_login) = LOWER(s.twitch_login)
                     LEFT JOIN latest_billing lb
                         ON LOWER(lb.customer_reference) = LOWER(s.twitch_login)
                        AND lb.rn = 1
-                    WHERE s.status = 'active'
-                    ORDER BY LOWER(s.twitch_login) ASC
+                    WHERE {where_clause}
+                    ORDER BY
+                        CASE
+                            WHEN COALESCE(s.manual_partner_opt_out, 0) = 1 THEN 2
+                            WHEN COALESCE(s.status, 'archived') = 'active' THEN 0
+                            ELSE 1
+                        END,
+                        CASE WHEN COALESCE(pls.is_live, 0) = 1 THEN 0 ELSE 1 END,
+                        LOWER(s.twitch_login) ASC
                     """
                 ).fetchall()
         except Exception as exc:
@@ -933,10 +1055,31 @@ class _AnalyticsAdminMixin:
         payload = []
         for row in rows:
             login = str(_row_get_value(row, "twitch_login", 0, "") or "").strip().lower()
-            archived = bool(_row_get_value(row, "archived_at", 5, None))
-            is_live = bool(_row_get_value(row, "is_live", 14, 0))
-            verified = bool(_row_get_value(row, "is_verified", 12, 0))
-            status = "archived" if archived else "live" if is_live else "verified" if verified else "offline"
+            archived_at = _row_get_value(row, "archived_at", 5, None)
+            archived = bool(archived_at)
+            is_live = bool(_row_get_value(row, "is_live", 16, 0))
+            verified = bool(_row_get_value(row, "is_verified", 14, 0))
+            manual_partner_opt_out = bool(_row_get_value(row, "manual_partner_opt_out", 8, 0))
+            partner_status = self._admin_partner_status(
+                status=_row_get_value(row, "status", 9, None),
+                archived_at=archived_at,
+                manual_partner_opt_out=manual_partner_opt_out,
+            )
+            scope_snapshot = self._admin_scope_snapshot(
+                _row_get_value(row, "scopes", 22, ""),
+                _row_get_value(row, "needs_reauth", 23, 0),
+            )
+            status = (
+                "non_partner"
+                if partner_status == "non_partner"
+                else "archived"
+                if archived
+                else "live"
+                if is_live
+                else "verified"
+                if verified
+                else "offline"
+            )
             payload.append(
                 {
                     "login": login,
@@ -946,28 +1089,50 @@ class _AnalyticsAdminMixin:
                     or login,
                     "twitchUserId": str(_row_get_value(row, "twitch_user_id", 1, "") or "").strip()
                     or None,
+                    "discordUserId": str(_row_get_value(row, "discord_user_id", 2, "") or "").strip()
+                    or None,
+                    "discordDisplayName": str(
+                        _row_get_value(row, "discord_display_name", 3, "") or ""
+                    ).strip()
+                    or None,
                     "verified": verified,
                     "archived": archived,
+                    "archivedAt": _json_safe_datetime(archived_at),
+                    "createdAt": _json_safe_datetime(_row_get_value(row, "created_at", 4, None)),
                     "isLive": is_live,
-                    "viewerCount": _safe_int(_row_get_value(row, "last_viewer_count", 16, 0), default=0),
-                    "activeSessionId": _row_get_value(row, "active_session_id", 17, None),
-                    "lastSeenAt": _row_get_value(row, "last_seen_at", 15, None),
-                    "lastGame": _row_get_value(row, "last_game", 18, None),
+                    "isOnDiscord": bool(_row_get_value(row, "is_on_discord", 7, 0)),
+                    "manualPartnerOptOut": manual_partner_opt_out,
+                    "partnerStatus": partner_status,
+                    "viewerCount": _safe_int(_row_get_value(row, "last_viewer_count", 18, 0), default=0),
+                    "activeSessionId": _row_get_value(row, "active_session_id", 19, None),
+                    "lastSeenAt": _json_safe_datetime(_row_get_value(row, "last_seen_at", 17, None)),
+                    "lastGame": _row_get_value(row, "last_game", 20, None),
+                    "lastStreamAt": _json_safe_datetime(
+                        _row_get_value(row, "last_stream_at", 21, None)
+                    ),
                     "planId": str(
-                        _row_get_value(row, "manual_plan_id", 22, "")
-                        or _row_get_value(row, "billing_plan_id", 25, "")
+                        _row_get_value(row, "manual_plan_id", 28, "")
+                        or _row_get_value(row, "billing_plan_id", 31, "")
                         or ""
                     ).strip()
                     or None,
-                    "billingStatus": str(_row_get_value(row, "billing_status", 26, "") or "").strip()
+                    "billingStatus": str(_row_get_value(row, "billing_status", 32, "") or "").strip()
                     or None,
-                    "promoDisabled": bool(_row_get_value(row, "promo_disabled", 19, 0)),
-                    "notes": str(_row_get_value(row, "manual_plan_notes", 24, "") or "").strip()
+                    "oauthConnected": bool(scope_snapshot["connected"]),
+                    "oauthNeedsReauth": bool(scope_snapshot["needsReauth"]),
+                    "oauthStatus": str(scope_snapshot["status"]),
+                    "grantedScopes": list(scope_snapshot["grantedScopes"]),
+                    "missingScopes": list(scope_snapshot["missingScopes"]),
+                    "oauthAuthorizedAt": _json_safe_datetime(
+                        _row_get_value(row, "authorized_at", 24, None)
+                    ),
+                    "promoDisabled": bool(_row_get_value(row, "promo_disabled", 25, 0)),
+                    "notes": str(_row_get_value(row, "manual_plan_notes", 30, "") or "").strip()
                     or None,
                     "status": status,
                 }
             )
-        return web.json_response({"items": payload, "count": len(payload)})
+        return web.json_response({"items": payload, "count": len(payload), "view": view})
 
     async def _api_admin_streamer_detail(self, request: web.Request) -> web.Response:
         auth_error = self._admin_auth_error(request, getattr(self, "_require_v2_admin_api", None))
@@ -994,7 +1159,9 @@ class _AnalyticsAdminMixin:
                             ) AS rn
                         FROM twitch_billing_subscriptions
                     )
-                    {_admin_partner_live_state_cte_sql()}
+                    {_admin_partner_state_cte_sql()}
+                    {_admin_partner_live_state_cte_sql(source_table="partner_state", active_only=False)}
+                    {_admin_partner_oauth_cte_sql(source_table="partner_state")}
                     SELECT
                         s.twitch_login,
                         s.twitch_user_id,
@@ -1004,18 +1171,25 @@ class _AnalyticsAdminMixin:
                         s.archived_at,
                         s.require_discord_link,
                         s.is_on_discord,
+                        s.manual_partner_opt_out,
                         s.raid_bot_enabled,
                         s.silent_ban,
                         s.silent_raid,
                         s.is_monitored_only,
                         COALESCE(s.is_verified, 0) AS is_verified,
                         COALESCE(s.is_partner_active, 0) AS is_partner_active,
+                        COALESCE(s.live_ping_enabled, 1) AS live_ping_enabled,
+                        s.status,
                         COALESCE(pls.is_live, 0) AS is_live,
                         pls.last_seen_at,
                         pls.last_viewer_count,
                         pls.active_session_id,
                         pls.last_started_at,
                         pls.last_game,
+                        po.scopes,
+                        po.needs_reauth,
+                        po.raid_enabled AS oauth_raid_enabled,
+                        po.authorized_at,
                         sp.plan_name,
                         sp.promo_disabled,
                         sp.promo_message,
@@ -1027,16 +1201,17 @@ class _AnalyticsAdminMixin:
                         lb.plan_id AS billing_plan_id,
                         lb.status AS billing_status,
                         lb.updated_at AS billing_updated_at
-                    FROM twitch_partners_all_state s
+                    FROM partner_state s
                     LEFT JOIN partner_live_state pls
                         ON LOWER(pls.partner_login) = LOWER(s.twitch_login)
+                    LEFT JOIN partner_oauth po
+                        ON LOWER(po.partner_login) = LOWER(s.twitch_login)
                     LEFT JOIN streamer_plans sp
                         ON LOWER(sp.twitch_login) = LOWER(s.twitch_login)
                     LEFT JOIN latest_billing lb
                         ON LOWER(lb.customer_reference) = LOWER(s.twitch_login)
                        AND lb.rn = 1
                     WHERE LOWER(s.twitch_login) = LOWER(?)
-                      AND s.status = 'active'
                     LIMIT 1
                     """,
                     (login,),
@@ -1085,8 +1260,8 @@ class _AnalyticsAdminMixin:
             session_payload.append(
                 {
                     "sessionId": _row_get_value(session, "id", 0, None),
-                    "startedAt": _row_get_value(session, "started_at", 1, None),
-                    "endedAt": _row_get_value(session, "ended_at", 2, None),
+                    "startedAt": _json_safe_datetime(_row_get_value(session, "started_at", 1, None)),
+                    "endedAt": _json_safe_datetime(_row_get_value(session, "ended_at", 2, None)),
                     "title": _row_get_value(session, "stream_title", 3, None),
                     "category": _row_get_value(session, "game_name", 4, None),
                     "averageViewers": _row_get_value(session, "avg_viewers", 5, None),
@@ -1100,18 +1275,32 @@ class _AnalyticsAdminMixin:
             _row_get_value(stats_row, "total_duration_seconds", 1, 0) if stats_row else 0,
             default=0,
         )
+        archived_at = _row_get_value(row, "archived_at", 5, None)
+        manual_partner_opt_out = bool(_row_get_value(row, "manual_partner_opt_out", 8, 0))
+        scope_snapshot = self._admin_scope_snapshot(
+            _row_get_value(row, "scopes", 23, ""),
+            _row_get_value(row, "needs_reauth", 24, 0),
+        )
+        partner_status = self._admin_partner_status(
+            status=_row_get_value(row, "status", 16, None),
+            archived_at=archived_at,
+            manual_partner_opt_out=manual_partner_opt_out,
+        )
         payload = {
             "login": login,
             "displayName": str(_row_get_value(row, "discord_display_name", 3, "") or login).strip()
             or login,
             "twitchUserId": str(_row_get_value(row, "twitch_user_id", 1, "") or "").strip() or None,
-            "verified": bool(_row_get_value(row, "is_verified", 12, 0)),
-            "archived": bool(_row_get_value(row, "archived_at", 5, None)),
-            "isLive": bool(_row_get_value(row, "is_live", 14, 0)),
+            "verified": bool(_row_get_value(row, "is_verified", 13, 0)),
+            "archived": bool(archived_at),
+            "archivedAt": _json_safe_datetime(archived_at),
+            "createdAt": _json_safe_datetime(_row_get_value(row, "created_at", 4, None)),
+            "isLive": bool(_row_get_value(row, "is_live", 17, 0)),
+            "partnerStatus": partner_status,
             "planId": str(
-                _row_get_value(row, "manual_plan_id", 25, "")
-                or _row_get_value(row, "billing_plan_id", 28, "")
-                or _row_get_value(row, "plan_name", 20, "")
+                _row_get_value(row, "manual_plan_id", 32, "")
+                or _row_get_value(row, "billing_plan_id", 35, "")
+                or _row_get_value(row, "plan_name", 27, "")
                 or ""
             ).strip()
             or None,
@@ -1129,31 +1318,228 @@ class _AnalyticsAdminMixin:
                 "followerDelta": _safe_int(_row_get_value(stats_row, "follower_delta", 4, 0), default=0)
                 if stats_row
                 else 0,
-                "viewerCount": _safe_int(_row_get_value(row, "last_viewer_count", 16, 0), default=0),
-                "lastSeenAt": _row_get_value(row, "last_seen_at", 15, None),
-                "lastStartedAt": _row_get_value(row, "last_started_at", 18, None),
-                "lastGame": _row_get_value(row, "last_game", 19, None),
+                "viewerCount": _safe_int(_row_get_value(row, "last_viewer_count", 19, 0), default=0),
+                "lastSeenAt": _json_safe_datetime(_row_get_value(row, "last_seen_at", 18, None)),
+                "lastStartedAt": _json_safe_datetime(
+                    _row_get_value(row, "last_started_at", 21, None)
+                ),
+                "lastGame": _row_get_value(row, "last_game", 22, None),
             },
             "settings": {
                 "requireDiscordLink": bool(_row_get_value(row, "require_discord_link", 6, 0)),
                 "isOnDiscord": bool(_row_get_value(row, "is_on_discord", 7, 0)),
-                "raidBotEnabled": bool(_row_get_value(row, "raid_bot_enabled", 8, 0)),
-                "silentBan": bool(_row_get_value(row, "silent_ban", 9, 0)),
-                "silentRaid": bool(_row_get_value(row, "silent_raid", 10, 0)),
-                "isMonitoredOnly": bool(_row_get_value(row, "is_monitored_only", 11, 0)),
-                "promoDisabled": bool(_row_get_value(row, "promo_disabled", 21, 0)),
-                "promoMessage": _row_get_value(row, "promo_message", 22, None),
-                "raidBoostEnabled": bool(_row_get_value(row, "raid_boost_enabled", 23, 0)),
-                "notes": _row_get_value(row, "notes", 24, None),
-                "manualPlanExpiresAt": _row_get_value(row, "manual_plan_expires_at", 26, None),
-                "manualPlanNotes": _row_get_value(row, "manual_plan_notes", 27, None),
-                "billingStatus": _row_get_value(row, "billing_status", 29, None),
-                "billingUpdatedAt": _row_get_value(row, "billing_updated_at", 30, None),
+                "discordUserId": str(_row_get_value(row, "discord_user_id", 2, "") or "").strip() or None,
+                "discordDisplayName": str(
+                    _row_get_value(row, "discord_display_name", 3, "") or ""
+                ).strip()
+                or None,
+                "manualPartnerOptOut": manual_partner_opt_out,
+                "raidBotEnabled": bool(_row_get_value(row, "raid_bot_enabled", 9, 0)),
+                "silentBan": bool(_row_get_value(row, "silent_ban", 10, 0)),
+                "silentRaid": bool(_row_get_value(row, "silent_raid", 11, 0)),
+                "isMonitoredOnly": bool(_row_get_value(row, "is_monitored_only", 12, 0)),
+                "livePingEnabled": bool(_row_get_value(row, "live_ping_enabled", 15, 1)),
+                "oauthConnected": bool(scope_snapshot["connected"]),
+                "oauthStatus": str(scope_snapshot["status"]),
+                "oauthNeedsReauth": bool(scope_snapshot["needsReauth"]),
+                "oauthRaidEnabled": bool(_row_get_value(row, "oauth_raid_enabled", 25, 0)),
+                "oauthAuthorizedAt": _json_safe_datetime(
+                    _row_get_value(row, "authorized_at", 26, None)
+                ),
+                "grantedScopes": list(scope_snapshot["grantedScopes"]),
+                "missingScopes": list(scope_snapshot["missingScopes"]),
+                "promoDisabled": bool(_row_get_value(row, "promo_disabled", 28, 0)),
+                "promoMessage": _row_get_value(row, "promo_message", 29, None),
+                "raidBoostEnabled": bool(_row_get_value(row, "raid_boost_enabled", 30, 0)),
+                "notes": _row_get_value(row, "notes", 31, None),
+                "manualPlanId": _row_get_value(row, "manual_plan_id", 32, None),
+                "manualPlanExpiresAt": _json_safe_datetime(
+                    _row_get_value(row, "manual_plan_expires_at", 33, None)
+                ),
+                "manualPlanNotes": _row_get_value(row, "manual_plan_notes", 34, None),
+                "billingStatus": _row_get_value(row, "billing_status", 36, None),
+                "billingUpdatedAt": _json_safe_datetime(
+                    _row_get_value(row, "billing_updated_at", 37, None)
+                ),
             },
             "sessions": session_payload,
             "recentActivity": session_payload[:5],
         }
         return web.json_response(payload)
+
+    async def _api_admin_system_oauth_scopes(self, request: web.Request) -> web.Response:
+        auth_error = self._admin_auth_error(request, getattr(self, "_require_v2_admin_api", None))
+        if auth_error is not None:
+            return auth_error
+
+        try:
+            with storage.get_conn() as conn:
+                rows = conn.execute(
+                    f"""
+                    WITH auth_rows AS (
+                        SELECT
+                            ROW_NUMBER() OVER (
+                                ORDER BY
+                                    CASE WHEN authorized_at IS NULL THEN 1 ELSE 0 END,
+                                    authorized_at DESC,
+                                    LOWER(COALESCE(NULLIF(TRIM(twitch_login), ''), '')),
+                                    LOWER(COALESCE(NULLIF(TRIM(twitch_user_id), ''), ''))
+                            ) AS auth_row_id,
+                            twitch_login,
+                            twitch_user_id,
+                            scopes,
+                            needs_reauth,
+                            authorized_at
+                        FROM twitch_raid_auth
+                    )
+                    {_admin_partner_state_cte_sql()}
+                    , ranked_auth_matches AS (
+                        SELECT
+                            a.auth_row_id,
+                            a.twitch_login,
+                            a.twitch_user_id,
+                            a.scopes,
+                            a.needs_reauth,
+                            a.authorized_at,
+                            s.twitch_login AS partner_login,
+                            s.discord_display_name,
+                            s.archived_at,
+                            s.manual_partner_opt_out,
+                            s.status,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY a.auth_row_id
+                                ORDER BY
+                                    CASE
+                                        WHEN NULLIF(TRIM(COALESCE(a.twitch_user_id, '')), '') IS NOT NULL
+                                             AND NULLIF(TRIM(COALESCE(s.twitch_user_id, '')), '') IS NOT NULL
+                                             AND LOWER(TRIM(a.twitch_user_id)) = LOWER(TRIM(s.twitch_user_id))
+                                        THEN 0
+                                        WHEN LOWER(COALESCE(a.twitch_login, '')) = LOWER(s.twitch_login)
+                                        THEN 1
+                                        ELSE 2
+                                    END,
+                                    CASE
+                                        WHEN COALESCE(s.manual_partner_opt_out, 0) = 1 THEN 2
+                                        WHEN COALESCE(s.status, 'archived') = 'active' THEN 0
+                                        ELSE 1
+                                    END,
+                                    CASE
+                                        WHEN s.created_at IS NULL AND s.archived_at IS NULL THEN 1
+                                        ELSE 0
+                                    END,
+                                    CASE
+                                        WHEN s.created_at IS NOT NULL THEN s.created_at
+                                        ELSE s.archived_at
+                                    END DESC,
+                                    LOWER(COALESCE(s.twitch_login, '')) ASC
+                            ) AS rn
+                        FROM auth_rows a
+                        LEFT JOIN partner_state s
+                            ON (
+                                NULLIF(TRIM(COALESCE(a.twitch_user_id, '')), '') IS NOT NULL
+                                AND NULLIF(TRIM(COALESCE(s.twitch_user_id, '')), '') IS NOT NULL
+                                AND LOWER(TRIM(a.twitch_user_id)) = LOWER(TRIM(s.twitch_user_id))
+                            )
+                            OR LOWER(COALESCE(a.twitch_login, '')) = LOWER(s.twitch_login)
+                    )
+                    SELECT
+                        auth_row_id,
+                        COALESCE(
+                            NULLIF(TRIM(partner_login), ''),
+                            NULLIF(TRIM(twitch_login), ''),
+                            NULLIF(TRIM(twitch_user_id), '')
+                        ) AS effective_login,
+                        twitch_login,
+                        twitch_user_id,
+                        scopes,
+                        needs_reauth,
+                        authorized_at,
+                        partner_login,
+                        discord_display_name,
+                        archived_at,
+                        manual_partner_opt_out,
+                        status
+                    FROM ranked_auth_matches
+                    WHERE rn = 1
+                    ORDER BY
+                        LOWER(
+                            COALESCE(
+                                NULLIF(TRIM(partner_login), ''),
+                                NULLIF(TRIM(twitch_login), ''),
+                                NULLIF(TRIM(twitch_user_id), '')
+                            )
+                        ) ASC,
+                        auth_row_id ASC
+                    """
+                ).fetchall()
+        except Exception as exc:
+            if self._admin_is_missing_schema_error(exc):
+                return web.json_response(
+                    {
+                        "requiredScopes": list(_ADMIN_REQUIRED_SCOPES),
+                        "criticalScopes": sorted(_ADMIN_CRITICAL_SCOPES),
+                        "labels": dict(_ADMIN_SCOPE_COLUMN_LABELS),
+                        "summary": {
+                            "totalAuthorized": 0,
+                            "fullScopeCount": 0,
+                            "missingScopeCount": 0,
+                        },
+                        "items": [],
+                    }
+                )
+            return _admin_500(exc)
+
+        payload_rows: list[dict[str, Any]] = []
+        total_authorized = 0
+        full_scope_count = 0
+        for row in rows:
+            login = str(_row_get_value(row, "effective_login", 1, "") or "").strip().lower()
+            if not login:
+                continue
+            total_authorized += 1
+            scope_snapshot = self._admin_scope_snapshot(
+                _row_get_value(row, "scopes", 4, ""),
+                _row_get_value(row, "needs_reauth", 5, 0),
+            )
+            if (
+                scope_snapshot["connected"]
+                and not scope_snapshot["missingScopes"]
+                and not scope_snapshot["needsReauth"]
+            ):
+                full_scope_count += 1
+            partner_status = self._admin_partner_status(
+                status=_row_get_value(row, "status", 11, None),
+                archived_at=_row_get_value(row, "archived_at", 9, None),
+                manual_partner_opt_out=_row_get_value(row, "manual_partner_opt_out", 10, 0),
+            )
+            payload_rows.append(
+                {
+                    "login": login,
+                    "displayName": str(_row_get_value(row, "discord_display_name", 8, "") or login)
+                    .strip()
+                    or login,
+                    "partnerStatus": partner_status,
+                    "archivedAt": _json_safe_datetime(_row_get_value(row, "archived_at", 9, None)),
+                    "oauthStatus": scope_snapshot["status"],
+                    "oauthNeedsReauth": bool(scope_snapshot["needsReauth"]),
+                    "grantedScopes": list(scope_snapshot["grantedScopes"]),
+                    "missingScopes": list(scope_snapshot["missingScopes"]),
+                }
+            )
+
+        return web.json_response(
+            {
+                "requiredScopes": list(_ADMIN_REQUIRED_SCOPES),
+                "criticalScopes": sorted(_ADMIN_CRITICAL_SCOPES),
+                "labels": dict(_ADMIN_SCOPE_COLUMN_LABELS),
+                "summary": {
+                    "totalAuthorized": total_authorized,
+                    "fullScopeCount": full_scope_count,
+                    "missingScopeCount": max(0, total_authorized - full_scope_count),
+                },
+                "items": payload_rows,
+            }
+        )
 
     async def _api_admin_system_health(self, request: web.Request) -> web.Response:
         auth_error = self._admin_auth_error(request, getattr(self, "_require_v2_admin_api", None))
@@ -1431,7 +1817,6 @@ class _AnalyticsAdminMixin:
         promo_config: dict[str, Any] = {}
         raid_snapshot: dict[str, Any] = {}
         chat_snapshot: dict[str, Any] = {}
-        polling_config: dict[str, Any] = {}
         csrf_token = ""
         csrf_getter = getattr(self, "_csrf_get_token", None)
         csrf_generator = getattr(self, "_csrf_generate_token", None)
@@ -1446,18 +1831,6 @@ class _AnalyticsAdminMixin:
             except Exception:
                 csrf_token = ""
 
-        runtime_polling_interval = _safe_int(
-            getattr(
-                self,
-                "_poll_interval_seconds",
-                getattr(
-                    self,
-                    "_admin_polling_interval_seconds",
-                    _DEFAULT_ADMIN_POLLING_INTERVAL_SECONDS,
-                ),
-            ),
-            default=_DEFAULT_ADMIN_POLLING_INTERVAL_SECONDS,
-        )
         scope = self._admin_parse_scope(request.query.get("scope"))
         if scope is None:
             return web.json_response(
@@ -1470,10 +1843,6 @@ class _AnalyticsAdminMixin:
         try:
             with storage.get_conn() as conn:
                 promo_config = evaluate_global_promo_mode(load_global_promo_mode(conn))
-                polling_config = self._admin_load_polling_config(
-                    conn,
-                    runtime_default=runtime_polling_interval,
-                )
                 raid_snapshot, chat_snapshot = self._admin_load_streamer_config_snapshots(
                     conn,
                     scope=scope,
@@ -1484,7 +1853,6 @@ class _AnalyticsAdminMixin:
         return web.json_response(
             {
                 "promo": promo_config,
-                "polling": polling_config,
                 "raids": raid_snapshot,
                 "chat": chat_snapshot,
                 "announcements": promo_config.get("config", {}) if isinstance(promo_config, dict) else {},
@@ -1523,97 +1891,6 @@ class _AnalyticsAdminMixin:
             return _admin_500(exc)
 
         return web.json_response({"ok": True, "config": saved, "evaluation": evaluation})
-
-    async def _api_admin_config_polling(self, request: web.Request) -> web.Response:
-        auth_error = self._admin_auth_error(request, getattr(self, "_require_v2_admin_api", None))
-        if auth_error is not None:
-            return auth_error
-
-        csrf_token, payload = await self._admin_extract_csrf(request)
-        if not self._admin_verify_csrf(request, csrf_token):
-            return web.json_response({"error": "invalid_csrf"}, status=403)
-
-        interval_seconds = _safe_int(
-            payload.get("intervalSeconds", payload.get("interval_seconds", 0)),
-            default=0,
-        )
-        if (
-            interval_seconds < _MIN_ADMIN_POLLING_INTERVAL_SECONDS
-            or interval_seconds > _MAX_ADMIN_POLLING_INTERVAL_SECONDS
-        ):
-            return web.json_response(
-                {
-                    "error": "invalid_interval_seconds",
-                    "message": (
-                        "intervalSeconds muss zwischen "
-                        f"{_MIN_ADMIN_POLLING_INTERVAL_SECONDS} und "
-                        f"{_MAX_ADMIN_POLLING_INTERVAL_SECONDS} liegen."
-                    ),
-                },
-                status=400,
-            )
-
-        actor_label = self._admin_actor_label(request, getattr(self, "_get_discord_admin_session", None))
-        try:
-            with storage.get_conn() as conn:
-                saved = self._admin_upsert_setting(
-                    conn,
-                    setting_key=_POLLING_INTERVAL_SETTING_KEY,
-                    setting_value=str(interval_seconds),
-                    updated_by=actor_label,
-                )
-        except Exception as exc:
-            return _admin_500(exc)
-
-        persisted_interval_seconds = _safe_int(
-            saved.get("value", interval_seconds),
-            default=interval_seconds,
-        )
-        runtime_applied = False
-        runtime_interval_seconds: int | None = None
-        apply_poll_interval = getattr(self, "_apply_poll_interval_seconds", None)
-        if callable(apply_poll_interval):
-            try:
-                runtime_interval_seconds = _safe_int(
-                    apply_poll_interval(persisted_interval_seconds, reason="admin_api"),
-                    default=persisted_interval_seconds,
-                )
-                runtime_applied = True
-            except TypeError:
-                try:
-                    runtime_interval_seconds = _safe_int(
-                        apply_poll_interval(persisted_interval_seconds),
-                        default=persisted_interval_seconds,
-                    )
-                    runtime_applied = True
-                except Exception:
-                    runtime_interval_seconds = None
-            except Exception:
-                runtime_interval_seconds = None
-        else:
-            try:
-                setattr(self, "_admin_polling_interval_seconds", persisted_interval_seconds)
-                if hasattr(self, "_poll_interval_seconds"):
-                    setattr(self, "_poll_interval_seconds", persisted_interval_seconds)
-                runtime_interval_seconds = persisted_interval_seconds
-                runtime_applied = True
-            except Exception:
-                runtime_interval_seconds = None
-
-        return web.json_response(
-            {
-                "ok": True,
-                "polling": {
-                    "intervalSeconds": persisted_interval_seconds,
-                    "persisted": True,
-                    "source": "db",
-                    "updatedAt": saved.get("updatedAt"),
-                    "updatedBy": saved.get("updatedBy"),
-                },
-                "runtimeApplied": runtime_applied,
-                "runtimeIntervalSeconds": runtime_interval_seconds,
-            }
-        )
 
     async def _api_admin_config_raids(self, request: web.Request) -> web.Response:
         auth_error = self._admin_auth_error(request, getattr(self, "_require_v2_admin_api", None))

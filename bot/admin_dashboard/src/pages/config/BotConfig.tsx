@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Save } from 'lucide-react';
 import { Toast } from '@/components/shared/Toast';
-import { useConfigOverview, usePollingConfigMutation, usePromoConfigMutation } from '@/hooks/useAdmin';
+import { useConfigOverview, usePromoConfigMutation } from '@/hooks/useAdmin';
 import { coerceRecord } from '@/utils/formatters';
 
 function readConfigString(record: Record<string, unknown>, ...keys: string[]) {
@@ -46,20 +46,6 @@ function readConfigBoolean(record: Record<string, unknown>, ...keys: string[]) {
   return undefined;
 }
 
-function readConfigNumber(record: Record<string, unknown>, ...keys: string[]) {
-  for (const key of keys) {
-    const value = record[key];
-    if (value === undefined || value === null || value === '') {
-      continue;
-    }
-    const candidate = Number(value);
-    if (Number.isFinite(candidate)) {
-      return candidate;
-    }
-  }
-  return undefined;
-}
-
 function buildPromoSavePayload(
   promo: Record<string, unknown>,
   promoConfig: Record<string, unknown>,
@@ -79,23 +65,12 @@ function buildPromoSavePayload(
   };
 }
 
-function buildPollingSavePayload(rawValue: string) {
-  const trimmed = rawValue.trim();
-  if (/^-?\d+$/.test(trimmed)) {
-    return { interval_seconds: Number(trimmed) };
-  }
-  return { interval_seconds: trimmed };
-}
-
 export function BotConfig() {
   const configQuery = useConfigOverview();
   const promoMutation = usePromoConfigMutation();
-  const pollingMutation = usePollingConfigMutation();
   const [promoEnabled, setPromoEnabled] = useState(true);
   const [promoMessage, setPromoMessage] = useState('');
-  const [pollingSeconds, setPollingSeconds] = useState('60');
   const [promoDirty, setPromoDirty] = useState(false);
-  const [pollingDirty, setPollingDirty] = useState(false);
   const [toast, setToast] = useState<{ open: boolean; tone: 'success' | 'error'; message: string }>({
     open: false,
     tone: 'success',
@@ -104,7 +79,6 @@ export function BotConfig() {
 
   const promo = coerceRecord(configQuery.data?.promo);
   const promoConfig = coerceRecord(promo.config);
-  const polling = coerceRecord(configQuery.data?.polling);
 
   useEffect(() => {
     if (!configQuery.data || promoDirty) {
@@ -121,23 +95,14 @@ export function BotConfig() {
     );
   }, [configQuery.data, promoDirty, promo, promoConfig]);
 
-  useEffect(() => {
-    if (!configQuery.data || pollingDirty) {
-      return;
-    }
-    const nextPollingSeconds =
-      readConfigNumber(polling, 'intervalSeconds', 'interval_seconds', 'interval') ?? 60;
-    setPollingSeconds(String(nextPollingSeconds));
-  }, [configQuery.data, polling, pollingDirty]);
-
   return (
     <section className="space-y-5">
       <header className="panel-card rounded-[1.8rem] p-6">
         <p className="text-xs font-semibold uppercase tracking-[0.28em] text-text-secondary">Bot Konfiguration</p>
-        <h1 className="mt-3 text-3xl font-semibold text-white">Promo und Polling administrieren</h1>
+        <h1 className="mt-3 text-3xl font-semibold text-white">Promo administrieren</h1>
       </header>
 
-      <div className="grid gap-5 xl:grid-cols-2">
+      <div className="grid gap-5">
         <article className="panel-card rounded-[1.8rem] p-6">
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-text-secondary">Global Promo</p>
           <div className="mt-4 space-y-4">
@@ -180,40 +145,9 @@ export function BotConfig() {
               <Save className="h-4 w-4" />
               Promo speichern
             </button>
-          </div>
-        </article>
-
-        <article className="panel-card rounded-[1.8rem] p-6">
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-text-secondary">Polling</p>
-          <div className="mt-4 space-y-4">
-            <input
-              value={pollingSeconds}
-              onChange={(event) => {
-                setPollingDirty(true);
-                setPollingSeconds(event.target.value);
-              }}
-              className="admin-input"
-              placeholder={String(readConfigNumber(polling, 'intervalSeconds', 'interval_seconds', 'interval') ?? 60)}
-            />
-            <button
-              className="admin-button admin-button-primary"
-              disabled={pollingMutation.isPending}
-              onClick={async () => {
-                try {
-                  await pollingMutation.mutateAsync(buildPollingSavePayload(pollingSeconds));
-                  setPollingDirty(false);
-                  setToast({ open: true, tone: 'success', message: 'Polling-Konfiguration gespeichert.' });
-                } catch (error) {
-                  setToast({ open: true, tone: 'error', message: error instanceof Error ? error.message : 'Polling-Speichern fehlgeschlagen' });
-                }
-              }}
-            >
-              <Save className="h-4 w-4" />
-              Polling speichern
-            </button>
 
             <pre className="overflow-auto rounded-[1.4rem] border border-white/10 bg-slate-950/55 p-4 text-xs leading-6 text-emerald-100">
-              {JSON.stringify({ promo, polling }, null, 2)}
+              {JSON.stringify({ promo }, null, 2)}
             </pre>
           </div>
         </article>

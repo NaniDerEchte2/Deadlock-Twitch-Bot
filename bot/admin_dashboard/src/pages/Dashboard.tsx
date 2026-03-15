@@ -20,7 +20,7 @@ const quickActions = [
   },
   {
     title: 'Bot konfigurieren',
-    description: 'Promo-Mode und Polling ohne Legacy-HTML anfassen.',
+    description: 'Promo-Mode ohne Legacy-HTML anfassen.',
     to: '/config',
   },
 ];

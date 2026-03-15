@@ -19,18 +19,40 @@ export interface AdminAuthStatus {
 }
 
 export type AdminConfigScope = 'active' | 'all';
+export type StreamerView = 'active' | 'archived' | 'non_partner' | 'all';
+export type StreamerPartnerStatus = 'active' | 'archived' | 'non_partner';
+export type LegacyVerifyMode = 'permanent' | 'temp' | 'failed' | 'clear';
+export type DiscordFlagMode = 'mark' | 'unmark';
+export type PartnerChatActionMode = 'message' | 'action' | 'announcement';
+export type PartnerChatAnnouncementColor = 'blue' | 'green' | 'orange' | 'purple' | 'primary';
 
 export interface StreamerRow {
   login: string;
   displayName?: string;
   twitchUserId?: string;
+  discordUserId?: string;
+  discordDisplayName?: string;
   verified?: boolean;
   archived?: boolean;
+  archivedAt?: string | null;
+  createdAt?: string | null;
   isLive?: boolean;
+  isOnDiscord?: boolean;
+  manualPartnerOptOut?: boolean;
+  partnerStatus?: StreamerPartnerStatus;
   viewerCount?: number;
   activeSessionId?: number | null;
   lastSeenAt?: string | null;
+  lastGame?: string | null;
+  lastStreamAt?: string | null;
   planId?: string;
+  billingStatus?: string;
+  oauthConnected?: boolean;
+  oauthNeedsReauth?: boolean;
+  oauthStatus?: string;
+  grantedScopes?: string[];
+  missingScopes?: string[];
+  oauthAuthorizedAt?: string | null;
   promoDisabled?: boolean;
   notes?: string;
   status?: string;
@@ -55,13 +77,64 @@ export interface StreamerDetail {
   twitchUserId?: string;
   verified?: boolean;
   archived?: boolean;
+  archivedAt?: string | null;
+  createdAt?: string | null;
   isLive?: boolean;
+  partnerStatus?: StreamerPartnerStatus;
   planId?: string;
   stats?: Record<string, unknown>;
   settings?: Record<string, unknown>;
   sessions?: SessionSummary[];
   recentActivity?: Record<string, unknown>[];
   raw?: Record<string, unknown>;
+}
+
+export interface StreamerDiscordProfilePayload {
+  login: string;
+  discordUserId?: string;
+  discordDisplayName?: string;
+  memberFlag?: boolean;
+}
+
+export interface AddStreamerPayload extends StreamerDiscordProfilePayload {}
+
+export interface ManualPlanPayload {
+  login: string;
+  planId: string;
+  expiresAt?: string;
+  notes?: string;
+}
+
+export interface PartnerChatActionPayload {
+  login: string;
+  mode: PartnerChatActionMode;
+  color?: PartnerChatAnnouncementColor;
+  message: string;
+}
+
+export interface ScopeStatusRow {
+  login: string;
+  displayName?: string;
+  partnerStatus?: StreamerPartnerStatus;
+  archivedAt?: string | null;
+  oauthStatus?: string;
+  oauthNeedsReauth?: boolean;
+  grantedScopes: string[];
+  missingScopes: string[];
+}
+
+export interface ScopeStatusSummary {
+  totalAuthorized: number;
+  fullScopeCount: number;
+  missingScopeCount: number;
+}
+
+export interface ScopeStatusResponse {
+  requiredScopes: string[];
+  criticalScopes: string[];
+  labels?: Record<string, string>;
+  summary: ScopeStatusSummary;
+  items: ScopeStatusRow[];
 }
 
 export interface InternalHomeMetric {
@@ -176,7 +249,6 @@ export interface ChatConfigSnapshot {
 
 export interface ConfigOverview {
   promo?: Record<string, unknown>;
-  polling?: Record<string, unknown>;
   raids?: RaidConfigSnapshot;
   chat?: ChatConfigSnapshot;
   announcements?: Record<string, unknown>;

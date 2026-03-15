@@ -1,8 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { AdminConfigScope } from '@/api/types';
+import type { AdminConfigScope, StreamerView } from '@/api/types';
 import {
   addStreamer,
   archiveStreamer,
+  clearManualPlanOverride,
+  fetchScopeStatus,
   fetchAffiliateDetail,
   fetchAffiliateGutschriften,
   fetchAffiliatesList,
@@ -16,16 +18,30 @@ import {
   fetchErrorLogs,
   fetchEventSubStatus,
   generateGutschriften,
+  saveManualPlanOverride,
+  sendPartnerChatAction,
   fetchSubscriptions,
   fetchSystemHealth,
   removeStreamer,
+  toggleStreamerDiscordFlag,
   toggleAffiliateActive,
+  updateStreamerDiscordProfile,
   updateChatConfig,
-  updatePollingConfig,
   updatePromoConfig,
   updateRaidConfig,
   verifyStreamer,
 } from '@/api/client';
+
+function invalidateStreamerQueries(queryClient: ReturnType<typeof useQueryClient>, login?: string) {
+  void queryClient.invalidateQueries({ queryKey: ['admin-streamers'] });
+  void queryClient.invalidateQueries({ queryKey: ['admin-dashboard-overview'] });
+  void queryClient.invalidateQueries({ queryKey: ['admin-scope-status'] });
+  if (login) {
+    void queryClient.invalidateQueries({ queryKey: ['admin-streamer-detail', login] });
+  } else {
+    void queryClient.invalidateQueries({ queryKey: ['admin-streamer-detail'] });
+  }
+}
 
 export function useDashboardOverview() {
   return useQuery({
@@ -35,10 +51,10 @@ export function useDashboardOverview() {
   });
 }
 
-export function useStreamers() {
+export function useStreamers(view: StreamerView = 'active') {
   return useQuery({
-    queryKey: ['admin-streamers'],
-    queryFn: fetchAdminStreamers,
+    queryKey: ['admin-streamers', view],
+    queryFn: () => fetchAdminStreamers(view),
     staleTime: 30_000,
   });
 }
@@ -58,6 +74,15 @@ export function useSystemHealth() {
     queryFn: fetchSystemHealth,
     staleTime: 20_000,
     refetchInterval: 30_000,
+  });
+}
+
+export function useScopeStatus() {
+  return useQuery({
+    queryKey: ['admin-scope-status'],
+    queryFn: fetchScopeStatus,
+    staleTime: 30_000,
+    refetchInterval: 60_000,
   });
 }
 
@@ -149,8 +174,7 @@ export function useAddStreamer() {
   return useMutation({
     mutationFn: addStreamer,
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['admin-streamers'] });
-      void queryClient.invalidateQueries({ queryKey: ['admin-dashboard-overview'] });
+      invalidateStreamerQueries(queryClient);
     },
   });
 }
@@ -159,8 +183,8 @@ export function useRemoveStreamer() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: removeStreamer,
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['admin-streamers'] });
+    onSuccess: (_result, login) => {
+      invalidateStreamerQueries(queryClient, login);
     },
   });
 }
@@ -168,10 +192,10 @@ export function useRemoveStreamer() {
 export function useVerifyStreamer() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ login, mode }: { login: string; mode?: 'verified' | 'unverified' }) =>
+    mutationFn: ({ login, mode }: { login: string; mode?: 'permanent' | 'temp' | 'failed' | 'clear' }) =>
       verifyStreamer(login, mode),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['admin-streamers'] });
+    onSuccess: (_result, variables) => {
+      invalidateStreamerQueries(queryClient, variables.login);
     },
   });
 }
@@ -186,8 +210,61 @@ export function useArchiveStreamer() {
       login: string;
       mode?: 'archive' | 'unarchive' | 'toggle';
     }) => archiveStreamer(login, mode),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['admin-streamers'] });
+    onSuccess: (_result, variables) => {
+      invalidateStreamerQueries(queryClient, variables.login);
+    },
+  });
+}
+
+export function useUpdateStreamerDiscordProfile() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: updateStreamerDiscordProfile,
+    onSuccess: (_result, variables) => {
+      invalidateStreamerQueries(queryClient, variables.login);
+    },
+  });
+}
+
+export function useToggleStreamerDiscordFlag() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ login, mode }: { login: string; mode: 'mark' | 'unmark' }) =>
+      toggleStreamerDiscordFlag(login, mode),
+    onSuccess: (_result, variables) => {
+      invalidateStreamerQueries(queryClient, variables.login);
+    },
+  });
+}
+
+export function useManualPlanOverride() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: saveManualPlanOverride,
+    onSuccess: (_result, variables) => {
+      invalidateStreamerQueries(queryClient, variables.login);
+      void queryClient.invalidateQueries({ queryKey: ['admin-subscriptions'] });
+    },
+  });
+}
+
+export function useClearManualPlanOverride() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: clearManualPlanOverride,
+    onSuccess: (_result, login) => {
+      invalidateStreamerQueries(queryClient, login);
+      void queryClient.invalidateQueries({ queryKey: ['admin-subscriptions'] });
+    },
+  });
+}
+
+export function usePartnerChatAction() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: sendPartnerChatAction,
+    onSuccess: (_result, variables) => {
+      invalidateStreamerQueries(queryClient, variables.login);
     },
   });
 }
@@ -232,17 +309,6 @@ export function usePromoConfigMutation() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['admin-config-overview'] });
       void queryClient.invalidateQueries({ queryKey: ['admin-dashboard-overview'] });
-    },
-  });
-}
-
-export function usePollingConfigMutation() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: updatePollingConfig,
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['admin-config-overview'] });
-      void queryClient.invalidateQueries({ queryKey: ['admin-system-health'] });
     },
   });
 }
