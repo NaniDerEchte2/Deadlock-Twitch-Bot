@@ -3,7 +3,12 @@ from __future__ import annotations
 import sqlite3
 import unittest
 
-from bot.storage.partner_registry import archive_active_partner, bulk_update_partner_flags
+from bot.storage.partner_registry import (
+    archive_active_partner,
+    bulk_update_partner_flags,
+    migrate_legacy_partner_registry,
+    upsert_streamer_identity,
+)
 
 
 def _make_conn() -> sqlite3.Connection:
@@ -20,6 +25,13 @@ def _make_conn() -> sqlite3.Connection:
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX idx_twitch_streamer_identities_discord_user
+        ON twitch_streamer_identities(discord_user_id)
+        WHERE discord_user_id IS NOT NULL AND discord_user_id <> ''
         """
     )
     conn.execute(
@@ -88,6 +100,98 @@ def _make_conn() -> sqlite3.Connection:
 
 
 class PartnerRegistrySemanticsTests(unittest.TestCase):
+    def test_migrate_legacy_partner_registry_prefers_active_partner_for_duplicate_discord_user(self) -> None:
+        conn = _make_conn()
+        conn.executemany(
+            """
+            INSERT INTO twitch_streamers (
+                twitch_login,
+                twitch_user_id,
+                discord_user_id,
+                discord_display_name,
+                is_on_discord,
+                manual_verified_at,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "scoutalpha",
+                    "1001",
+                    "662995601738170389",
+                    "Shared User",
+                    1,
+                    None,
+                    "2026-03-01T10:00:00+00:00",
+                ),
+                (
+                    "partnerbravo",
+                    "2002",
+                    "662995601738170389",
+                    "Shared User",
+                    1,
+                    "2026-03-05T10:00:00+00:00",
+                    "2026-03-05T10:00:00+00:00",
+                ),
+            ],
+        )
+
+        stats = migrate_legacy_partner_registry(conn)
+
+        self.assertEqual(stats["identity_upserts"], 2)
+        identity_rows = conn.execute(
+            """
+            SELECT twitch_user_id, twitch_login, discord_user_id
+            FROM twitch_streamer_identities
+            ORDER BY twitch_user_id
+            """
+        ).fetchall()
+        self.assertEqual(identity_rows[0]["twitch_user_id"], "1001")
+        self.assertIsNone(identity_rows[0]["discord_user_id"])
+        self.assertEqual(identity_rows[1]["twitch_user_id"], "2002")
+        self.assertEqual(identity_rows[1]["discord_user_id"], "662995601738170389")
+        partner_row = conn.execute(
+            "SELECT twitch_user_id, status FROM twitch_partners WHERE twitch_user_id = ?",
+            ("2002",),
+        ).fetchone()
+        self.assertEqual(partner_row["status"], "active")
+
+    def test_upsert_streamer_identity_reassigns_duplicate_discord_user(self) -> None:
+        conn = _make_conn()
+        conn.execute(
+            """
+            INSERT INTO twitch_streamer_identities (
+                twitch_user_id, twitch_login, discord_user_id, discord_display_name, is_on_discord
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            ("1001", "alpha", "662995601738170389", "Alpha", 1),
+        )
+
+        upsert_streamer_identity(
+            conn,
+            twitch_user_id="2002",
+            twitch_login="bravo",
+            discord_user_id="662995601738170389",
+            discord_display_name="Bravo",
+            is_on_discord=1,
+        )
+
+        rows = conn.execute(
+            """
+            SELECT twitch_user_id, discord_user_id, discord_display_name, is_on_discord
+            FROM twitch_streamer_identities
+            ORDER BY twitch_user_id
+            """
+        ).fetchall()
+        self.assertEqual(rows[0]["twitch_user_id"], "1001")
+        self.assertIsNone(rows[0]["discord_user_id"])
+        self.assertIsNone(rows[0]["discord_display_name"])
+        self.assertEqual(int(rows[0]["is_on_discord"]), 0)
+        self.assertEqual(rows[1]["twitch_user_id"], "2002")
+        self.assertEqual(rows[1]["discord_user_id"], "662995601738170389")
+        self.assertEqual(rows[1]["discord_display_name"], "Bravo")
+        self.assertEqual(int(rows[1]["is_on_discord"]), 1)
+
     def test_archive_active_partner_keeps_non_partner_table_empty(self) -> None:
         conn = _make_conn()
         conn.execute(

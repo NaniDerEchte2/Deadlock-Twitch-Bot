@@ -1,5 +1,6 @@
 import logging
 import logging.handlers
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -50,6 +51,43 @@ class LoggingSetupTests(unittest.TestCase):
                         Path(tmpdir) / "twitch_bot.log",
                     )
                     self.assertEqual(logger.level, logging.INFO)
+
+            for handler in list(logger.handlers):
+                logger.removeHandler(handler)
+                handler.close()
+        logger.setLevel(logging.NOTSET)
+
+    def test_dashboard_role_uses_dashboard_log_and_replaces_bot_handler(self) -> None:
+        logger_name = "TwitchStreams.TestDashboardLoggingSetup"
+        logger = logging.getLogger(logger_name)
+        logger.handlers.clear()
+        logger.setLevel(logging.NOTSET)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legacy_handler = logging.handlers.RotatingFileHandler(
+                Path(tmpdir) / "twitch_bot.log",
+                maxBytes=1024,
+                backupCount=1,
+                encoding="utf-8",
+            )
+            logger.addHandler(legacy_handler)
+
+            with patch.object(logging_setup, "_LOGS_DIR", Path(tmpdir)):
+                with patch.object(logging_setup, "_TWITCH_LOGGER_NAME", logger_name):
+                    with patch.dict(os.environ, {"TWITCH_SPLIT_RUNTIME_ROLE": "dashboard"}, clear=False):
+                        logging_setup.ensure_twitch_logger_file_handler()
+
+                    handlers = [
+                        handler
+                        for handler in logger.handlers
+                        if isinstance(handler, logging.handlers.RotatingFileHandler)
+                    ]
+
+                    self.assertEqual(len(handlers), 1)
+                    self.assertEqual(
+                        Path(handlers[0].baseFilename),
+                        Path(tmpdir) / "twitch_dashboard.log",
+                    )
 
             for handler in list(logger.handlers):
                 logger.removeHandler(handler)
