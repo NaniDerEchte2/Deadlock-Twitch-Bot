@@ -63,6 +63,22 @@ class AnalyticsDbFingerprintTests(unittest.TestCase):
         self.assertNotIn("example.internal", details["hostHash"])
         self.assertNotIn("analytics", details["databaseHash"])
 
+    def test_fingerprint_ignores_credentials_and_tracks_db_identity_only(self) -> None:
+        dsn_a = "postgresql://demo:supersecret@example.internal:5432/analytics"
+        dsn_b = "postgresql://other:totallydifferent@example.internal:5432/analytics"
+        dsn_c = "postgresql://demo:supersecret@example.internal:5432/analytics_replica"
+
+        fingerprint_a = analytics_db_fingerprint(dsn_a)
+        fingerprint_b = analytics_db_fingerprint(dsn_b)
+        fingerprint_c = analytics_db_fingerprint(dsn_c)
+
+        self.assertEqual(fingerprint_a, fingerprint_b)
+        self.assertNotEqual(fingerprint_a, fingerprint_c)
+        self.assertEqual(
+            analytics_db_fingerprint_details(dsn_a),
+            analytics_db_fingerprint_details(dsn_b),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

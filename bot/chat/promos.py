@@ -52,6 +52,12 @@ _LURKER_TAX_MIN_WATCHTIME_MINUTES = 240
 _LURKER_TAX_MAX_MENTIONS = 2
 
 
+def _sanitize_log_value(value: object | None) -> str:
+    if value is None:
+        return "<none>"
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
 class PromoMixin:
     def _promo_channel_allowed(self, login: str) -> bool:
         if not PROMO_MESSAGES:
@@ -950,9 +956,10 @@ class PromoMixin:
 
         ok = await self._send_promo_message(login, channel_id, now, reason="chat_activity")
         if ok:
+            safe_channel_id = _sanitize_log_value(channel_id)
             log.info(
-                "Chat-Promo gesendet in %s (reason=chat_activity, activity=%d msgs/%d chatters, cooldown=%.1f min)",
-                login,
+                "Chat-Promo gesendet (channel_id=%s, reason=chat_activity, activity=%d msgs/%d chatters, cooldown=%.1f min)",
+                safe_channel_id,
                 msg_count,
                 unique_chatters,
                 cooldown_sec / 60.0,
@@ -997,9 +1004,10 @@ class PromoMixin:
 
         ok = await self._send_promo_message(login, channel_id, now, reason="viewer_spike")
         if ok:
+            safe_channel_id = _sanitize_log_value(channel_id)
             log.info(
-                "Chat-Promo gesendet in %s (reason=viewer_spike, viewers=%d, baseline=%.1f, threshold=%.1f, source=%s:%d, cooldown=%.1f min)",
-                login,
+                "Chat-Promo gesendet (channel_id=%s, reason=viewer_spike, viewers=%d, baseline=%.1f, threshold=%.1f, source=%s:%d, cooldown=%.1f min)",
+                safe_channel_id,
                 current_viewers,
                 baseline,
                 threshold,
@@ -1049,10 +1057,10 @@ class PromoMixin:
 
         self._lurker_tax_mentions_for_session(int(session_id)).update(selected_logins)
         self._mark_promo_sent(login, now, reason="lurker_tax")
-        safe_login = str(login or "").replace("\r", "\\r").replace("\n", "\\n")
+        safe_channel_id = _sanitize_log_value(channel_id)
         log.info(
-            "Lurker-Steuer Reminder gesendet in %s (session=%s, mention_count=%d)",
-            safe_login,
+            "Lurker-Steuer Reminder gesendet (channel_id=%s, session=%s, mention_count=%d)",
+            safe_channel_id,
             session_id,
             len(selected_logins),
         )
@@ -1184,9 +1192,15 @@ class PromoMixin:
                     marker = getattr(self, "_mark_streamer_invite_sent", None)
                     if callable(marker):
                         marker(login)
-                log.info("Chat-Promo gesendet in %s", login)
+                log.info(
+                    "Chat-Promo gesendet (channel_id=%s)",
+                    _sanitize_log_value(broadcaster_id),
+                )
             else:
-                log.debug("Chat-Promo in %s fehlgeschlagen", login)
+                log.debug(
+                    "Chat-Promo fehlgeschlagen (channel_id=%s)",
+                    _sanitize_log_value(broadcaster_id),
+                )
 
     async def _get_live_channels_for_lurker_tax(self) -> list[tuple[str, str]]:
         """Gibt alle live-Kanäle mit aktiver Session zurück, in denen die Lurker Steuer laufen kann."""

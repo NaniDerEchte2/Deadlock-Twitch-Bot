@@ -161,6 +161,7 @@ class TwitchPartnerRecruitMixin:
         # 4. Senden via _send_chat_message (gleiche Methode wie raid_manager)
         success = False
         if hasattr(chat_bot, "_send_chat_message"):
+            suppression = None
 
             class _MockChannel:
                 __slots__ = ("name", "id")
@@ -169,11 +170,32 @@ class TwitchPartnerRecruitMixin:
                     self.name = n
                     self.id = uid
 
-            success = await chat_bot._send_chat_message(
-                _MockChannel(login, user_id),
-                message,
-                source="recruitment",
-            )
+            target_channel = _MockChannel(login, user_id)
+            if hasattr(chat_bot, "_get_outbound_chat_suppression"):
+                try:
+                    suppression = chat_bot._get_outbound_chat_suppression(
+                        target_channel,
+                        "recruitment",
+                    )
+                except Exception:
+                    log.debug(
+                        "PartnerRecruit: konnte Chat-Suppression für %s nicht laden",
+                        login,
+                        exc_info=True,
+                    )
+            if suppression is not None:
+                log.info(
+                    "PartnerRecruit: skippe Outreach an %s wegen gespeicherter Chat-Suppression (code=%s, until=%s)",
+                    login,
+                    suppression.get("reason_code") or "unknown",
+                    suppression.get("suppressed_until") or "-",
+                )
+            else:
+                success = await chat_bot._send_chat_message(
+                    target_channel,
+                    message,
+                    source="recruitment",
+                )
 
         # 5. Versuch loggen (Cooldown setzen auch bei Fehler)
         self._record_outreach(login, user_id, success)

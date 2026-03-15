@@ -153,6 +153,50 @@ class ChatMessageBlacklistTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("recruitment_bot_banned", reason)
         self.assertIn("banned_phone_alias", reason)
 
+    async def test_channel_settings_drop_records_outbound_chat_suppression(self) -> None:
+        handler = _DummyModerationChat()
+        channel = _DummyChannel("realclassik", "471205134")
+        response = _DummyResponse(
+            200,
+            (
+                '{"data":[{"is_sent":false,"drop_reason":{"code":"channel_settings",'
+                '"message":"Your message wasn\'t posted due to conflicts with the channel\'s moderation settings."}}]}'
+            ),
+        )
+
+        with patch.object(handler, "_set_outbound_chat_suppression") as suppression_mock:
+            with patch("aiohttp.ClientSession", return_value=_DummyClientSession(response)):
+                ok = await handler._send_chat_message(channel, "hello", source="recruitment")
+
+        self.assertFalse(ok)
+        suppression_mock.assert_called_once()
+        self.assertEqual(suppression_mock.call_args.args[:2], (channel, "recruitment"))
+        self.assertEqual(
+            suppression_mock.call_args.kwargs["reason_code"],
+            "channel_settings",
+        )
+        self.assertIn(
+            "channel_settings",
+            suppression_mock.call_args.kwargs["reason_detail"],
+        )
+
+    async def test_active_outbound_chat_suppression_skips_http_send(self) -> None:
+        handler = _DummyModerationChat()
+        channel = _DummyChannel("realclassik", "471205134")
+        suppression = {
+            "target_login": "realclassik",
+            "reason_code": "channel_settings",
+            "reason_detail": "channel_settings: moderation settings",
+            "suppressed_until": "2026-03-22T12:00:00+00:00",
+        }
+
+        with patch.object(handler, "_get_outbound_chat_suppression", return_value=suppression):
+            with patch("aiohttp.ClientSession") as client_session_mock:
+                ok = await handler._send_chat_message(channel, "hello", source="recruitment")
+
+        self.assertFalse(ok)
+        client_session_mock.assert_not_called()
+
     def test_raw_chat_health_upsert_uses_boolean_case_flag(self) -> None:
         handler = _DummyModerationChat()
         conn = _RecordingConn()

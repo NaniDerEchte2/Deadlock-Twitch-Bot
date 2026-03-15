@@ -1359,6 +1359,21 @@ class RaidBot:
             return
 
         try:
+            target_channel = self._make_chat_target(to_broadcaster_login, to_broadcaster_id)
+            suppression = self._lookup_outbound_chat_suppression(
+                to_broadcaster_login,
+                to_broadcaster_id,
+                source="partner_raid",
+            )
+            if suppression is not None:
+                log.info(
+                    "Skipping partner raid message to %s due stored chat suppression (code=%s, until=%s)",
+                    to_broadcaster_login,
+                    suppression.get("reason_code") or "unknown",
+                    suppression.get("suppressed_until") or "-",
+                )
+                return
+
             # Erfolgreiche Netzwerk-Raids für dieses Ziel zählen (inkl. aktuellem Raid)
             received_raid_count = self._get_received_network_raid_count(to_broadcaster_id)
             if received_raid_count <= 0:
@@ -1381,14 +1396,8 @@ class RaidBot:
 
             # 4. Nachricht senden
             if hasattr(self.chat_bot, "_send_chat_message"):
-
-                class MockChannel:
-                    def __init__(self, login, uid):
-                        self.name = login
-                        self.id = uid
-
                 success = await self.chat_bot._send_chat_message(
-                    MockChannel(to_broadcaster_login, to_broadcaster_id),
+                    target_channel,
                     message,
                     source="partner_raid",
                 )
@@ -1542,9 +1551,25 @@ class RaidBot:
                 )
                 return
 
+            target_channel = self._make_chat_target(to_broadcaster_login, target_id)
+            suppression = self._lookup_outbound_chat_suppression(
+                to_broadcaster_login,
+                target_id,
+                source="recruitment",
+            )
+            if suppression is not None:
+                log.info(
+                    "Skipping recruitment message to %s due stored chat suppression (code=%s, until=%s)",
+                    to_broadcaster_login,
+                    suppression.get("reason_code") or "unknown",
+                    suppression.get("suppressed_until") or "-",
+                )
+                return
+
             await self.chat_bot.join(to_broadcaster_login, channel_id=target_id)
         except Exception:
             log.debug("Konnte Channel %s nicht vorab beitreten", to_broadcaster_login)
+            target_channel = self._make_chat_target(to_broadcaster_login, target_id or "")
 
         # Follow-Status prüfen (Auto-Follow per API ist bei Twitch nicht mehr möglich).
         if target_id and hasattr(self.chat_bot, "follow_channel"):
@@ -1657,14 +1682,8 @@ class RaidBot:
             # Diese Methode existiert im chat_bot und funktioniert mit EventSub
             try:
                 if hasattr(self.chat_bot, "_send_chat_message"):
-                    # Mock Channel-Objekt für die interne Methode
-                    class MockChannel:
-                        def __init__(self, login, uid):
-                            self.name = login
-                            self.id = uid
-
                     success = await self.chat_bot._send_chat_message(
-                        MockChannel(to_broadcaster_login, target_id),
+                        target_channel,
                         message,
                         source="recruitment",
                     )
@@ -1698,6 +1717,46 @@ class RaidBot:
                 to_broadcaster_login,
                 from_broadcaster_login,
             )
+
+    @staticmethod
+    def _make_chat_target(login: str, user_id: str):
+        class _MockChannel:
+            __slots__ = ("name", "id")
+
+            def __init__(self, name: str, channel_id: str) -> None:
+                self.name = name
+                self.id = channel_id
+
+        return _MockChannel(login, user_id)
+
+    def _lookup_outbound_chat_suppression(
+        self,
+        target_login: str,
+        target_id: str | None,
+        *,
+        source: str,
+    ) -> dict | None:
+        chat_bot = self.chat_bot
+        if not chat_bot or not hasattr(chat_bot, "_get_outbound_chat_suppression"):
+            return None
+
+        resolved_target_id = str(target_id or "").strip()
+        if not resolved_target_id:
+            return None
+
+        try:
+            return chat_bot._get_outbound_chat_suppression(
+                self._make_chat_target(target_login, resolved_target_id),
+                source,
+            )
+        except Exception:
+            log.debug(
+                "Could not load outbound chat suppression for %s (source=%s)",
+                target_login,
+                source,
+                exc_info=True,
+            )
+            return None
 
     def _get_recent_raid_targets(self, from_broadcaster_id: str, days: int) -> set[str]:
         if not from_broadcaster_id or days <= 0:

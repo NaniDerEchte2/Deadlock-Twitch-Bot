@@ -493,6 +493,19 @@ class ChatLurkerTaxReminderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("@gamma", self.handler.announcement_calls[1]["text"])
         self.assertNotIn("@alpha", self.handler.announcement_calls[1]["text"])
 
+    async def test_reminder_logs_channel_id_without_login(self) -> None:
+        with self._conn_patch(), self.assertLogs("TwitchStreams.ChatBot", level="INFO") as captured:
+            ok = await self.handler._maybe_send_lurker_tax_reminder(
+                "partner_one",
+                "1001",
+                now=0.0,
+            )
+
+        self.assertTrue(ok)
+        combined = "\n".join(captured.output)
+        self.assertIn("channel_id=1001", combined)
+        self.assertNotIn("partner_one", combined)
+
     async def test_reminder_requires_chatters_scope(self) -> None:
         self.conn.execute("UPDATE twitch_raid_auth SET scopes = 'chat:read chat:edit'")
         self.conn.commit()

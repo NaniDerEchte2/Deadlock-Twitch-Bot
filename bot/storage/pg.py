@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import contextlib
-import hmac
+import hashlib
 import logging
 import os
 import time
@@ -43,7 +43,8 @@ log = logging.getLogger("TwitchStreams.StoragePG")
 
 KEYRING_SERVICE = "DeadlockBot"
 ENV_DSN = "TWITCH_ANALYTICS_DSN"
-_DB_FINGERPRINT_NAMESPACE = b"deadlock.analytics-db-fingerprint.v1"
+_DB_FINGERPRINT_SALT = b"deadlock.analytics-db-fingerprint.v1"
+_DB_FINGERPRINT_ITERATIONS = 100_000
 
 
 def _normalize_conninfo_value(value: object) -> str:
@@ -83,36 +84,41 @@ def _dsn_conninfo(dsn: str | None = None) -> dict[str, str]:
     return info
 
 
-def analytics_db_fingerprint(dsn: str | None = None) -> str:
-    """Return a stable, non-secret fingerprint for the configured analytics DB."""
+def _analytics_db_identity_fields(dsn: str | None = None) -> tuple[str, str, str]:
+    """Return the non-secret DB identity fields used for stable fingerprints."""
     info = _dsn_conninfo(dsn)
     host = (info.get("host") or "").strip().lower()
     dbname = (info.get("dbname") or info.get("database") or "").strip().lower()
     port = (info.get("port") or "").strip().lower()
-    basis = f"{host}|{port}|{dbname}".encode("utf-8", errors="ignore")
-    digest = hmac.digest(_DB_FINGERPRINT_NAMESPACE, basis, "sha256").hex()[:12]
-    return f"pg:{digest}"
+    return host, port, dbname
+
+
+def _fingerprint_hex(value: str) -> str:
+    """Derive a short stable digest without relying on raw fast hashes."""
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        value.encode("utf-8", errors="ignore"),
+        _DB_FINGERPRINT_SALT,
+        _DB_FINGERPRINT_ITERATIONS,
+        dklen=6,
+    ).hex()
+
+
+def analytics_db_fingerprint(dsn: str | None = None) -> str:
+    """Return a stable, non-secret fingerprint for the configured analytics DB."""
+    host, port, dbname = _analytics_db_identity_fields(dsn)
+    return f"pg:{_fingerprint_hex(f'{host}|{port}|{dbname}')}"
 
 
 def analytics_db_fingerprint_details(dsn: str | None = None) -> dict[str, str]:
     """Expose hashed DB identity details safe enough for logs and health endpoints."""
-    info = _dsn_conninfo(dsn)
-    host = (info.get("host") or "").strip().lower()
-    dbname = (info.get("dbname") or info.get("database") or "").strip().lower()
-    port = (info.get("port") or "").strip().lower()
-
-    def _digest(value: str) -> str:
-        return hmac.digest(
-            _DB_FINGERPRINT_NAMESPACE,
-            value.encode("utf-8", errors="ignore"),
-            "sha256",
-        ).hex()[:12]
+    host, port, dbname = _analytics_db_identity_fields(dsn)
 
     return {
         "fingerprint": analytics_db_fingerprint(dsn),
-        "hostHash": _digest(host or "-"),
-        "databaseHash": _digest(dbname or "-"),
-        "portHash": _digest(port or "-"),
+        "hostHash": _fingerprint_hex(host or "-"),
+        "databaseHash": _fingerprint_hex(dbname or "-"),
+        "portHash": _fingerprint_hex(port or "-"),
         "engine": "postgres",
     }
 

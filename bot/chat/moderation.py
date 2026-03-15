@@ -2,7 +2,7 @@ import json
 import logging
 import re
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from ..core.chat_bots import is_known_chat_bot
 from ..storage import get_conn, load_active_partner
@@ -20,6 +20,11 @@ from .constants import (
 
 log = logging.getLogger("TwitchStreams.ChatBot")
 _RAW_CHAT_HEALTH_UNSET = object()
+_OUTBOUND_CHAT_CHANNEL_SETTINGS_SUPPRESSION_SEC = {
+    "promo": 7 * 24 * 3600,
+    "recruitment": 7 * 24 * 3600,
+    "partner_raid": 3 * 24 * 3600,
+}
 
 
 class ModerationMixin:
@@ -621,6 +626,216 @@ class ModerationMixin:
         return name.lower().lstrip("#")
 
     @staticmethod
+    def _normalize_outbound_chat_source(source: str | None) -> str:
+        return str(source or "").strip().lower()
+
+    def _ensure_outbound_chat_suppression_schema(self) -> bool:
+        if getattr(self, "_outbound_chat_suppression_schema_ok", False):
+            return True
+        try:
+            with get_conn() as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS twitch_outbound_chat_suppressions (
+                        target_login TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        target_id TEXT,
+                        reason_code TEXT NOT NULL,
+                        reason_detail TEXT,
+                        suppressed_until TIMESTAMPTZ NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (target_login, source)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_twitch_outbound_chat_suppressions_until
+                    ON twitch_outbound_chat_suppressions (suppressed_until)
+                    """
+                )
+            self._outbound_chat_suppression_schema_ok = True
+            return True
+        except Exception:
+            log.debug(
+                "Konnte Outbound-Chat-Suppression-Schema nicht sicherstellen",
+                exc_info=True,
+            )
+            return False
+
+    def _get_outbound_chat_suppression_ttl(
+        self,
+        source: str | None,
+        reason_code: str | None,
+    ) -> timedelta | None:
+        source_tag = self._normalize_outbound_chat_source(source)
+        reason_tag = str(reason_code or "").strip().lower()
+        ttl_seconds = _OUTBOUND_CHAT_CHANNEL_SETTINGS_SUPPRESSION_SEC.get(source_tag)
+        if reason_tag != "channel_settings" or ttl_seconds is None:
+            return None
+        return timedelta(seconds=int(ttl_seconds))
+
+    def _set_outbound_chat_suppression(
+        self,
+        channel,
+        source: str | None,
+        *,
+        reason_code: str,
+        reason_detail: str | None,
+    ) -> None:
+        source_tag = self._normalize_outbound_chat_source(source)
+        login = self._normalize_channel_login_safe(channel)
+        ttl = self._get_outbound_chat_suppression_ttl(source_tag, reason_code)
+        if not login or ttl is None or not self._ensure_outbound_chat_suppression_schema():
+            return
+
+        target_id = str(getattr(channel, "id", "") or "").strip() or None
+        now = datetime.now(UTC)
+        suppressed_until = now + ttl
+        detail = self._truncate_raw_chat_error(reason_detail, limit=240)
+
+        try:
+            with get_conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO twitch_outbound_chat_suppressions (
+                        target_login,
+                        source,
+                        target_id,
+                        reason_code,
+                        reason_detail,
+                        suppressed_until,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (target_login, source) DO UPDATE SET
+                        target_id = EXCLUDED.target_id,
+                        reason_code = EXCLUDED.reason_code,
+                        reason_detail = EXCLUDED.reason_detail,
+                        suppressed_until = EXCLUDED.suppressed_until,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (
+                        login,
+                        source_tag,
+                        target_id,
+                        str(reason_code or "").strip() or "unknown",
+                        detail,
+                        suppressed_until,
+                        now,
+                        now,
+                    ),
+                )
+        except Exception:
+            log.debug(
+                "Konnte Outbound-Chat-Suppression nicht speichern fuer %s (source=%s)",
+                login,
+                source_tag,
+                exc_info=True,
+            )
+            return
+
+        log.info(
+            "Outbound-Chat fuer %s unterdrueckt (source=%s, code=%s, until=%s)",
+            login,
+            source_tag,
+            str(reason_code or "").strip() or "unknown",
+            suppressed_until.isoformat(timespec="seconds"),
+        )
+
+    def _get_outbound_chat_suppression(self, channel, source: str | None) -> dict | None:
+        source_tag = self._normalize_outbound_chat_source(source)
+        if source_tag not in _OUTBOUND_CHAT_CHANNEL_SETTINGS_SUPPRESSION_SEC:
+            return None
+
+        login = self._normalize_channel_login_safe(channel)
+        if not login or not self._ensure_outbound_chat_suppression_schema():
+            return None
+
+        try:
+            with get_conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT target_id, reason_code, reason_detail, suppressed_until
+                    FROM twitch_outbound_chat_suppressions
+                    WHERE target_login = ?
+                      AND source = ?
+                      AND suppressed_until > ?
+                    LIMIT 1
+                    """,
+                    (login, source_tag, datetime.now(UTC)),
+                ).fetchone()
+        except Exception:
+            log.debug(
+                "Konnte Outbound-Chat-Suppression nicht laden fuer %s (source=%s)",
+                login,
+                source_tag,
+                exc_info=True,
+            )
+            return None
+
+        if not row:
+            return None
+
+        if hasattr(row, "keys"):
+            target_id = row["target_id"]
+            reason_code = row["reason_code"]
+            reason_detail = row["reason_detail"]
+            suppressed_until = row["suppressed_until"]
+        else:
+            target_id, reason_code, reason_detail, suppressed_until = row
+
+        return {
+            "target_login": login,
+            "target_id": str(target_id or "").strip() or None,
+            "source": source_tag,
+            "reason_code": str(reason_code or "").strip() or "unknown",
+            "reason_detail": str(reason_detail or "").strip() or None,
+            "suppressed_until": suppressed_until,
+        }
+
+    def _log_outbound_chat_suppression_skip(
+        self,
+        channel,
+        source: str | None,
+        suppression: dict | None,
+    ) -> None:
+        if not isinstance(suppression, dict):
+            return
+
+        cache = getattr(self, "_outbound_chat_suppression_log_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._outbound_chat_suppression_log_cache = cache
+
+        source_tag = self._normalize_outbound_chat_source(source)
+        target_login = str(suppression.get("target_login") or self._normalize_channel_login_safe(channel) or "-")
+        reason_code = str(suppression.get("reason_code") or "unknown")
+        cache_key = (target_login, source_tag, reason_code)
+        now = time.monotonic()
+        last_logged = float(cache.get(cache_key, 0.0) or 0.0)
+        if now - last_logged < 3600.0:
+            return
+        cache[cache_key] = now
+
+        suppressed_until = suppression.get("suppressed_until")
+        if isinstance(suppressed_until, datetime):
+            until_text = suppressed_until.isoformat(timespec="seconds")
+        else:
+            until_text = str(suppressed_until or "-")
+        detail = self._truncate_raw_chat_error(suppression.get("reason_detail"), limit=160) or "-"
+
+        log.info(
+            "Outbound-Chat-Skip fuer %s (source=%s, code=%s, until=%s, detail=%s)",
+            target_login,
+            source_tag or "-",
+            reason_code,
+            until_text,
+            detail,
+        )
+
+    @staticmethod
     def _looks_like_ban_error(status: int | None, text: str) -> bool:
         if not text:
             return False
@@ -721,6 +936,12 @@ class ModerationMixin:
         """Blacklist outbound targets when Helix accepts the request but drops the message as banned."""
         detail_parts = [part.strip() for part in (drop_code, drop_message) if str(part or "").strip()]
         detail_text = ": ".join(detail_parts)
+        self._set_outbound_chat_suppression(
+            channel,
+            source,
+            reason_code=drop_code,
+            reason_detail=detail_text,
+        )
         if self._should_blacklist_for_source(source) and self._looks_like_ban_error(
             None, detail_text
         ):
@@ -734,6 +955,11 @@ class ModerationMixin:
         Erfordert ``moderator:manage:announcements`` Scope.
         Fallback: normale Chat-Nachricht, falls Announcement fehlschlägt.
         """
+        suppression = self._get_outbound_chat_suppression(channel, source)
+        if suppression is not None:
+            self._log_outbound_chat_suppression_skip(channel, source, suppression)
+            return False
+
         b_id = None
         if hasattr(channel, "id"):
             b_id = str(channel.id)
@@ -813,6 +1039,11 @@ class ModerationMixin:
     async def _send_chat_message(self, channel, text: str, source: str | None = None) -> bool:
         """Best-effort Chat-Nachricht senden (EventSub-kompatibel)."""
         try:
+            suppression = self._get_outbound_chat_suppression(channel, source)
+            if suppression is not None:
+                self._log_outbound_chat_suppression_skip(channel, source, suppression)
+                return False
+
             # 1. Direktes .send() (z.B. Context, 2.x Channel oder 3.x Broadcaster)
             if channel and hasattr(channel, "send"):
                 try:

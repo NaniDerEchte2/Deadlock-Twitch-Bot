@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from bot.chat.promos import PromoMixin
 from bot.promo_mode import ensure_global_promo_mode_storage, save_global_promo_mode
@@ -35,6 +35,18 @@ class _DummyPromoChat(PromoMixin):
                 "channel_id": str(getattr(channel, "id", "") or ""),
                 "text": text,
                 "color": color,
+                "source": source,
+            }
+        )
+        return True
+
+    async def _send_chat_message(self, channel, text: str, source: str = ""):
+        self.announcement_calls.append(
+            {
+                "login": str(getattr(channel, "name", "") or ""),
+                "channel_id": str(getattr(channel, "id", "") or ""),
+                "text": text,
+                "color": "",
                 "source": source,
             }
         )
@@ -119,6 +131,39 @@ class ChatPromoOverrideTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(ok)
         self.assertEqual(self.handler.announcement_calls[0]["text"], "Global Event ohne Invite")
+
+    async def test_sent_promo_logs_channel_id_without_login(self) -> None:
+        self.handler._last_promo_sent["partner_one"] = 0.0
+        with patch(
+            "bot.chat.promos.PROMO_MESSAGES",
+            ["Default Fallback {invite}"],
+        ), patch(
+            "bot.chat.promos._PROMO_ACTIVITY_ENABLED",
+            False,
+        ), patch(
+            "bot.chat.promos.PROMO_VIEWER_SPIKE_ENABLED",
+            False,
+        ), patch(
+            "bot.core.partner_utils.is_partner_channel_for_chat_tracking",
+            return_value=True,
+        ), patch.object(
+            self.handler,
+            "_get_live_channels_for_promo",
+            AsyncMock(return_value=[("partner_one", "1001")]),
+        ), patch.object(
+            self.handler,
+            "_get_live_channels_for_lurker_tax",
+            AsyncMock(return_value=[]),
+        ), self.assertLogs("TwitchStreams.ChatBot", level="INFO") as captured:
+            await self.handler._send_promo_if_due()
+
+        combined = "\n".join(captured.output)
+        self.assertIn("channel_id=1001", combined)
+        self.assertNotIn("partner_one", combined)
+        self.assertEqual(
+            self.handler.announcement_calls[0]["text"],
+            "Default Fallback https://discord.gg/example",
+        )
 
     async def test_inactive_global_event_keeps_streamer_override(self) -> None:
         self.conn.execute(
