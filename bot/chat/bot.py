@@ -1186,12 +1186,22 @@ async def create_twitch_chat_bot(
             """
         ).fetchall()
 
-        # Monitored-Only Channels abrufen (kein Auth nötig)
+        # Monitored-Only Channels abrufen (kein Auth nötig).
+        # Ohne offene Session würde der Chat-Bot zwar joinen, könnte eingehende
+        # Nachrichten aber nicht einer Session zuordnen und nur skip_missing_session
+        # loggen. Deshalb hier nur Channels laden, für die Monitoring bereits eine
+        # offene Session angelegt hat.
         monitored_rows = conn.execute(
             """
-            SELECT twitch_login 
-            FROM twitch_streamers 
-            WHERE is_monitored_only = 1
+            SELECT s.twitch_login
+              FROM twitch_streamers s
+             WHERE s.is_monitored_only = 1
+               AND EXISTS (
+                    SELECT 1
+                      FROM twitch_stream_sessions sess
+                     WHERE LOWER(sess.streamer_login) = LOWER(s.twitch_login)
+                       AND sess.ended_at IS NULL
+               )
             """
         ).fetchall()
 
@@ -1214,7 +1224,9 @@ async def create_twitch_chat_bot(
             continue
         initial_channels.append(login_norm)
 
-    # 2. Monitored-Only adden (immer joinen, unabhängig von Live-Status, da wir keinen Webhook haben)
+    # 2. Monitored-Only adden, aber nur wenn Monitoring bereits eine offene
+    # Session kennt. Neue Channels werden vom Scout zuerst in die DB geschrieben,
+    # dann wird dort sofort eine Session vor dem Chat-Join erzeugt.
     for row in monitored_rows:
         login = str(row[0]).strip().lower()
         if login and login not in initial_channels:

@@ -524,7 +524,20 @@ class _AnalyticsChatDeepMixin:
                     """,
                     [session_id],
                 ).fetchall()
-                viewer_map: dict[int, int] = {int(r[0]): int(r[1]) for r in viewer_rows}
+                viewer_map: dict[int, int] = {}
+                for viewer_row in viewer_rows:
+                    minute_raw = viewer_row[0]
+                    viewers_raw = viewer_row[1]
+                    if minute_raw is None or viewers_raw is None:
+                        continue
+                    try:
+                        minute = int(minute_raw)
+                        viewers = max(0, int(viewers_raw))
+                    except (TypeError, ValueError):
+                        continue
+                    if minute < 0:
+                        continue
+                    viewer_map[minute] = viewers
 
                 # Build timeline
                 timeline: list[dict] = []

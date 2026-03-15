@@ -544,6 +544,12 @@ class TwitchBaseCog(commands.Cog):
 
                     conn.commit()
 
+                if new_logins:
+                    await self._prime_monitored_only_sessions(
+                        streams=streams,
+                        logins=new_logins,
+                    )
+
                 # --- 2. Cleanup OLD targets ---
                 # Remove monitored channels that are NO LONGER in the live Deadlock list.
                 # This covers: Offline, Switched Game, Removed 'de' tag.
@@ -654,6 +660,57 @@ class TwitchBaseCog(commands.Cog):
 
             # Run every 5 minutes
             await asyncio.sleep(300)
+
+    async def _prime_monitored_only_sessions(
+        self,
+        *,
+        streams: list[dict[str, object]],
+        logins: list[str],
+    ) -> None:
+        """Create sessions for freshly discovered monitored-only channels before chat joins them."""
+        if not logins:
+            return
+
+        ensure_stream_session = getattr(self, "_ensure_stream_session", None)
+        if not callable(ensure_stream_session):
+            return
+
+        streams_by_login: dict[str, dict[str, object]] = {}
+        for stream in streams:
+            login = str(stream.get("user_login") or "").strip().lower()
+            if login:
+                streams_by_login[login] = stream
+
+        primed = 0
+        for login in logins:
+            stream = streams_by_login.get(str(login or "").strip().lower())
+            if not stream:
+                continue
+
+            try:
+                session_id = await ensure_stream_session(
+                    login=str(login).strip().lower(),
+                    stream=stream,
+                    previous_state={},
+                    twitch_user_id=str(stream.get("user_id") or "").strip() or None,
+                )
+            except Exception:
+                log.debug(
+                    "Scout: monitored-only session bootstrap failed for %s",
+                    login,
+                    exc_info=True,
+                )
+                continue
+
+            if session_id is not None:
+                primed += 1
+
+        if primed and primed != len(logins):
+            log.debug(
+                "Scout: primed monitored-only sessions for %d/%d new channels.",
+                primed,
+                len(logins),
+            )
 
     def _register_persistent_raid_auth_views(self) -> None:
         """Registriert persistente RaidAuthGenerateViews für alle Streamer in der DB.

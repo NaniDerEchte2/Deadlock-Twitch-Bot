@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import unittest
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -157,6 +158,45 @@ class _DummyViewers(_AnalyticsViewersMixin):
 class _DummyV2(AnalyticsV2Mixin):
     def _require_v2_auth(self, request):
         return None
+
+    def _require_extended_plan(self, request):
+        return None
+
+
+class _ChatHypeTimelineConn:
+    def execute(self, sql, params=None):
+        if "FROM twitch_stream_sessions WHERE id = ?" in sql:
+            return _FakeCursor(
+                [
+                    (
+                        1,
+                        "target",
+                        datetime(2026, 2, 1, 12, 0, tzinfo=UTC),
+                        3600,
+                        "Hype Session",
+                    )
+                ]
+            )
+        if "time_bucket('1 minute', m.message_ts) AS bucket" in sql:
+            return _FakeCursor(
+                [
+                    (
+                        datetime(2026, 2, 1, 12, 0, tzinfo=UTC),
+                        8,
+                        3,
+                    ),
+                    (
+                        datetime(2026, 2, 1, 12, 1, tzinfo=UTC),
+                        4,
+                        2,
+                    ),
+                ]
+            )
+        if "FROM twitch_session_viewers" in sql:
+            return _FakeCursor([(None, 77), (0, 42), ("1", 43)])
+        if "FROM twitch_stream_sessions s" in sql and "LIMIT 10" in sql:
+            return _FakeCursor([])
+        raise AssertionError(f"Unexpected SQL in chat hype timeline test: {sql[:200]}")
 
 
 class RaidAnalyticsRegressionTests(unittest.IsolatedAsyncioTestCase):
@@ -749,6 +789,32 @@ class ViewerDirectoryGapRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["days"], 30)
         total_segment_viewers = sum(item["count"] for item in payload["segments"].values())
         self.assertEqual(total_segment_viewers, 1)
+
+
+class ChatHypeTimelineRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_hype_timeline_skips_null_viewer_minutes(self) -> None:
+        handler = _DummyV2()
+        request = SimpleNamespace(query={"streamer": "target", "session_id": "1"})
+
+        with (
+            patch(
+                "bot.analytics.api_chat_deep.storage.get_conn",
+                return_value=_ConnContext(_ChatHypeTimelineConn()),
+            ),
+            patch(
+                "bot.analytics.api_chat_deep.build_raw_chat_status",
+                return_value={"available": True, "suspectedIngestionIssue": False},
+            ),
+        ):
+            response = await handler._api_v2_chat_hype_timeline(request)
+
+        payload = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(response.status, 200)
+        self.assertEqual(len(payload["timeline"]), 2)
+        self.assertEqual(payload["timeline"][0]["minute"], 0)
+        self.assertEqual(payload["timeline"][0]["viewers"], 42)
+        self.assertEqual(payload["timeline"][1]["minute"], 1)
+        self.assertEqual(payload["timeline"][1]["viewers"], 43)
 
 
 class SessionDetailRegressionTests(unittest.IsolatedAsyncioTestCase):
