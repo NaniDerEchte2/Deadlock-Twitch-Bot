@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import os
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _LOGS_DIR = _PROJECT_ROOT / "logs"
 _TWITCH_LOGGER_NAME = "TwitchStreams"
-_TWITCH_LOG_FILENAME = "twitch_bot.log"
+_DEFAULT_TWITCH_LOG_FILENAME = "twitch_bot.log"
+_DASHBOARD_TWITCH_LOG_FILENAME = "twitch_dashboard.log"
+_MANAGED_TWITCH_LOG_FILENAMES = frozenset(
+    {
+        _DEFAULT_TWITCH_LOG_FILENAME,
+        _DASHBOARD_TWITCH_LOG_FILENAME,
+    }
+)
 _DEFAULT_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 
@@ -46,17 +54,32 @@ def _handler_file_name(handler: logging.Handler) -> str:
     return Path(str(base_filename)).name
 
 
+def current_twitch_log_filename() -> str:
+    explicit_value = Path(str(os.getenv("TWITCH_LOG_FILENAME") or "")).name
+    if explicit_value:
+        return explicit_value
+
+    split_runtime_role = str(os.getenv("TWITCH_SPLIT_RUNTIME_ROLE") or "").strip().lower()
+    if split_runtime_role == "dashboard":
+        return _DASHBOARD_TWITCH_LOG_FILENAME
+    return _DEFAULT_TWITCH_LOG_FILENAME
+
+
 def ensure_twitch_logger_file_handler(*, level: int = logging.INFO) -> logging.Logger:
     logger = logging.getLogger(_TWITCH_LOGGER_NAME)
     if logger.level == logging.NOTSET or logger.level > level:
         logger.setLevel(level)
 
-    file_path = log_path(_TWITCH_LOG_FILENAME)
+    target_filename = current_twitch_log_filename()
+    file_path = log_path(target_filename)
     formatter = logging.Formatter(_DEFAULT_LOG_FORMAT)
     stale_handlers: list[logging.Handler] = []
 
     for handler in logger.handlers:
-        if _handler_file_name(handler) != _TWITCH_LOG_FILENAME:
+        handler_filename = _handler_file_name(handler)
+        if handler_filename != target_filename:
+            if handler_filename in _MANAGED_TWITCH_LOG_FILENAMES:
+                stale_handlers.append(handler)
             continue
         if not _same_file_handler_target(handler, file_path):
             stale_handlers.append(handler)

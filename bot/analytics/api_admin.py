@@ -709,6 +709,7 @@ class _AnalyticsAdminMixin:
     def _admin_error_log_candidates() -> tuple[Path, ...]:
         candidates = [
             log_path("twitch_bot.log"),
+            log_path("twitch_dashboard.log"),
             log_path("twitch_service_warnings.log"),
             log_path("twitch_autobans.log"),
         ]

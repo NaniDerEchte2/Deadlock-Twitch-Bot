@@ -27,7 +27,7 @@ def _command_payload_hash(bot: commands.Bot, guild: discord.Object) -> str:
     payload.sort(key=lambda c: c.get("name", ""))
     return hashlib.md5(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
-log = ensure_twitch_logger_file_handler()
+log = logging.getLogger("TwitchStreams")
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -100,6 +100,8 @@ async def _sync_app_commands_after_ready(bot: commands.Bot) -> None:
 
 async def setup(bot: commands.Bot):
     """Add the Twitch stream cog to the master bot, and register the !twl proxy command exactly once."""
+    ensure_twitch_logger_file_handler()
+
     from .cog import (
         TwitchStreamCog,
     )  # Local import to avoid self-import warnings during extension discovery
@@ -174,6 +176,8 @@ async def setup(bot: commands.Bot):
 async def teardown(bot: commands.Bot):
     """Purge twitch_cog modules from sys.modules so hot-reload works correctly."""
     import sys
+
+    ensure_twitch_logger_file_handler()
 
     to_remove = [
         name for name in sys.modules

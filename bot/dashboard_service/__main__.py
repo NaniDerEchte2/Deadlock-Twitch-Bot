@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 
 from ..core.constants import log
+from ..logging_setup import ensure_twitch_logger_file_handler
 from .app import run_dashboard_service
 
 
 def main() -> None:
+    ensure_twitch_logger_file_handler()
     try:
         asyncio.run(run_dashboard_service())
     except KeyboardInterrupt:

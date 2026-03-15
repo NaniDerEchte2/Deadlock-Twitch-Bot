@@ -1,4 +1,6 @@
+import contextlib
 import unittest
+from unittest.mock import patch
 
 from bot.api.twitch_api import TwitchAPI
 from bot.api.twitch_auth import TwitchClientConfigError
@@ -42,6 +44,23 @@ class _RecordingSession:
         if not self._responses:
             raise AssertionError("No fake response configured")
         return self._responses.pop(0)
+
+
+class _FakeCursor:
+    def __init__(self, rows: list[object] | None = None) -> None:
+        self._rows = list(rows or [])
+
+    def fetchall(self) -> list[object]:
+        return list(self._rows)
+
+
+class _RecordingConn:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def execute(self, sql: str, params=()):
+        self.calls.append((sql, tuple(params or ())))
+        return _FakeCursor()
 
 
 class TwitchApiAuthGuardTests(unittest.IsolatedAsyncioTestCase):
@@ -111,3 +130,25 @@ class RaidAuthManagerAuthGuardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(session.calls), 1)
         self.assertTrue(manager.is_client_auth_blocked())
+
+    async def test_refresh_all_tokens_uses_boolean_safe_needs_reauth_filter(self) -> None:
+        manager = RaidAuthManager(
+            client_id="client-id",
+            client_secret="secret",
+            redirect_uri="https://raid.example.com/twitch/raid/callback",
+        )
+        fake_conn = _RecordingConn()
+
+        with patch(
+            "bot.raid.auth.get_conn",
+            side_effect=lambda: contextlib.nullcontext(fake_conn),
+        ):
+            refreshed = await manager.refresh_all_tokens(_RecordingSession())
+
+        self.assertEqual(refreshed, 0)
+        refresh_queries = [
+            sql for sql, _ in fake_conn.calls if "FROM twitch_raid_auth" in sql and "SELECT twitch_user_id" in sql
+        ]
+        self.assertEqual(len(refresh_queries), 1)
+        self.assertIn("needs_reauth IS NOT TRUE", refresh_queries[0])
+        self.assertNotIn("COALESCE(needs_reauth, 0)", refresh_queries[0])

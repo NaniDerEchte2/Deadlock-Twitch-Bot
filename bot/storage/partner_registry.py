@@ -282,6 +282,22 @@ def upsert_streamer_identity(
         if is_on_discord is not None or normalized_discord_user_id
         else None
     )
+    if normalized_discord_user_id:
+        conn.execute(
+            """
+            UPDATE twitch_streamer_identities
+            SET discord_user_id = NULL,
+                discord_display_name = NULL,
+                is_on_discord = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE discord_user_id = ?
+              AND twitch_user_id <> ?
+            """,
+            (
+                normalized_discord_user_id,
+                normalized_user_id,
+            ),
+        )
     conn.execute(
         """
         INSERT INTO twitch_streamer_identities (
@@ -1283,6 +1299,27 @@ def migrate_legacy_partner_registry(conn: Any) -> dict[str, int]:
                 live_ping_role_id,
                 COALESCE(live_ping_enabled, 1) AS live_ping_enabled
             FROM twitch_streamers
+            ORDER BY
+                CASE
+                    WHEN (
+                        (
+                            COALESCE(manual_verified_permanent, 0) = 1
+                            OR manual_verified_until IS NOT NULL
+                            OR manual_verified_at IS NOT NULL
+                        )
+                        AND COALESCE(manual_partner_opt_out, 0) = 0
+                        AND COALESCE(is_monitored_only, 0) = 0
+                        AND archived_at IS NULL
+                    ) THEN 2
+                    WHEN (
+                        COALESCE(manual_verified_permanent, 0) = 1
+                        OR manual_verified_until IS NOT NULL
+                        OR manual_verified_at IS NOT NULL
+                    ) THEN 1
+                    ELSE 0
+                END,
+                COALESCE(manual_verified_at, created_at, CURRENT_TIMESTAMP),
+                LOWER(twitch_login)
             """
         ).fetchall()
     except Exception:

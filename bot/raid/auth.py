@@ -671,7 +671,7 @@ class RaidAuthManager:
                        enc_version, token_expires_at
                 FROM twitch_raid_auth
                 WHERE raid_enabled IS TRUE
-                  AND COALESCE(needs_reauth, 0) <> 1
+                  AND needs_reauth IS NOT TRUE
                 """
             ).fetchall()
 

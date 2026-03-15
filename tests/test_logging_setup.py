@@ -1,6 +1,8 @@
 import logging
 import logging.handlers
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -93,6 +95,25 @@ class LoggingSetupTests(unittest.TestCase):
                 logger.removeHandler(handler)
                 handler.close()
         logger.setLevel(logging.NOTSET)
+
+    def test_importing_bot_package_does_not_attach_file_handler_by_default(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import logging, logging.handlers, bot; "
+                    "logger = logging.getLogger('TwitchStreams'); "
+                    "print(sum(isinstance(h, logging.handlers.RotatingFileHandler) for h in logger.handlers))"
+                ),
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.stdout.strip(), "0")
 
 
 if __name__ == "__main__":
