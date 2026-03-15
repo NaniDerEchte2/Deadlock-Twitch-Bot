@@ -12,9 +12,9 @@ from ..core.chat_bots import build_known_chat_bot_not_in_clause, is_known_chat_b
 from .. import storage as storage_oauth  # SQLite — OAuth tokens & raid auth state
 from ..storage import pg as storage  # PostgreSQL — analytics data
 
-# NOTE: analytics:read:games scope is requested but intentionally unused.
-# It provides global Twitch game metrics (not streamer-specific), which are
-# not actionable for individual streamers and therefore not queried.
+# NOTE: Twitch game-owner analytics are intentionally unused.
+# The data is global and tied to owned/managed games, not to individual
+# streamer channels, so we do not request or query it in this product.
 
 log = logging.getLogger("TwitchStreams.Analytics")
 
@@ -239,6 +239,7 @@ class TwitchAnalyticsMixin:
     ) -> tuple[int, str, list[dict]] | None:
         """Pollt Chatters für einen Streamer via Helix API (nur wenn Token + moderator:read:chatters Scope vorhanden)."""
         chatters = []
+        missing_streamer_scope = False
 
         # 1. Versuch: Offizielle API mit Token (wenn vorhanden)
         if token:
@@ -266,16 +267,50 @@ class TwitchAnalyticsMixin:
                         exc_info=True,
                     )
             else:
+                missing_streamer_scope = True
+
+        # 2. Fallback: Bot-Token verwenden, wenn der Bot den Channel bereits überwacht
+        bot_fallback_used = False
+        if not chatters:
+            bot_token, bot_id, bot_scopes = await self._resolve_bot_chatters_fallback(login)
+            if bot_token and bot_id and (
+                not bot_scopes or "moderator:read:chatters" in bot_scopes
+            ):
+                try:
+                    chatters = await self.api.get_chatters(
+                        broadcaster_id=user_id,
+                        moderator_id=bot_id,
+                        user_token=bot_token,
+                    )
+                    bot_fallback_used = bool(chatters)
+                    if chatters:
+                        log.debug(
+                            "Chatters-Poller: %d Chatters via Bot-Fallback für %s",
+                            len(chatters),
+                            login,
+                        )
+                except Exception:
+                    log.warning(
+                        "Chatters-Poller: Bot-Fallback via Helix API fehlgeschlagen für %s",
+                        login,
+                        exc_info=True,
+                    )
+
+        if not chatters:
+            if missing_streamer_scope:
                 key = (user_id, session_id)
                 if key not in self._chatters_scope_warned:
                     self._chatters_scope_warned.add(key)
                     log.warning(
                         "Chatters-Poller: %s missing required 'moderator:read:chatters' scope. "
-                        "Streamer must re-authorize.",
+                        "Streamer re-auth or bot-moderator fallback is required.",
                         login,
                     )
-        if not chatters:
             return None
+
+        if bot_fallback_used and missing_streamer_scope:
+            key = (user_id, session_id)
+            self._chatters_scope_warned.discard(key)
 
         log.debug(
             "Chatters-Poller: %d Chatters für %s (session %s)",
@@ -284,6 +319,65 @@ class TwitchAnalyticsMixin:
             session_id,
         )
         return (session_id, login, chatters)
+
+    @staticmethod
+    def _normalize_scope_values(scopes_raw) -> set[str]:
+        if isinstance(scopes_raw, str):
+            return {scope.strip().lower() for scope in scopes_raw.split() if scope.strip()}
+        if isinstance(scopes_raw, (list, tuple, set)):
+            return {
+                str(scope).strip().lower()
+                for scope in scopes_raw
+                if str(scope).strip()
+            }
+        return set()
+
+    async def _resolve_bot_chatters_fallback(
+        self,
+        login: str,
+    ) -> tuple[str | None, str | None, set[str]]:
+        login_norm = str(login or "").strip().lower()
+        if not login_norm:
+            return None, None, set()
+
+        chat_bot = getattr(self, "_twitch_chat_bot", None)
+        if not chat_bot:
+            return None, None, set()
+
+        monitored = {
+            str(channel or "").strip().lower()
+            for channel in (getattr(chat_bot, "_monitored_streamers", set()) or set())
+            if str(channel or "").strip()
+        }
+        if login_norm not in monitored:
+            return None, None, set()
+
+        token_mgr = getattr(self, "_bot_token_manager", None)
+        if not token_mgr:
+            return None, None, set()
+
+        try:
+            token, manager_bot_id = await token_mgr.get_valid_token()
+        except Exception:
+            log.debug("Chatters-Poller: konnte Bot-Token nicht laden", exc_info=True)
+            return None, None, set()
+
+        token = str(token or "").strip()
+        if token.lower().startswith("oauth:"):
+            token = token[6:]
+        bot_id = (
+            str(
+                manager_bot_id
+                or getattr(chat_bot, "bot_id_safe", None)
+                or getattr(chat_bot, "bot_id", None)
+                or ""
+            ).strip()
+            or None
+        )
+        bot_scopes = self._normalize_scope_values(getattr(token_mgr, "scopes", ()))
+        if not token or not bot_id:
+            return None, bot_id, bot_scopes
+        return token, bot_id, bot_scopes
 
     @tasks.loop(seconds=30)
     async def collect_chatters_data(self):

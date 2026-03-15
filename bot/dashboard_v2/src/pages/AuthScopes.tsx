@@ -21,7 +21,6 @@ const demoScopes = new Set<string>([
   'moderator:manage:chat_messages',
   'moderator:manage:banned_users',
   'moderator:read:followers',
-  'analytics:read:games',
 ]);
 
 function ScopeCard({ scope }: { scope: ScopeStatus }) {

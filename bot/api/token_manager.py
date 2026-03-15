@@ -45,6 +45,7 @@ class TwitchBotTokenManager:
         self.refresh_token: str | None = None
         self.expires_at: datetime | None = None
         self.bot_id: str | None = None
+        self.scopes: set[str] = set()
 
         self._lock = asyncio.Lock()
         self._refresh_task: asyncio.Task | None = None
@@ -154,10 +155,15 @@ class TwitchBotTokenManager:
                     self.bot_id = data.get("user_id") or self.bot_id
 
                     scopes = data.get("scopes", [])
+                    self.scopes = {
+                        str(scope).strip().lower()
+                        for scope in scopes
+                        if str(scope).strip()
+                    }
                     log.info(
                         "Bot auth validated. ID: %s, scope_count=%d",
                         self.bot_id,
-                        len(scopes),
+                        len(self.scopes),
                     )
 
                     expires_in = data.get("expires_in", 0)
@@ -223,6 +229,19 @@ class TwitchBotTokenManager:
                     data = await resp.json()
                     self.access_token = data.get("access_token")
                     self.refresh_token = data.get("refresh_token", self.refresh_token)
+                    scopes_raw = data.get("scope")
+                    if isinstance(scopes_raw, str):
+                        self.scopes = {
+                            str(scope).strip().lower()
+                            for scope in scopes_raw.split()
+                            if str(scope).strip()
+                        }
+                    elif isinstance(scopes_raw, list):
+                        self.scopes = {
+                            str(scope).strip().lower()
+                            for scope in scopes_raw
+                            if str(scope).strip()
+                        }
 
                     expires_in = data.get("expires_in", 0)
                     if expires_in:

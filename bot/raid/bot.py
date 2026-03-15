@@ -54,7 +54,6 @@ RAID_SCOPES = [
     "moderator:manage:banned_users",
     "moderator:manage:chat_messages",
     "channel:read:subscriptions",
-    "analytics:read:games",
     "channel:manage:moderators",
     "channel:bot",
     "chat:read",
@@ -1138,6 +1137,94 @@ class RaidBot:
                 offline_pending_s,
             )
 
+    def _clear_superseded_pending_raids(
+        self,
+        *,
+        from_broadcaster_login: str,
+        current_target_id: str,
+    ) -> None:
+        normalized_from = str(from_broadcaster_login or "").strip().lower()
+        if not normalized_from:
+            return
+
+        current_target_key = str(current_target_id or "").strip()
+        superseded: list[tuple[str, tuple[str, dict | None, float, bool, int, float | None]]] = []
+        for to_id, pending in list(self._pending_raids.items()):
+            if str(to_id) == current_target_key:
+                continue
+            pending_from = str(pending[0] if len(pending) > 0 else "").strip().lower()
+            if pending_from != normalized_from:
+                continue
+            superseded.append((str(to_id), pending))
+
+        for to_id, pending in superseded:
+            removed = self._pending_raids.pop(to_id, None)
+            if removed is None:
+                continue
+            target_stream_data = pending[1] if len(pending) > 1 else None
+            old_target_login = ""
+            if isinstance(target_stream_data, dict):
+                old_target_login = str(target_stream_data.get("user_login") or "").strip().lower()
+            log.info(
+                "Pending raid superseded before arrival: %s old_target=%s%s replaced_by=%s",
+                from_broadcaster_login,
+                to_id,
+                f' ({old_target_login})' if old_target_login else "",
+                current_target_key,
+            )
+
+    async def _ensure_raid_arrival_subscription_ready(
+        self,
+        *,
+        to_broadcaster_id: str,
+        to_broadcaster_login: str,
+    ) -> bool:
+        cog = self._cog
+        if cog is None:
+            return True
+
+        has_sub = getattr(cog, "_eventsub_has_sub", None)
+        if callable(has_sub):
+            try:
+                if has_sub("channel.raid", str(to_broadcaster_id)):
+                    return True
+            except Exception:
+                log.debug(
+                    "EventSub channel.raid local tracking lookup failed for %s",
+                    to_broadcaster_login,
+                    exc_info=True,
+                )
+
+        ensure_ready = getattr(cog, "ensure_raid_target_dynamic_ready", None)
+        if callable(ensure_ready):
+            try:
+                ready, detail = await ensure_ready(
+                    str(to_broadcaster_id),
+                    to_broadcaster_login,
+                )
+            except Exception:
+                log.exception(
+                    "EventSub channel.raid readiness check failed for %s",
+                    to_broadcaster_login,
+                )
+                return False
+
+            if ready:
+                log.info(
+                    "EventSub channel.raid ready before raid start for %s (%s)",
+                    to_broadcaster_login,
+                    detail,
+                )
+            else:
+                log.warning(
+                    "EventSub channel.raid not confirmed enabled for %s before raid start (%s). Proceeding best-effort.",
+                    to_broadcaster_login,
+                    detail,
+                )
+            return ready
+
+        return True
+
     async def _register_pending_raid(
         self,
         from_broadcaster_login: str,
@@ -1163,6 +1250,10 @@ class RaidBot:
             viewer_count: Viewer-Count beim Raid-Start (für Partner-Message)
         """
         registered_ts = time.time()
+        self._clear_superseded_pending_raids(
+            from_broadcaster_login=from_broadcaster_login,
+            current_target_id=to_broadcaster_id,
+        )
         self._pending_raids[to_broadcaster_id] = (
             from_broadcaster_login,
             target_stream_data,
@@ -1181,6 +1272,21 @@ class RaidBot:
             to_broadcaster_id,
             f"{offline_to_pending_ms:.0f}ms" if offline_to_pending_ms is not None else "n/a",
         )
+
+        if self._cog and hasattr(self._cog, "_eventsub_has_sub"):
+            try:
+                if self._cog._eventsub_has_sub("channel.raid", str(to_broadcaster_id)):
+                    log.debug(
+                        "EventSub channel.raid subscription already tracked for %s - skipping duplicate create",
+                        to_broadcaster_login,
+                    )
+                    return
+            except Exception:
+                log.debug(
+                    "EventSub channel.raid local tracking lookup failed for %s",
+                    to_broadcaster_login,
+                    exc_info=True,
+                )
 
         # Dynamische EventSub subscription erstellen
         if self._cog and hasattr(self._cog, "subscribe_raid_target_dynamic"):
@@ -2342,6 +2448,11 @@ class RaidBot:
                 selection_ms,
                 candidates_count,
                 reason,
+            )
+
+            await self._ensure_raid_arrival_subscription_ready(
+                to_broadcaster_id=target_id,
+                to_broadcaster_login=target_login,
             )
 
             api_call_start = time.monotonic()

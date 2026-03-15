@@ -312,6 +312,107 @@ class RaidPartnerScoreSelectionTests(unittest.IsolatedAsyncioTestCase):
         refresh_mock.assert_awaited_once_with("9009")
         send_mock.assert_awaited_once()
 
+    async def test_register_pending_raid_supersedes_older_pending_from_same_source(self) -> None:
+        tracked = {("channel.raid", "new-target")}
+        self.raid_bot.set_cog(
+            SimpleNamespace(
+                _eventsub_has_sub=lambda sub_type, broadcaster_user_id: (
+                    sub_type,
+                    str(broadcaster_user_id),
+                )
+                in tracked
+            )
+        )
+        self.raid_bot._pending_raids["old-target"] = (
+            "source_login",
+            {"user_login": "old_target"},
+            time.time(),
+            True,
+            2,
+            None,
+        )
+
+        await self.raid_bot._register_pending_raid(
+            from_broadcaster_login="source_login",
+            to_broadcaster_id="new-target",
+            to_broadcaster_login="new_target",
+            target_stream_data={"user_login": "new_target"},
+            is_partner_raid=True,
+            viewer_count=4,
+        )
+
+        self.assertNotIn("old-target", self.raid_bot._pending_raids)
+        self.assertIn("new-target", self.raid_bot._pending_raids)
+
+    async def test_execute_raid_pipeline_prepares_fresh_raid_subscription_before_start(self) -> None:
+        call_order: list[str] = []
+        tracked_subs: set[tuple[str, str]] = set()
+
+        async def _ensure_ready(broadcaster_id: str, broadcaster_login: str):
+            call_order.append(f"ensure:{broadcaster_id}:{broadcaster_login}")
+            tracked_subs.add(("channel.raid", str(broadcaster_id)))
+            return True, "enabled"
+
+        self.raid_bot.set_cog(
+            SimpleNamespace(
+                _eventsub_has_sub=lambda sub_type, broadcaster_user_id: (
+                    sub_type,
+                    str(broadcaster_user_id),
+                )
+                in tracked_subs,
+                ensure_raid_target_dynamic_ready=AsyncMock(side_effect=_ensure_ready),
+            )
+        )
+
+        target = {
+            "user_id": "2002",
+            "user_login": "targetlogin",
+            "viewer_count": 3,
+            "followers_total": 120,
+            "started_at": "2026-03-10T18:00:00+00:00",
+            "raid_enabled": True,
+        }
+
+        async def _start_raid(**kwargs):
+            call_order.append(
+                f"start:{kwargs['to_broadcaster_id']}:{kwargs['to_broadcaster_login']}"
+            )
+            return True, None
+
+        with (
+            patch.object(
+                self.raid_bot,
+                "_select_partner_candidate_by_score",
+                new=AsyncMock(return_value=target),
+            ),
+            patch.object(
+                self.raid_bot.raid_executor,
+                "start_raid",
+                new=AsyncMock(side_effect=_start_raid),
+            ) as start_mock,
+            patch.object(self.raid_bot, "_register_pending_raid", new=AsyncMock()),
+        ):
+            result = await self.raid_bot._execute_raid_pipeline(
+                broadcaster_id="1001",
+                broadcaster_login="source_login",
+                viewer_count=7,
+                stream_duration_sec=600,
+                online_partners=[target],
+                api=None,
+                category_id=None,
+                offline_trigger_ts=None,
+                reason="auto_raid_on_offline",
+            )
+
+        self.assertEqual(result["status"], "started")
+        self.assertEqual(
+            call_order[:2],
+            ["ensure:2002:targetlogin", "start:2002:targetlogin"],
+        )
+        ensure_ready_mock = self.raid_bot._cog.ensure_raid_target_dynamic_ready
+        self.assertEqual(ensure_ready_mock.await_count, 1)
+        start_mock.assert_awaited_once()
+
 
 class ManualRaidFlowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:

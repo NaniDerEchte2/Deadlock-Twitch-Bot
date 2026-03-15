@@ -68,7 +68,6 @@ Der aktuelle OAuth-/Raid-Flow ist nicht nur fuer Auto-Raids da, sondern auch fue
 - `moderator:manage:banned_users`
 - `moderator:manage:chat_messages`
 - `channel:read:subscriptions`
-- `analytics:read:games`
 - `channel:manage:moderators`
 - `channel:bot`
 - `chat:read`

@@ -33,7 +33,6 @@ RAID_SCOPES = [
     "moderator:manage:banned_users",
     "moderator:manage:chat_messages",
     "channel:read:subscriptions",
-    "analytics:read:games",
     "channel:manage:moderators",
     "channel:bot",
     "chat:read",

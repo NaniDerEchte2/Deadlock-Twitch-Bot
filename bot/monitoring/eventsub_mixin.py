@@ -1413,6 +1413,149 @@ class _EventSubMixin:
                 }
             )
 
+    @staticmethod
+    def _eventsub_subscription_matches(
+        subscription: dict[str, Any] | None,
+        *,
+        sub_type: str,
+        broadcaster_id: str,
+        webhook_url: str | None = None,
+    ) -> bool:
+        subscription_map = subscription if isinstance(subscription, dict) else {}
+        expected_type = str(sub_type or "").strip().lower()
+        actual_type = str(subscription_map.get("type") or "").strip().lower()
+        if not expected_type or actual_type != expected_type:
+            return False
+
+        target_id = _EventSubMixin._eventsub_target_user_id(
+            subscription_map.get("condition"),
+            fallback="",
+        )
+        if target_id != str(broadcaster_id or "").strip():
+            return False
+
+        if webhook_url:
+            transport = (
+                subscription_map.get("transport")
+                if isinstance(subscription_map.get("transport"), dict)
+                else {}
+            )
+            callback = str(transport.get("callback") or "").strip()
+            if callback and callback != str(webhook_url).strip():
+                return False
+
+        return True
+
+    async def _get_eventsub_webhook_subscription_status(
+        self,
+        *,
+        sub_type: str,
+        broadcaster_id: str,
+        webhook_url: str | None = None,
+    ) -> str | None:
+        if not getattr(self, "api", None):
+            return None
+
+        try:
+            subscriptions = await self.api.list_eventsub_subscriptions(status="")
+        except Exception:
+            log.debug(
+                "EventSub Webhook: konnte Subscription-Status nicht laden für %s (%s)",
+                sub_type,
+                broadcaster_id,
+                exc_info=True,
+            )
+            return None
+
+        for subscription in subscriptions:
+            if self._eventsub_subscription_matches(
+                subscription,
+                sub_type=sub_type,
+                broadcaster_id=broadcaster_id,
+                webhook_url=webhook_url,
+            ):
+                status = str(subscription.get("status") or "").strip().lower()
+                return status or "unknown"
+
+        return None
+
+    async def ensure_raid_target_dynamic_ready(
+        self,
+        broadcaster_id: str,
+        broadcaster_login: str,
+        *,
+        wait_timeout_seconds: float = 8.0,
+        poll_interval_seconds: float = 0.5,
+    ) -> tuple[bool, str]:
+        """
+        Stellt sicher, dass eine channel.raid Subscription für das Ziel existiert
+        und möglichst schon auf `enabled` steht, bevor der Raid gestartet wird.
+        """
+        target_id = str(broadcaster_id or "").strip()
+        if not target_id:
+            return False, "missing_broadcaster_id"
+
+        webhook_url = self._get_eventsub_webhook_url()
+        webhook_secret = getattr(self, "_webhook_secret", None)
+        if not webhook_url or not webhook_secret:
+            return False, "missing_webhook_config"
+        if not getattr(self, "api", None):
+            return False, "no_api"
+
+        current_status = await self._get_eventsub_webhook_subscription_status(
+            sub_type="channel.raid",
+            broadcaster_id=target_id,
+            webhook_url=webhook_url,
+        )
+        if current_status == "enabled":
+            self._eventsub_track_sub("channel.raid", target_id)
+            return True, "already_enabled"
+
+        if current_status != "webhook_callback_verification_pending":
+            subscribe_success = await self.subscribe_raid_target_dynamic(
+                target_id,
+                broadcaster_login,
+            )
+            if not subscribe_success:
+                current_status = await self._get_eventsub_webhook_subscription_status(
+                    sub_type="channel.raid",
+                    broadcaster_id=target_id,
+                    webhook_url=webhook_url,
+                )
+                if current_status == "enabled":
+                    self._eventsub_track_sub("channel.raid", target_id)
+                    return True, "enabled_after_retry"
+                return False, f"subscribe_failed:{current_status or 'missing'}"
+
+        deadline = time.monotonic() + max(0.0, float(wait_timeout_seconds))
+        last_status = current_status or "missing"
+        while time.monotonic() < deadline:
+            current_status = await self._get_eventsub_webhook_subscription_status(
+                sub_type="channel.raid",
+                broadcaster_id=target_id,
+                webhook_url=webhook_url,
+            )
+            if current_status:
+                last_status = current_status
+            if current_status == "enabled":
+                self._eventsub_track_sub("channel.raid", target_id)
+                return True, "enabled"
+            if current_status not in (None, "", "webhook_callback_verification_pending"):
+                return False, f"status:{current_status}"
+            await asyncio.sleep(max(0.0, float(poll_interval_seconds)))
+
+        current_status = await self._get_eventsub_webhook_subscription_status(
+            sub_type="channel.raid",
+            broadcaster_id=target_id,
+            webhook_url=webhook_url,
+        )
+        if current_status == "enabled":
+            self._eventsub_track_sub("channel.raid", target_id)
+            return True, "enabled"
+        if current_status:
+            last_status = current_status
+        return False, f"status:{last_status}"
+
     async def subscribe_raid_target_dynamic(
         self, broadcaster_id: str, broadcaster_login: str
     ) -> bool:

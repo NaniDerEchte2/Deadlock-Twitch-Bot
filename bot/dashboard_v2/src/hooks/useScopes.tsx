@@ -52,13 +52,6 @@ const scopeCatalog: ScopeDefinition[] = [
     importance: 'critical',
   },
   {
-    id: 'analytics:read:games',
-    label: 'Game Analytics',
-    description: 'Offizielle Twitch Game/Category Insights.',
-    why: 'Speist die Kategorierankings und Coaching-Empfehlungen.',
-    importance: 'required',
-  },
-  {
     id: 'channel:manage:moderators',
     label: 'Mods verwalten',
     description: 'Mod-Status prüfen oder setzen (z. B. für den Bot).',
