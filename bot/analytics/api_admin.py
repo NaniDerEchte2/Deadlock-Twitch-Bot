@@ -128,6 +128,56 @@ def _coerce_utc_datetime(value: Any) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _admin_partner_live_state_cte_sql() -> str:
+    """Rank live-state rows so each partner resolves to one canonical row."""
+    return """
+                    , partner_live_state AS (
+                        SELECT
+                            partner_login,
+                            twitch_user_id,
+                            streamer_login,
+                            is_live,
+                            last_seen_at,
+                            last_viewer_count,
+                            active_session_id,
+                            last_started_at,
+                            last_game
+                        FROM (
+                            SELECT
+                                s.twitch_login AS partner_login,
+                                l.twitch_user_id,
+                                l.streamer_login,
+                                l.is_live,
+                                l.last_seen_at,
+                                l.last_viewer_count,
+                                l.active_session_id,
+                                l.last_started_at,
+                                l.last_game,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY LOWER(s.twitch_login)
+                                    ORDER BY
+                                        CASE
+                                            WHEN s.twitch_user_id IS NOT NULL
+                                                 AND s.twitch_user_id = l.twitch_user_id
+                                            THEN 0
+                                            WHEN LOWER(COALESCE(l.twitch_user_id, ''))
+                                                 = LOWER(COALESCE(l.streamer_login, ''))
+                                            THEN 2
+                                            ELSE 1
+                                        END,
+                                        COALESCE(l.last_seen_at, l.last_started_at, '') DESC
+                                ) AS rn
+                            FROM twitch_partners_all_state s
+                            LEFT JOIN twitch_live_state l
+                                ON s.twitch_user_id = l.twitch_user_id
+                                OR LOWER(s.twitch_login) = LOWER(l.streamer_login)
+                            WHERE s.status = 'active'
+                        ) ranked_live_state
+                        WHERE rn = 1
+                    )
+    """
+
+
 def _fetch_raw_chat_health_snapshot(conn: Any) -> dict[str, Any]:
     live_row = conn.execute(
         """
@@ -822,7 +872,7 @@ class _AnalyticsAdminMixin:
         try:
             with storage.get_conn() as conn:
                 rows = conn.execute(
-                    """
+                    f"""
                     WITH latest_billing AS (
                         SELECT
                             customer_reference,
@@ -835,6 +885,7 @@ class _AnalyticsAdminMixin:
                             ) AS rn
                         FROM twitch_billing_subscriptions
                     )
+                    {_admin_partner_live_state_cte_sql()}
                     SELECT
                         s.twitch_login,
                         s.twitch_user_id,
@@ -850,11 +901,11 @@ class _AnalyticsAdminMixin:
                         s.is_monitored_only,
                         COALESCE(s.is_verified, 0) AS is_verified,
                         COALESCE(s.is_partner_active, 0) AS is_partner_active,
-                        COALESCE(l.is_live, 0) AS is_live,
-                        l.last_seen_at,
-                        l.last_viewer_count,
-                        l.active_session_id,
-                        l.last_game,
+                        COALESCE(pls.is_live, 0) AS is_live,
+                        pls.last_seen_at,
+                        pls.last_viewer_count,
+                        pls.active_session_id,
+                        pls.last_game,
                         sp.promo_disabled,
                         sp.promo_message,
                         sp.raid_boost_enabled,
@@ -865,9 +916,8 @@ class _AnalyticsAdminMixin:
                         lb.status AS billing_status,
                         lb.updated_at AS billing_updated_at
                     FROM twitch_partners_all_state s
-                    LEFT JOIN twitch_live_state l
-                        ON s.twitch_user_id = l.twitch_user_id
-                        OR LOWER(s.twitch_login) = LOWER(l.streamer_login)
+                    LEFT JOIN partner_live_state pls
+                        ON LOWER(pls.partner_login) = LOWER(s.twitch_login)
                     LEFT JOIN streamer_plans sp
                         ON LOWER(sp.twitch_login) = LOWER(s.twitch_login)
                     LEFT JOIN latest_billing lb
@@ -931,7 +981,7 @@ class _AnalyticsAdminMixin:
         try:
             with storage.get_conn() as conn:
                 row = conn.execute(
-                    """
+                    f"""
                     WITH latest_billing AS (
                         SELECT
                             customer_reference,
@@ -944,6 +994,7 @@ class _AnalyticsAdminMixin:
                             ) AS rn
                         FROM twitch_billing_subscriptions
                     )
+                    {_admin_partner_live_state_cte_sql()}
                     SELECT
                         s.twitch_login,
                         s.twitch_user_id,
@@ -959,12 +1010,12 @@ class _AnalyticsAdminMixin:
                         s.is_monitored_only,
                         COALESCE(s.is_verified, 0) AS is_verified,
                         COALESCE(s.is_partner_active, 0) AS is_partner_active,
-                        COALESCE(l.is_live, 0) AS is_live,
-                        l.last_seen_at,
-                        l.last_viewer_count,
-                        l.active_session_id,
-                        l.last_started_at,
-                        l.last_game,
+                        COALESCE(pls.is_live, 0) AS is_live,
+                        pls.last_seen_at,
+                        pls.last_viewer_count,
+                        pls.active_session_id,
+                        pls.last_started_at,
+                        pls.last_game,
                         sp.plan_name,
                         sp.promo_disabled,
                         sp.promo_message,
@@ -977,9 +1028,8 @@ class _AnalyticsAdminMixin:
                         lb.status AS billing_status,
                         lb.updated_at AS billing_updated_at
                     FROM twitch_partners_all_state s
-                    LEFT JOIN twitch_live_state l
-                        ON s.twitch_user_id = l.twitch_user_id
-                        OR LOWER(s.twitch_login) = LOWER(l.streamer_login)
+                    LEFT JOIN partner_live_state pls
+                        ON LOWER(pls.partner_login) = LOWER(s.twitch_login)
                     LEFT JOIN streamer_plans sp
                         ON LOWER(sp.twitch_login) = LOWER(s.twitch_login)
                     LEFT JOIN latest_billing lb

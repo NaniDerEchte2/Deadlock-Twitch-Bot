@@ -1610,8 +1610,16 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                         tracking_token_to_store = None
                         self._drop_live_view(tracking_token_previous)
 
-            db_user_id = twitch_user_id or previous_state.get("twitch_user_id") or login_lower
-            db_user_id = str(db_user_id)
+            previous_user_id = str(previous_state.get("twitch_user_id") or "").strip()
+            db_user_id = str(twitch_user_id or "").strip()
+            if not db_user_id and previous_user_id and previous_user_id.lower() != login_lower:
+                db_user_id = previous_user_id
+            if not db_user_id:
+                log.debug(
+                    "Skipping live-state write without Twitch user id for %s",
+                    login_lower,
+                )
+                continue
             db_message_id = str(message_id_to_store) if message_id_to_store else None
             db_streamer_login = login_lower
 
@@ -1678,6 +1686,21 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
         for attempt in range(3):
             try:
                 with storage.get_conn() as c:
+                    conflict_cleanup_rows = sorted(
+                        {
+                            (str(streamer_login or "").strip(), str(twitch_user_id or "").strip())
+                            for twitch_user_id, streamer_login, *_ in rows
+                            if str(twitch_user_id or "").strip()
+                            and str(streamer_login or "").strip()
+                        }
+                    )
+                    if conflict_cleanup_rows:
+                        c.executemany(
+                            "DELETE FROM twitch_live_state "
+                            "WHERE LOWER(streamer_login) = LOWER(?) "
+                            "AND LOWER(COALESCE(twitch_user_id, '')) <> LOWER(?)",
+                            conflict_cleanup_rows,
+                        )
                     c.executemany(
                         "INSERT INTO twitch_live_state ("
                         "twitch_user_id, streamer_login, is_live, last_seen_at, last_title, last_game, "

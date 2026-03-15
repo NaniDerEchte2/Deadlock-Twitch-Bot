@@ -257,8 +257,40 @@ def _run_startup_maintenance(conn: psycopg.Connection) -> None:
     _coerce_column_to_boolean(conn, "twitch_session_chatters", "is_first_time_streamer", default=False)
     _coerce_column_to_boolean(conn, "twitch_session_chatters", "seen_via_chatters_api", default=False)
     _coerce_column_to_boolean(conn, "twitch_chat_messages", "is_command", default=False)
+    try:
+        _cleanup_duplicate_live_state_rows(conn)
+    except Exception as exc:  # pragma: no cover - best effort guard
+        log.debug("Skipping twitch_live_state duplicate cleanup: %s", exc)
+    try:
+        _ensure_unique_live_state_login_index(conn)
+    except Exception as exc:  # pragma: no cover - best effort guard
+        log.debug("Skipping twitch_live_state login uniqueness index: %s", exc)
 
     _run_startup_maintenance._done = True
+
+
+def _cleanup_duplicate_live_state_rows(conn: psycopg.Connection) -> None:
+    """Remove legacy live-state rows where login was incorrectly stored as user id."""
+    conn.execute(
+        """
+        DELETE FROM twitch_live_state legacy
+        USING twitch_live_state canonical
+        WHERE LOWER(COALESCE(legacy.twitch_user_id, '')) = LOWER(COALESCE(legacy.streamer_login, ''))
+          AND LOWER(canonical.streamer_login) = LOWER(legacy.streamer_login)
+          AND LOWER(COALESCE(canonical.twitch_user_id, '')) <> LOWER(COALESCE(legacy.streamer_login, ''))
+        """
+    )
+
+
+def _ensure_unique_live_state_login_index(conn: psycopg.Connection) -> None:
+    """Enforce one live-state row per streamer login."""
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_twitch_live_state_login_lower
+            ON twitch_live_state(LOWER(streamer_login))
+         WHERE streamer_login IS NOT NULL AND streamer_login <> ''
+        """
+    )
 
 
 class RowCompat:

@@ -463,6 +463,15 @@ class TwitchAnalyticsMixin:
 
         try:
             with storage.get_conn() as c:
+                if login_value:
+                    c.execute(
+                        """
+                        DELETE FROM twitch_live_state
+                         WHERE LOWER(streamer_login) = LOWER(%s)
+                           AND LOWER(COALESCE(twitch_user_id, '')) <> LOWER(%s)
+                        """,
+                        (login_value, broadcaster_user_id),
+                    )
                 c.execute(
                     """
                     INSERT INTO twitch_live_state (
