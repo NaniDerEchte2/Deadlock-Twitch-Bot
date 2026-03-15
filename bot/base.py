@@ -542,37 +542,7 @@ class TwitchBaseCog(commands.Cog):
                             )
                             new_logins.append(login)
 
-                        # Check/Create Session
-                        session = conn.execute(
-                            "SELECT id FROM twitch_stream_sessions WHERE streamer_login = ? AND ended_at IS NULL",
-                            (login,),
-                        ).fetchone()
-
-                        if not session:
-                            conn.execute(
-                                """
-                                INSERT INTO twitch_stream_sessions (
-                                    streamer_login, stream_id, started_at, stream_title, 
-                                    avg_viewers, peak_viewers, language, game_name
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                                """,
-                                (
-                                    login,
-                                    s.get("id"),
-                                    s.get("started_at", now),  # Use stream start time if available
-                                    s.get("title", ""),
-                                    s.get("viewer_count", 0),
-                                    s.get("viewer_count", 0),
-                                    s.get("language", "de"),
-                                    s.get("game_name", self._target_game_name),
-                                ),
-                            )
-
-                    if new_logins:
-                        conn.commit()
-                    else:
-                        # Commit session creations even if no new streamers
-                        conn.commit()
+                    conn.commit()
 
                 # --- 2. Cleanup OLD targets ---
                 # Remove monitored channels that are NO LONGER in the live Deadlock list.

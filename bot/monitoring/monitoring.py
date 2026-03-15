@@ -961,6 +961,15 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
             if login in partner_logins:
                 stream["is_partner"] = True
 
+        # Backfill: if a tracked streamer appears in category_streams but NOT in
+        # streams_by_login (e.g. due to API inconsistency), add them from category
+        # data so they still get tracked stats and session samples recorded.
+        tracked_logins_set = {str(e.get("login") or "").lower() for e in tracked if e.get("login")}
+        for stream in category_streams:
+            cat_login = (stream.get("user_login") or "").lower()
+            if cat_login and cat_login in tracked_logins_set and cat_login not in streams_by_login:
+                streams_by_login[cat_login] = stream
+
         try:
             await self._process_postings(tracked, streams_by_login)
         except Exception:
@@ -984,6 +993,14 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                 await self._log_stats(streams_by_login, category_streams)
             except Exception:
                 log.exception("Fehler beim Stats-Logging")
+
+        if self._tick_count % 100 == 0:
+            try:
+                closed = self._cleanup_orphaned_sessions()
+                if closed:
+                    log.info("Orphaned sessions bereinigt: %d geschlossen", closed)
+            except Exception:
+                log.debug("Orphaned session cleanup fehlgeschlagen", exc_info=True)
 
         # Partner-Rekrutierung (intern rate-limitiert auf 30 min)
         try:

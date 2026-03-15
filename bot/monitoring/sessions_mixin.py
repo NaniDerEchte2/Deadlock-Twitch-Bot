@@ -96,6 +96,7 @@ class _SessionsMixin:
                 session_id = None
 
         if session_id:
+            self._adopt_incomplete_session(session_id, stream)
             return session_id
 
         followers_start = await self._fetch_followers_total_safe(
@@ -552,6 +553,69 @@ class _SessionsMixin:
                     )
         except Exception:
             log.debug("exp: _exp_on_session_finalize fehlgeschlagen für %s", login_lower, exc_info=True)
+
+    def _adopt_incomplete_session(self, session_id: int, stream: dict) -> None:
+        """Update a session that was created with incomplete data (e.g. by scout).
+
+        A session is considered incomplete when it has samples=0 and start_viewers=0,
+        meaning it was created by the Scout before monitoring picked it up. This method
+        backfills the initial viewer count, game name, title and had_deadlock flag.
+        """
+        viewer_count = int(stream.get("viewer_count") or 0)
+        game_name = (stream.get("game_name") or "").strip() or None
+        had_deadlock = bool(self._stream_is_in_target_category(stream))
+        stream_title = (stream.get("title") or "").strip() or None
+        try:
+            with storage.get_conn() as c:
+                row = c.execute(
+                    "SELECT samples, start_viewers FROM twitch_stream_sessions WHERE id = ?",
+                    (session_id,),
+                ).fetchone()
+                if not row:
+                    return
+                samples = int(row["samples"] if hasattr(row, "keys") else row[0] or 0)
+                start_v = int(row["start_viewers"] if hasattr(row, "keys") else row[1] or 0)
+                if samples == 0 and start_v == 0:
+                    c.execute(
+                        """
+                        UPDATE twitch_stream_sessions
+                        SET start_viewers = ?,
+                            peak_viewers = GREATEST(peak_viewers, ?),
+                            had_deadlock_in_session = COALESCE(had_deadlock_in_session, ?) OR ?,
+                            game_name = COALESCE(game_name, ?),
+                            stream_title = COALESCE(stream_title, ?)
+                        WHERE id = ?
+                        """,
+                        (viewer_count, viewer_count, had_deadlock, had_deadlock, game_name, stream_title, session_id),
+                    )
+        except Exception:
+            log.debug("Konnte unvollstaendige Session nicht adoptieren: %s", session_id, exc_info=True)
+
+    def _cleanup_orphaned_sessions(self) -> int:
+        """Close sessions that have been open too long without any sample data.
+
+        Any session with ended_at IS NULL, samples=0, and started_at older than 24 hours
+        is considered orphaned and gets closed automatically.
+        """
+        try:
+            with storage.get_conn() as c:
+                cur = c.execute(
+                    """
+                    UPDATE twitch_stream_sessions
+                    SET ended_at = COALESCE(started_at, NOW()),
+                        duration_seconds = 0,
+                        notes = 'auto-closed: orphaned session (no samples, open > 24h)'
+                    WHERE ended_at IS NULL
+                      AND samples = 0
+                      AND started_at < NOW() - INTERVAL '24 hours'
+                    RETURNING id
+                    """
+                )
+                closed = cur.fetchall()
+                return len(closed)
+        except Exception:
+            log.debug("Orphaned session cleanup fehlgeschlagen", exc_info=True)
+            return 0
 
     async def _fetch_followers_total_safe(
         self,
