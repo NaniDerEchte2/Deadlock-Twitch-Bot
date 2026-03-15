@@ -592,13 +592,18 @@ class _SessionsMixin:
             log.debug("Konnte unvollstaendige Session nicht adoptieren: %s", session_id, exc_info=True)
 
     def _cleanup_orphaned_sessions(self) -> int:
-        """Close sessions that have been open too long without any sample data.
+        """Close stale open sessions that are no longer actively tracked.
 
-        Any session with ended_at IS NULL, samples=0, and started_at older than 24 hours
-        is considered orphaned and gets closed automatically.
+        Handles two cases:
+        1. Zero-sample sessions open > 24h (created by scout, never tracked)
+        2. Sessions with samples whose last viewer entry is > 1h ago (streamer
+           went offline but session was never finalized — typically category
+           streamers not in the partner view)
         """
+        total_closed = 0
         try:
             with storage.get_conn() as c:
+                # Case 1: zero-sample orphans older than 24h
                 cur = c.execute(
                     """
                     UPDATE twitch_stream_sessions
@@ -611,11 +616,33 @@ class _SessionsMixin:
                     RETURNING id
                     """
                 )
-                closed = cur.fetchall()
-                return len(closed)
+                total_closed += len(cur.fetchall())
+
+                # Case 2: sessions with data but stale (last viewer entry > 1h ago)
+                cur = c.execute(
+                    """
+                    UPDATE twitch_stream_sessions s
+                    SET ended_at = sub.last_ts,
+                        duration_seconds = EXTRACT(EPOCH FROM (sub.last_ts - s.started_at))::int,
+                        notes = 'auto-closed: stale session (last viewer data > 1h ago)'
+                    FROM (
+                        SELECT sv.session_id, MAX(sv.ts_utc) AS last_ts
+                        FROM twitch_session_viewers sv
+                        JOIN twitch_stream_sessions ss ON ss.id = sv.session_id
+                        WHERE ss.ended_at IS NULL
+                          AND ss.samples > 0
+                        GROUP BY sv.session_id
+                        HAVING MAX(sv.ts_utc) < NOW() - INTERVAL '1 hour'
+                    ) sub
+                    WHERE s.id = sub.session_id
+                      AND s.ended_at IS NULL
+                    RETURNING s.id
+                    """
+                )
+                total_closed += len(cur.fetchall())
         except Exception:
             log.debug("Orphaned session cleanup fehlgeschlagen", exc_info=True)
-            return 0
+        return total_closed
 
     async def _fetch_followers_total_safe(
         self,
