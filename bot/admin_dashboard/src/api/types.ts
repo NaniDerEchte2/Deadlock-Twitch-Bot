@@ -208,13 +208,97 @@ export interface SubscriptionRecord {
   raw?: Record<string, unknown>;
 }
 
-export interface AffiliateRecord {
-  twitchLogin?: string;
-  stripeAccountId?: string;
+export interface AffiliateListItem {
+  login: string;
+  displayName?: string;
+  active: boolean;
+  totalClaims: number;
+  totalProvisionEuro: number;
+  createdAt?: string | null;
+  lastClaimAt?: string | null;
+  updatedAt?: string | null;
+  stripeConnectStatus?: string;
   status?: string;
-  payoutEmail?: string;
-  commissionRate?: number;
-  updatedAt?: string;
+  raw?: Record<string, unknown>;
+}
+
+export interface AffiliateStats {
+  totalAffiliates?: number;
+  activeAffiliates?: number;
+  totalClaims: number;
+  totalProvisionEuro: number;
+  thisMonthClaims?: number;
+  thisMonthProvisionEuro?: number;
+  avgProvisionEuro?: number;
+  activeCustomers?: number;
+  raw?: Record<string, unknown>;
+}
+
+export interface AffiliateClaim {
+  id?: number;
+  customerLogin: string;
+  claimedAt?: string | null;
+  commissionCents: number;
+  commissionCount: number;
+  raw?: Record<string, unknown>;
+}
+
+export interface PiiReadiness {
+  canGenerate: boolean;
+  blockers: string[];
+  warnings: string[];
+  missingFields: string[];
+  status?: string;
+  ustStatus: string;
+  raw?: Record<string, unknown>;
+}
+
+export interface GutschriftDocument {
+  id?: number;
+  affiliateLogin?: string;
+  affiliateDisplayName?: string;
+  periodYear?: number;
+  periodMonth?: number;
+  periodLabel?: string;
+  gutschriftNumber?: string;
+  status?: string;
+  netAmountCents: number;
+  vatAmountCents: number;
+  grossAmountCents: number;
+  commissionCount: number;
+  generatedAt?: string | null;
+  emailedAt?: string | null;
+  createdAt?: string | null;
+  noteText?: string;
+  lastError?: string;
+  downloadPath?: string | null;
+  hasPdf?: boolean;
+  affiliateUstStatus?: string;
+  raw?: Record<string, unknown>;
+}
+
+export interface AffiliateDetail {
+  login: string;
+  displayName?: string;
+  active: boolean;
+  email?: string;
+  fullName?: string;
+  addressLine1?: string;
+  addressCity?: string;
+  addressZip?: string;
+  addressCountry?: string;
+  taxId?: string;
+  vatId?: string;
+  ustStatus?: string;
+  stripeConnectStatus?: string;
+  stripeAccountId?: string;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  profileUpdatedAt?: string | null;
+  stats: AffiliateStats;
+  claims: AffiliateClaim[];
+  readiness: PiiReadiness;
+  gutschriften: GutschriftDocument[];
   raw?: Record<string, unknown>;
 }
 

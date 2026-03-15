@@ -2,6 +2,7 @@ import { createBrowserRouter, Navigate } from 'react-router-dom';
 import { AdminShell } from '@/components/layout/AdminShell';
 import { Dashboard } from '@/pages/Dashboard';
 import { Affiliates } from '@/pages/billing/Affiliates';
+import { Gutschriften } from '@/pages/billing/Gutschriften';
 import { Subscriptions } from '@/pages/billing/Subscriptions';
 import { BotConfig } from '@/pages/config/BotConfig';
 import { ChatConfig } from '@/pages/config/ChatConfig';
@@ -31,6 +32,7 @@ const router = createBrowserRouter(
         { path: 'config/chat', element: <ChatConfig /> },
         { path: 'billing', element: <Subscriptions /> },
         { path: 'billing/affiliates', element: <Affiliates /> },
+        { path: 'billing/gutschriften', element: <Gutschriften /> },
         { path: '*', element: <Navigate to="/" replace /> },
       ],
     },

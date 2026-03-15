@@ -3,17 +3,23 @@ import type { AdminConfigScope } from '@/api/types';
 import {
   addStreamer,
   archiveStreamer,
+  fetchAffiliateDetail,
+  fetchAffiliateGutschriften,
+  fetchAffiliatesList,
+  fetchAffiliateStats,
+  fetchAllGutschriften,
   fetchAdminStreamerDetail,
   fetchAdminStreamers,
-  fetchAffiliates,
   fetchConfigOverview,
   fetchDashboardOverview,
   fetchDatabaseStats,
   fetchErrorLogs,
   fetchEventSubStatus,
+  generateGutschriften,
   fetchSubscriptions,
   fetchSystemHealth,
   removeStreamer,
+  toggleAffiliateActive,
   updateChatConfig,
   updatePollingConfig,
   updatePromoConfig,
@@ -96,11 +102,45 @@ export function useSubscriptions() {
   });
 }
 
-export function useAffiliates() {
+export function useAffiliatesList() {
   return useQuery({
     queryKey: ['admin-affiliates'],
-    queryFn: fetchAffiliates,
-    staleTime: 120_000,
+    queryFn: fetchAffiliatesList,
+    staleTime: 45_000,
+  });
+}
+
+export function useAffiliateStats() {
+  return useQuery({
+    queryKey: ['admin-affiliate-stats'],
+    queryFn: fetchAffiliateStats,
+    staleTime: 30_000,
+  });
+}
+
+export function useAffiliateDetail(login: string | undefined) {
+  return useQuery({
+    queryKey: ['admin-affiliate-detail', login],
+    queryFn: () => fetchAffiliateDetail(login!),
+    enabled: Boolean(login),
+    staleTime: 30_000,
+  });
+}
+
+export function useAllGutschriften() {
+  return useQuery({
+    queryKey: ['admin-gutschriften'],
+    queryFn: fetchAllGutschriften,
+    staleTime: 60_000,
+  });
+}
+
+export function useAffiliateGutschriften(login: string | undefined) {
+  return useQuery({
+    queryKey: ['admin-affiliate-gutschriften', login],
+    queryFn: () => fetchAffiliateGutschriften(login!),
+    enabled: Boolean(login),
+    staleTime: 60_000,
   });
 }
 
@@ -148,6 +188,39 @@ export function useArchiveStreamer() {
     }) => archiveStreamer(login, mode),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['admin-streamers'] });
+    },
+  });
+}
+
+export function useToggleAffiliateActive() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (login: string) => toggleAffiliateActive(login),
+    onSuccess: (_result, login) => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-affiliates'] });
+      void queryClient.invalidateQueries({ queryKey: ['admin-affiliate-stats'] });
+      void queryClient.invalidateQueries({ queryKey: ['admin-affiliate-detail', login] });
+    },
+  });
+}
+
+export function useGenerateGutschriften() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: generateGutschriften,
+    onSuccess: (_result, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-affiliates'] });
+      void queryClient.invalidateQueries({ queryKey: ['admin-affiliate-stats'] });
+      void queryClient.invalidateQueries({ queryKey: ['admin-gutschriften'] });
+      if (variables?.affiliateLogin) {
+        void queryClient.invalidateQueries({ queryKey: ['admin-affiliate-detail', variables.affiliateLogin] });
+        void queryClient.invalidateQueries({
+          queryKey: ['admin-affiliate-gutschriften', variables.affiliateLogin],
+        });
+        return;
+      }
+      void queryClient.invalidateQueries({ queryKey: ['admin-affiliate-detail'] });
+      void queryClient.invalidateQueries({ queryKey: ['admin-affiliate-gutschriften'] });
     },
   });
 }

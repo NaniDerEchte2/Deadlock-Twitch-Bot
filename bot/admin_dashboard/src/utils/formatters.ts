@@ -6,6 +6,34 @@ export function formatNumber(value: unknown): string {
   return new Intl.NumberFormat('de-DE').format(numeric);
 }
 
+export function formatCurrency(cents: unknown, currency = 'EUR'): string {
+  const numeric = typeof cents === 'number' ? cents : Number(cents ?? 0);
+  if (!Number.isFinite(numeric)) {
+    return new Intl.NumberFormat('de-DE', {
+      style: 'currency',
+      currency: currency.toUpperCase(),
+    }).format(0);
+  }
+  return new Intl.NumberFormat('de-DE', {
+    style: 'currency',
+    currency: currency.toUpperCase(),
+  }).format(numeric / 100);
+}
+
+export function formatCurrencyEuro(euroValue: unknown): string {
+  const numeric = typeof euroValue === 'number' ? euroValue : Number(euroValue ?? 0);
+  if (!Number.isFinite(numeric)) {
+    return new Intl.NumberFormat('de-DE', {
+      style: 'currency',
+      currency: 'EUR',
+    }).format(0);
+  }
+  return new Intl.NumberFormat('de-DE', {
+    style: 'currency',
+    currency: 'EUR',
+  }).format(numeric);
+}
+
 export function formatPercent(value: unknown, fractionDigits = 1): string {
   const numeric = typeof value === 'number' ? value : Number(value ?? 0);
   if (!Number.isFinite(numeric)) {

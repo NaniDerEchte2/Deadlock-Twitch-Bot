@@ -1,53 +1,335 @@
+import { useState } from 'react';
+import { ChevronRight, Coins, FileText, RefreshCw, ShieldCheck, Users } from 'lucide-react';
+import type { AffiliateListItem } from '@/api/types';
+import { AffiliateDetailPanel } from '@/pages/billing/AffiliateDetailPanel';
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog';
 import { DataTable, type TableColumn } from '@/components/shared/DataTable';
-import type { AffiliateRecord } from '@/api/types';
-import { useAffiliates } from '@/hooks/useAdmin';
-import { formatDateTime, formatPercent } from '@/utils/formatters';
+import { KpiCard } from '@/components/shared/KpiCard';
+import { SearchInput } from '@/components/shared/SearchInput';
 import { StatusBadge } from '@/components/shared/StatusBadge';
+import { Toast } from '@/components/shared/Toast';
+import { useAffiliateStats, useAffiliatesList, useGenerateGutschriften, useToggleAffiliateActive } from '@/hooks/useAdmin';
+import { formatCurrencyEuro, formatDateTime } from '@/utils/formatters';
+
+type ToastState = {
+  open: boolean;
+  message: string;
+  tone: 'success' | 'error';
+};
+
+function summarizeGenerateResult(result: { results?: Array<{ ok?: boolean; action?: string; status?: string }> }) {
+  const entries = result.results ?? [];
+  if (!entries.length) {
+    return 'Keine faelligen Gutschriften gefunden.';
+  }
+
+  const createdCount = entries.filter((entry) => entry.ok && entry.action !== 'existing').length;
+  const existingCount = entries.filter((entry) => entry.action === 'existing').length;
+  const blockedCount = entries.filter((entry) => entry.status === 'blocked').length;
+  const skippedCount = entries.filter((entry) => entry.status === 'no_commissions').length;
+
+  const parts = [
+    createdCount > 0 ? `${createdCount} erstellt oder versendet` : '',
+    existingCount > 0 ? `${existingCount} bereits vorhanden` : '',
+    blockedCount > 0 ? `${blockedCount} blockiert` : '',
+    skippedCount > 0 ? `${skippedCount} ohne Provisionen` : '',
+  ].filter(Boolean);
+
+  return parts.join(', ') || 'Generierung abgeschlossen.';
+}
 
 export function Affiliates() {
-  const affiliatesQuery = useAffiliates();
-  const rows = affiliatesQuery.data ?? [];
+  const [search, setSearch] = useState('');
+  const [selectedLogin, setSelectedLogin] = useState<string | null>(null);
+  const [toggleTarget, setToggleTarget] = useState<AffiliateListItem | null>(null);
+  const [confirmGenerateAll, setConfirmGenerateAll] = useState(false);
+  const [toast, setToast] = useState<ToastState>({ open: false, message: '', tone: 'success' });
 
-  const columns: TableColumn<AffiliateRecord>[] = [
+  const statsQuery = useAffiliateStats();
+  const affiliatesQuery = useAffiliatesList();
+  const toggleMutation = useToggleAffiliateActive();
+  const generateMutation = useGenerateGutschriften();
+
+  const rows = affiliatesQuery.data ?? [];
+  const stats = statsQuery.data;
+  const normalizedSearch = search.trim().toLowerCase();
+  const filteredRows = rows.filter((row) => {
+    if (!normalizedSearch) {
+      return true;
+    }
+    return [row.login, row.displayName ?? ''].some((value) => value.toLowerCase().includes(normalizedSearch));
+  });
+
+  const columns: TableColumn<AffiliateListItem>[] = [
     {
-      key: 'login',
-      title: 'Affiliate Login',
+      key: 'affiliate',
+      title: 'Affiliate',
       sortable: true,
-      sortValue: (row) => row.twitchLogin ?? '',
-      render: (row) => <span className="font-medium text-white">{row.twitchLogin || '—'}</span>,
+      sortValue: (row) => row.displayName ?? row.login,
+      render: (row) => (
+        <button
+          type="button"
+          onClick={() => setSelectedLogin((current) => (current === row.login ? null : row.login))}
+          className="group text-left"
+        >
+          <div className="font-medium text-white transition group-hover:text-primary">{row.displayName || row.login}</div>
+          <div className="mt-1 text-xs uppercase tracking-[0.18em] text-text-secondary">{row.login}</div>
+        </button>
+      ),
     },
     {
       key: 'status',
       title: 'Status',
       sortable: true,
-      sortValue: (row) => row.status ?? '',
-      render: (row) => <StatusBadge status={row.status} />,
+      sortValue: (row) => `${row.active ? '1' : '0'}-${row.status ?? ''}`,
+      render: (row) => (
+        <div className="flex flex-wrap gap-2">
+          <StatusBadge status={row.active ? 'active' : 'inactive'} />
+          {row.stripeConnectStatus ? <StatusBadge status={row.stripeConnectStatus} /> : null}
+        </div>
+      ),
     },
     {
-      key: 'commission',
-      title: 'Commission',
+      key: 'claims',
+      title: 'Claims',
       sortable: true,
-      sortValue: (row) => row.commissionRate ?? 0,
-      render: (row) => formatPercent((row.commissionRate ?? 0) * 100, 0),
+      sortValue: (row) => row.totalClaims,
+      render: (row) => <span className="font-medium text-white">{row.totalClaims}</span>,
     },
     {
-      key: 'updated',
-      title: 'Updated',
+      key: 'provision',
+      title: 'Provision',
       sortable: true,
-      sortValue: (row) => row.updatedAt ?? '',
-      render: (row) => formatDateTime(row.updatedAt),
+      sortValue: (row) => row.totalProvisionEuro,
+      render: (row) => formatCurrencyEuro(row.totalProvisionEuro),
+    },
+    {
+      key: 'lastClaim',
+      title: 'Letzter Claim',
+      sortable: true,
+      sortValue: (row) => row.lastClaimAt ?? '',
+      render: (row) => formatDateTime(row.lastClaimAt),
+    },
+    {
+      key: 'createdAt',
+      title: 'Mitglied seit',
+      sortable: true,
+      sortValue: (row) => row.createdAt ?? '',
+      render: (row) => formatDateTime(row.createdAt),
+    },
+    {
+      key: 'actions',
+      title: 'Aktionen',
+      render: (row) => (
+        <div className="flex flex-wrap justify-end gap-2">
+          <button
+            type="button"
+            className="admin-button admin-button-secondary px-3 py-2 text-xs"
+            onClick={() => setToggleTarget(row)}
+            disabled={toggleMutation.isPending}
+          >
+            {row.active ? 'Deaktivieren' : 'Aktivieren'}
+          </button>
+          <button
+            type="button"
+            className="admin-button admin-button-secondary px-3 py-2 text-xs"
+            onClick={() => setSelectedLogin(row.login)}
+          >
+            Details
+            <ChevronRight className="h-4 w-4" />
+          </button>
+        </div>
+      ),
     },
   ];
 
+  async function handleConfirmToggle() {
+    if (!toggleTarget) {
+      return;
+    }
+
+    try {
+      const result = await toggleMutation.mutateAsync(toggleTarget.login);
+      setToast({
+        open: true,
+        tone: 'success',
+        message: `${result.login} ist jetzt ${result.active ? 'aktiv' : 'inaktiv'}.`,
+      });
+      setToggleTarget(null);
+    } catch (error) {
+      setToast({
+        open: true,
+        tone: 'error',
+        message: error instanceof Error ? error.message : 'Affiliate-Status konnte nicht aktualisiert werden.',
+      });
+    }
+  }
+
+  async function handleGenerateAll() {
+    try {
+      const result = await generateMutation.mutateAsync({});
+      setToast({
+        open: true,
+        tone: 'success',
+        message: summarizeGenerateResult(result),
+      });
+      setConfirmGenerateAll(false);
+    } catch (error) {
+      setToast({
+        open: true,
+        tone: 'error',
+        message: error instanceof Error ? error.message : 'Gutschriften konnten nicht generiert werden.',
+      });
+    }
+  }
+
   return (
-    <section className="space-y-5">
-      <header className="panel-card rounded-[1.8rem] p-6">
-        <p className="text-xs font-semibold uppercase tracking-[0.28em] text-text-secondary">Affiliates</p>
-        <h1 className="mt-3 text-3xl font-semibold text-white">Affiliate Accounts und Commission Snapshot</h1>
-      </header>
-      <article className="panel-card rounded-[1.8rem] p-6">
-        <DataTable columns={columns} rows={rows} rowKey={(row, index) => `${row.twitchLogin ?? index}`} />
-      </article>
-    </section>
+    <>
+      <section className="space-y-6">
+        <header className="panel-card rounded-[1.8rem] p-6">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-text-secondary">Billing</p>
+              <h1 className="mt-3 text-3xl font-semibold text-white">Affiliate-Verwaltung und Gutschriften</h1>
+              <p className="mt-3 max-w-3xl text-sm leading-6 text-text-secondary">
+                Aktivität, Provisionen und Gutschrift-Bereitschaft auf einen Blick. Leere oder fehlende Backend-Daten
+                werden defensiv behandelt, damit die Oberfläche bedienbar bleibt.
+              </p>
+            </div>
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <div className="min-w-[18rem] flex-1">
+                <SearchInput
+                  placeholder="Nach Login oder Namen suchen"
+                  onDebouncedChange={setSearch}
+                />
+              </div>
+              <button
+                type="button"
+                className="admin-button admin-button-primary"
+                onClick={() => setConfirmGenerateAll(true)}
+                disabled={generateMutation.isPending}
+              >
+                <RefreshCw className={`h-4 w-4 ${generateMutation.isPending ? 'animate-spin' : ''}`} />
+                Gutschriften generieren
+              </button>
+            </div>
+          </div>
+
+          {affiliatesQuery.isError ? (
+            <div className="mt-5 rounded-2xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-sm text-red-100">
+              {affiliatesQuery.error instanceof Error
+                ? affiliatesQuery.error.message
+                : 'Affiliate-Liste konnte nicht geladen werden.'}
+            </div>
+          ) : null}
+        </header>
+
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <KpiCard
+            title="Affiliates"
+            value={String(stats?.totalAffiliates ?? rows.length)}
+            hint={`${stats?.activeAffiliates ?? rows.filter((row) => row.active).length} aktiv`}
+            tone="primary"
+            icon={Users}
+          />
+          <KpiCard
+            title="Claims Gesamt"
+            value={String(stats?.totalClaims ?? rows.reduce((sum, row) => sum + row.totalClaims, 0))}
+            hint={statsQuery.isFetching ? 'Wird aktualisiert …' : 'Historische Claims'}
+            tone="neutral"
+            icon={ShieldCheck}
+          />
+          <KpiCard
+            title="Provision Gesamt"
+            value={formatCurrencyEuro(stats?.totalProvisionEuro ?? rows.reduce((sum, row) => sum + row.totalProvisionEuro, 0))}
+            hint="Aus bestätigten Provisionen"
+            tone="accent"
+            icon={Coins}
+          />
+          <KpiCard
+            title="Dieser Monat"
+            value={String(stats?.thisMonthClaims ?? 0)}
+            hint={formatCurrencyEuro(stats?.thisMonthProvisionEuro ?? 0)}
+            tone="neutral"
+            icon={FileText}
+          />
+        </div>
+
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
+          <article className="panel-card rounded-[1.8rem] p-6">
+            <div className="mb-4 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-text-secondary">Affiliates</p>
+                <p className="mt-2 text-sm text-text-secondary">
+                  {filteredRows.length} von {rows.length} Einträgen sichtbar
+                </p>
+              </div>
+            </div>
+            <DataTable
+              columns={columns}
+              rows={filteredRows}
+              rowKey={(row) => row.login}
+              emptyLabel={
+                affiliatesQuery.isLoading
+                  ? 'Affiliates werden geladen …'
+                  : normalizedSearch
+                    ? 'Keine Affiliates für diese Suche gefunden.'
+                    : 'Keine Affiliates vorhanden.'
+              }
+            />
+          </article>
+
+          {selectedLogin ? (
+            <AffiliateDetailPanel login={selectedLogin} onClose={() => setSelectedLogin(null)} />
+          ) : (
+            <aside className="panel-card flex min-h-[22rem] items-center justify-center rounded-[1.8rem] p-6">
+              <div className="max-w-xs text-center">
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-text-secondary">Detailpanel</p>
+                <h2 className="mt-3 text-xl font-semibold text-white">Affiliate auswählen</h2>
+                <p className="mt-3 text-sm leading-6 text-text-secondary">
+                  Öffne einen Datensatz aus der Tabelle, um Stats, Readiness, letzte Claims und vorhandene
+                  Gutschriften zu prüfen.
+                </p>
+              </div>
+            </aside>
+          )}
+        </div>
+      </section>
+
+      <ConfirmDialog
+        open={Boolean(toggleTarget)}
+        title={toggleTarget?.active ? 'Affiliate deaktivieren?' : 'Affiliate aktivieren?'}
+        description={
+          toggleTarget
+            ? `Der Status von ${toggleTarget.displayName || toggleTarget.login} wird umgeschaltet.`
+            : ''
+        }
+        confirmLabel={toggleTarget?.active ? 'Deaktivieren' : 'Aktivieren'}
+        busy={toggleMutation.isPending}
+        onConfirm={() => {
+          void handleConfirmToggle();
+        }}
+        onCancel={() => setToggleTarget(null)}
+      />
+
+      <ConfirmDialog
+        open={confirmGenerateAll}
+        title="Alle faelligen Gutschriften generieren?"
+        description="Es werden alle aktuell faelligen Gutschriften erzeugt und, falls moeglich, direkt versendet."
+        confirmLabel="Jetzt generieren"
+        busy={generateMutation.isPending}
+        onConfirm={() => {
+          void handleGenerateAll();
+        }}
+        onCancel={() => setConfirmGenerateAll(false)}
+      />
+
+      <Toast
+        open={toast.open}
+        message={toast.message}
+        tone={toast.tone}
+        onClose={() => setToast((current) => ({ ...current, open: false }))}
+      />
+    </>
   );
 }

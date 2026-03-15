@@ -2,14 +2,19 @@ import type {
   AdminActionResult,
   AdminAuthStatus,
   AdminConfigScope,
-  AffiliateRecord,
+  AffiliateClaim,
+  AffiliateDetail,
+  AffiliateListItem,
+  AffiliateStats,
   ChatConfigSnapshot,
   ChatConfigUpdatePayload,
   ConfigOverview,
   DatabaseStatsResponse,
   ErrorLogsResponse,
   EventSubStatusResponse,
+  GutschriftDocument,
   InternalHomeOverview,
+  PiiReadiness,
   RaidConfigSnapshot,
   RaidConfigUpdatePayload,
   StreamerDetail,
@@ -36,6 +41,31 @@ export class ApiError extends Error {
     this.payload = payload;
   }
 }
+
+type GenerateGutschriftenParams = {
+  affiliateLogin?: string;
+  year?: number;
+  month?: number;
+  force?: boolean;
+};
+
+type GenerateGutschriftenItem = {
+  ok: boolean;
+  status?: string;
+  action?: string;
+  affiliateLogin?: string;
+  periodYear?: number;
+  periodMonth?: number;
+  document?: GutschriftDocument;
+  readiness?: PiiReadiness;
+  raw?: Record<string, unknown>;
+};
+
+type GenerateGutschriftenResult = {
+  ok: boolean;
+  results: GenerateGutschriftenItem[];
+  raw?: Record<string, unknown>;
+};
 
 function sanitizeNextPath(rawPath: string): string {
   if (!rawPath || !rawPath.startsWith('/') || rawPath.startsWith('//') || rawPath.includes('\\')) {
@@ -149,6 +179,274 @@ function readScope(record: Record<string, unknown>, ...keys: string[]): AdminCon
     return candidate;
   }
   return undefined;
+}
+
+function readStringArray(value: unknown): string[] {
+  return coerceArray<unknown>(value)
+    .map((entry) => (typeof entry === 'string' ? entry.trim() : String(entry ?? '').trim()))
+    .filter(Boolean);
+}
+
+function normalizeAffiliateStatus(active: boolean): string {
+  return active ? 'active' : 'inactive';
+}
+
+function normalizeDownloadPath(value: string): string | null {
+  const normalized = value.trim();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized.startsWith('http://') || normalized.startsWith('https://') || normalized.startsWith('/')) {
+    return normalized;
+  }
+  return `/${normalized.replace(/^\/+/, '')}`;
+}
+
+function emptyAffiliateStats(overrides: Partial<AffiliateStats> = {}): AffiliateStats {
+  return {
+    totalClaims: 0,
+    totalProvisionEuro: 0,
+    thisMonthClaims: 0,
+    thisMonthProvisionEuro: 0,
+    ...overrides,
+  };
+}
+
+function emptyReadiness(overrides: Partial<PiiReadiness> = {}): PiiReadiness {
+  return {
+    canGenerate: false,
+    blockers: [],
+    warnings: [],
+    missingFields: [],
+    ustStatus: 'unknown',
+    ...overrides,
+  };
+}
+
+function parseAffiliateStats(record: Record<string, unknown>): AffiliateStats {
+  return emptyAffiliateStats({
+    totalAffiliates: readNumber(record, 'totalAffiliates', 'total_affiliates'),
+    activeAffiliates: readNumber(record, 'activeAffiliates', 'active_affiliates'),
+    totalClaims: readNumber(record, 'totalClaims', 'total_claims') ?? 0,
+    totalProvisionEuro:
+      readNumber(record, 'totalProvisionEuro', 'total_provision_euro', 'totalProvision', 'total_provision') ?? 0,
+    thisMonthClaims: readNumber(record, 'thisMonthClaims', 'this_month_claims'),
+    thisMonthProvisionEuro: readNumber(
+      record,
+      'thisMonthProvisionEuro',
+      'this_month_provision_euro',
+      'thisMonthProvision',
+      'this_month_provision',
+    ),
+    avgProvisionEuro: readNumber(record, 'avgProvisionEuro', 'avg_provision_euro', 'avgProvision', 'avg_provision'),
+    activeCustomers: readNumber(record, 'activeCustomers', 'active_customers'),
+    raw: record,
+  });
+}
+
+function parseAffiliateClaim(record: Record<string, unknown>): AffiliateClaim {
+  return {
+    id: readNumber(record, 'id', 'claimId', 'claim_id'),
+    customerLogin:
+      readString(record, 'customerLogin', 'customer_login', 'claimed_streamer_login', 'streamer_login') || '—',
+    claimedAt: readString(record, 'claimedAt', 'claimed_at') || null,
+    commissionCents:
+      readNumber(record, 'commissionCents', 'commission_cents', 'totalCommissionCents', 'total_commission_cents') ?? 0,
+    commissionCount: readNumber(record, 'commissionCount', 'commission_count') ?? 0,
+    raw: record,
+  };
+}
+
+function parsePiiReadiness(record: Record<string, unknown>): PiiReadiness {
+  if (!Object.keys(record).length) {
+    return emptyReadiness({ raw: record });
+  }
+  return emptyReadiness({
+    canGenerate: readBoolean(record, 'canGenerate', 'can_generate') ?? false,
+    blockers: readStringArray(record.blockers),
+    warnings: readStringArray(record.warnings),
+    missingFields: readStringArray(record.missingFields ?? record.missing_fields),
+    ustStatus: readString(record, 'ustStatus', 'ust_status') || 'unknown',
+    raw: record,
+  });
+}
+
+function parseGutschriftDocument(
+  record: Record<string, unknown>,
+  defaults: Partial<GutschriftDocument> = {},
+): GutschriftDocument {
+  const downloadPath = normalizeDownloadPath(readString(record, 'downloadPath', 'download_path'));
+  const generatedAt =
+    readString(record, 'generatedAt', 'generated_at', 'pdfGeneratedAt', 'pdf_generated_at') || null;
+  const emailedAt = readString(record, 'emailedAt', 'emailed_at', 'emailSentAt', 'email_sent_at') || null;
+  const lastError = readString(record, 'lastError', 'last_error', 'emailError', 'email_error') || '';
+  const hasPdf = readBoolean(record, 'hasPdf', 'has_pdf') ?? Boolean(downloadPath || generatedAt);
+  const explicitStatus = readString(record, 'status').trim().toLowerCase();
+  const status =
+    explicitStatus ||
+    (emailedAt ? 'emailed' : lastError ? 'email_failed' : hasPdf ? 'generated' : 'blocked');
+
+  return {
+    id: readNumber(record, 'id'),
+    affiliateLogin:
+      readString(record, 'affiliateLogin', 'affiliate_login', 'affiliateTwitchLogin', 'affiliate_twitch_login') ||
+      defaults.affiliateLogin,
+    affiliateDisplayName:
+      readString(record, 'affiliateDisplayName', 'affiliate_display_name', 'displayName', 'display_name') ||
+      defaults.affiliateDisplayName,
+    periodYear: readNumber(record, 'periodYear', 'period_year'),
+    periodMonth: readNumber(record, 'periodMonth', 'period_month'),
+    periodLabel: readString(record, 'periodLabel', 'period_label') || undefined,
+    gutschriftNumber: readString(record, 'gutschriftNumber', 'gutschrift_number') || undefined,
+    status,
+    netAmountCents: readNumber(record, 'netAmountCents', 'net_amount_cents') ?? 0,
+    vatAmountCents: readNumber(record, 'vatAmountCents', 'vat_amount_cents') ?? 0,
+    grossAmountCents: readNumber(record, 'grossAmountCents', 'gross_amount_cents') ?? 0,
+    commissionCount: readNumber(record, 'commissionCount', 'commission_count') ?? 0,
+    generatedAt,
+    emailedAt,
+    createdAt: readString(record, 'createdAt', 'created_at') || null,
+    noteText: readString(record, 'noteText', 'note_text') || undefined,
+    lastError: lastError || undefined,
+    downloadPath,
+    hasPdf,
+    affiliateUstStatus: readString(record, 'affiliateUstStatus', 'affiliate_ust_status', 'ustStatus', 'ust_status') || undefined,
+    raw: record,
+  };
+}
+
+function parseGutschriftCollection(
+  payload: unknown,
+  defaults: Partial<GutschriftDocument> = {},
+): GutschriftDocument[] {
+  if (Array.isArray(payload)) {
+    return payload.map((entry) => parseGutschriftDocument(coerceRecord(entry), defaults));
+  }
+
+  const record = coerceRecord(payload);
+  const directItems = coerceArray<Record<string, unknown>>(record.gutschriften ?? record.documents ?? record.items);
+  if (directItems.length) {
+    return directItems.map((entry) => parseGutschriftDocument(coerceRecord(entry), defaults));
+  }
+
+  const resultItems = coerceArray<Record<string, unknown>>(record.results).map((entry) =>
+    coerceRecord(entry.document ?? entry.gutschrift ?? entry),
+  );
+  if (resultItems.length) {
+    return resultItems.map((entry) => parseGutschriftDocument(entry, defaults));
+  }
+
+  return [];
+}
+
+function parseAffiliateListItem(record: Record<string, unknown>): AffiliateListItem {
+  const active = readBoolean(record, 'active', 'isActive', 'is_active') ?? true;
+  const explicitStatus = readString(record, 'status').trim().toLowerCase();
+  return {
+    login: readString(record, 'login', 'twitchLogin', 'twitch_login') || '—',
+    displayName: readString(record, 'displayName', 'display_name') || undefined,
+    active,
+    totalClaims: readNumber(record, 'totalClaims', 'total_claims') ?? 0,
+    totalProvisionEuro:
+      readNumber(record, 'totalProvisionEuro', 'total_provision_euro', 'totalProvision', 'total_provision') ?? 0,
+    createdAt: readString(record, 'createdAt', 'created_at') || null,
+    lastClaimAt: readString(record, 'lastClaimAt', 'last_claim_at') || null,
+    updatedAt: readString(record, 'updatedAt', 'updated_at') || null,
+    stripeConnectStatus: readString(record, 'stripeConnectStatus', 'stripe_connect_status') || undefined,
+    status: explicitStatus || normalizeAffiliateStatus(active),
+    raw: record,
+  };
+}
+
+function parseAffiliateDetail(payload: unknown, fallbackLogin: string): AffiliateDetail {
+  const record = coerceRecord(payload);
+  const affiliateRecord = coerceRecord(record.affiliate);
+  const profileRecord = coerceRecord(record.profile);
+  const merged = { ...affiliateRecord, ...profileRecord };
+  const fallbackAffiliateLogin = readString(merged, 'login', 'twitchLogin', 'twitch_login') || fallbackLogin;
+  const fallbackDisplayName = readString(merged, 'displayName', 'display_name') || undefined;
+  const readiness = parsePiiReadiness(
+    coerceRecord(
+      record.readiness ??
+        record.gutschriftReadiness ??
+        record.gutschrift_readiness ??
+        merged.gutschriftReadiness ??
+        merged.gutschrift_readiness,
+    ),
+  );
+  const stats = parseAffiliateStats(coerceRecord(record.stats ?? merged.stats));
+
+  return {
+    login: fallbackAffiliateLogin,
+    displayName: fallbackDisplayName,
+    active: readBoolean(merged, 'active', 'isActive', 'is_active') ?? false,
+    email: readString(merged, 'email', 'payoutEmail', 'payout_email') || undefined,
+    fullName: readString(merged, 'fullName', 'full_name') || undefined,
+    addressLine1: readString(merged, 'addressLine1', 'address_line1') || undefined,
+    addressCity: readString(merged, 'addressCity', 'address_city') || undefined,
+    addressZip: readString(merged, 'addressZip', 'address_zip') || undefined,
+    addressCountry: readString(merged, 'addressCountry', 'address_country') || undefined,
+    taxId: readString(merged, 'taxId', 'tax_id') || undefined,
+    vatId: readString(merged, 'vatId', 'vat_id') || undefined,
+    ustStatus: readString(merged, 'ustStatus', 'ust_status') || readiness.ustStatus || undefined,
+    stripeConnectStatus: readString(merged, 'stripeConnectStatus', 'stripe_connect_status') || undefined,
+    stripeAccountId: readString(merged, 'stripeAccountId', 'stripe_account_id') || undefined,
+    createdAt: readString(merged, 'createdAt', 'created_at') || null,
+    updatedAt: readString(merged, 'updatedAt', 'updated_at') || null,
+    profileUpdatedAt: readString(merged, 'profileUpdatedAt', 'profile_updated_at') || null,
+    stats,
+    claims: coerceArray<Record<string, unknown>>(record.claims).map((entry) => parseAffiliateClaim(coerceRecord(entry))),
+    readiness,
+    gutschriften: parseGutschriftCollection(record.gutschriften ?? record.documents ?? merged.gutschriften, {
+      affiliateLogin: fallbackAffiliateLogin,
+      affiliateDisplayName: fallbackDisplayName,
+    }),
+    raw: record,
+  };
+}
+
+function parseGenerateGutschriftenResult(payload: unknown): GenerateGutschriftenResult {
+  const record = coerceRecord(payload);
+  const results = coerceArray<Record<string, unknown>>(record.results).map((entry) => {
+    const item = coerceRecord(entry);
+    const affiliateLogin =
+      readString(item, 'affiliateLogin', 'affiliate_login', 'login', 'twitch_login') || undefined;
+    return {
+      ok: readBoolean(item, 'ok') ?? false,
+      status: readString(item, 'status') || undefined,
+      action: readString(item, 'action') || undefined,
+      affiliateLogin,
+      periodYear: readNumber(item, 'periodYear', 'period_year'),
+      periodMonth: readNumber(item, 'periodMonth', 'period_month'),
+      document: Object.keys(coerceRecord(item.document)).length
+        ? parseGutschriftDocument(coerceRecord(item.document), { affiliateLogin })
+        : undefined,
+      readiness: Object.keys(coerceRecord(item.readiness)).length
+        ? parsePiiReadiness(coerceRecord(item.readiness))
+        : undefined,
+      raw: item,
+    };
+  });
+
+  return {
+    ok: readBoolean(record, 'ok') ?? results.some((entry) => entry.ok),
+    results,
+    raw: record,
+  };
+}
+
+async function adminFirst<T>(suffixes: string[]): Promise<T | null> {
+  for (const suffix of suffixes) {
+    try {
+      return await admin<T>(suffix);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        continue;
+      }
+      throw error;
+    }
+  }
+  return null;
 }
 
 function parseRaidSnapshot(record: Record<string, unknown>): RaidConfigSnapshot {
@@ -369,6 +667,37 @@ async function postAdminJson<T, TBody extends object = Record<string, unknown>>(
   });
 }
 
+async function postJson<T, TBody extends object = Record<string, unknown>>(path: string, body: TBody) {
+  const normalizedBody = coerceRecord(body);
+  const csrfToken = await resolveJsonCsrfToken(normalizedBody);
+  const payload = { ...normalizedBody, csrf_token: csrfToken };
+  return request<T>(path, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': csrfToken,
+    },
+    body: JSON.stringify(payload),
+  });
+}
+
+async function postAdminFirstJson<T, TBody extends object = Record<string, unknown>>(
+  suffixes: string[],
+  body: TBody,
+): Promise<T | null> {
+  for (const suffix of suffixes) {
+    try {
+      return await postAdminJson<T, TBody>(suffix, body);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        continue;
+      }
+      throw error;
+    }
+  }
+  return null;
+}
+
 export async function updatePromoConfig(body: Record<string, unknown>) {
   return postAdminJson<Record<string, unknown>>('/config/promo', body);
 }
@@ -392,11 +721,126 @@ export async function fetchSubscriptions(): Promise<SubscriptionRecord[]> {
     : (coerceArray(coerceRecord(payload).items ?? coerceRecord(payload).subscriptions) as SubscriptionRecord[]);
 }
 
-export async function fetchAffiliates(): Promise<AffiliateRecord[]> {
-  const payload = await admin<unknown>('/billing/affiliates');
-  return Array.isArray(payload)
-    ? (payload as AffiliateRecord[])
-    : (coerceArray(coerceRecord(payload).items ?? coerceRecord(payload).affiliates) as AffiliateRecord[]);
+export async function fetchAffiliatesList(): Promise<AffiliateListItem[]> {
+  try {
+    const payload = await adminFirst<unknown>(['/affiliates', '/billing/affiliates']);
+    if (payload === null) {
+      return [];
+    }
+    const rows = Array.isArray(payload)
+      ? payload
+      : coerceArray<Record<string, unknown>>(coerceRecord(payload).items ?? coerceRecord(payload).affiliates);
+    return rows.map((row) => parseAffiliateListItem(coerceRecord(row)));
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+export async function fetchAffiliateStats(): Promise<AffiliateStats> {
+  try {
+    const payload = await admin<Record<string, unknown>>('/affiliates/stats');
+    return parseAffiliateStats(payload);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return emptyAffiliateStats({ totalAffiliates: 0, activeAffiliates: 0 });
+    }
+    throw error;
+  }
+}
+
+export async function fetchAffiliateDetail(login: string): Promise<AffiliateDetail> {
+  try {
+    const payload = await admin<unknown>(`/affiliates/${encodeURIComponent(login)}`);
+    return parseAffiliateDetail(payload, login);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return {
+        login,
+        active: false,
+        stats: emptyAffiliateStats(),
+        claims: [],
+        readiness: emptyReadiness(),
+        gutschriften: [],
+        raw: {},
+      };
+    }
+    throw error;
+  }
+}
+
+export async function toggleAffiliateActive(login: string): Promise<{ login: string; active: boolean }> {
+  const payload = await postAdminJson<Record<string, unknown>>(`/affiliates/${encodeURIComponent(login)}/toggle`, {});
+  return {
+    login: readString(payload, 'login', 'twitchLogin', 'twitch_login') || login,
+    active: readBoolean(payload, 'active', 'isActive', 'is_active') ?? false,
+  };
+}
+
+export async function fetchAllGutschriften(): Promise<GutschriftDocument[]> {
+  try {
+    const payload = await adminFirst<unknown>(['/gutschriften', '/billing/gutschriften', '/affiliates/gutschriften']);
+    if (payload === null) {
+      return [];
+    }
+    return parseGutschriftCollection(payload);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+export async function fetchAffiliateGutschriften(login: string): Promise<GutschriftDocument[]> {
+  const encodedLogin = encodeURIComponent(login);
+  try {
+    const payload = await adminFirst<unknown>([
+      `/affiliates/${encodedLogin}/gutschriften`,
+      `/gutschriften?affiliate_login=${encodedLogin}`,
+      `/billing/gutschriften?affiliate_login=${encodedLogin}`,
+      `/billing/gutschriften?login=${encodedLogin}`,
+    ]);
+    if (payload !== null) {
+      return parseGutschriftCollection(payload, { affiliateLogin: login });
+    }
+  } catch (error) {
+    if (!(error instanceof ApiError && error.status === 404)) {
+      throw error;
+    }
+  }
+
+  const detail = await fetchAffiliateDetail(login);
+  return detail.gutschriften;
+}
+
+export async function generateGutschriften(
+  params: GenerateGutschriftenParams = {},
+): Promise<GenerateGutschriftenResult> {
+  const requestBody = Object.fromEntries(
+    Object.entries({
+      affiliate_login: params.affiliateLogin?.trim() || undefined,
+      year: params.year,
+      month: params.month,
+      force: params.force ? true : undefined,
+    }).filter(([, value]) => value !== undefined && value !== ''),
+  );
+
+  const adminPayload = await postAdminFirstJson<Record<string, unknown>>(
+    ['/gutschriften/generate', '/billing/gutschriften/generate'],
+    requestBody,
+  );
+  if (adminPayload !== null) {
+    return parseGenerateGutschriftenResult(adminPayload);
+  }
+
+  const legacyPayload = await postJson<Record<string, unknown>>(
+    '/twitch/api/affiliate/admin/generate-gutschriften',
+    requestBody,
+  );
+  return parseGenerateGutschriftenResult(legacyPayload);
 }
 
 export async function fetchLegacyCsrfToken(): Promise<string> {

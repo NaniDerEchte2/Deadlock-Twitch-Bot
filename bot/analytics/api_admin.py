@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import platform
 import re
@@ -19,6 +21,8 @@ from ..app_keys import (
     ANALYTICS_DB_FINGERPRINT_MISMATCH_KEY,
     INTERNAL_API_ANALYTICS_DB_FINGERPRINT_KEY,
 )
+from ..dashboard.affiliate.affiliate_pii import AffiliatePII
+from ..dashboard.affiliate.gutschrift import AffiliateGutschriftService
 from ..logging_setup import log_path, logs_dir
 from ..promo_mode import (
     evaluate_global_promo_mode,
@@ -212,6 +216,15 @@ def _fetch_raw_chat_health_snapshot(conn: Any) -> dict[str, Any]:
     }
 
 
+_admin_log = logging.getLogger("analytics.admin")
+
+
+def _admin_500(exc: Exception) -> web.Response:
+    """Return generic 500 without leaking internal details."""
+    _admin_log.exception("Admin API error: %s", type(exc).__name__)
+    return web.json_response({"error": "Internal server error"}, status=500)
+
+
 class _AnalyticsAdminMixin:
     """Admin-only endpoints for the `/twitch/api/admin/*` namespace."""
 
@@ -237,12 +250,28 @@ class _AnalyticsAdminMixin:
         )
         # Affiliate management endpoints
         router.add_get(
-            "/twitch/api/admin/affiliates",
-            self._api_admin_affiliates_list,
+            "/twitch/api/admin/affiliates/gutschriften",
+            self._api_admin_affiliate_gutschriften,
+        )
+        router.add_get(
+            "/twitch/api/admin/affiliates/gutschriften/{gutschrift_id}/pdf",
+            self._api_admin_affiliate_gutschrift_pdf,
+        )
+        router.add_post(
+            "/twitch/api/admin/affiliates/generate-gutschriften",
+            self._api_admin_affiliate_generate_gutschriften,
         )
         router.add_get(
             "/twitch/api/admin/affiliates/stats",
             self._api_admin_affiliate_stats,
+        )
+        router.add_get(
+            "/twitch/api/admin/affiliates",
+            self._api_admin_affiliates_list,
+        )
+        router.add_get(
+            "/twitch/api/admin/affiliates/{login}/gutschriften",
+            self._api_admin_affiliate_gutschriften_for_login,
         )
         router.add_get(
             "/twitch/api/admin/affiliates/{login}",
@@ -301,6 +330,116 @@ class _AnalyticsAdminMixin:
             return bool(verifier(request, provided_token))
         except Exception:
             return False
+
+    @staticmethod
+    def _admin_is_missing_schema_error(exc: Exception) -> bool:
+        normalized = str(exc).strip().lower()
+        return any(
+            marker in normalized
+            for marker in (
+                "does not exist",
+                "no such table",
+                "undefined table",
+                "no such column",
+                "undefined column",
+            )
+        )
+
+    def _admin_affiliate_prepare_conn(self, conn: Any) -> None:
+        ensure_tables = getattr(self, "_affiliate_ensure_tables", None)
+        if callable(ensure_tables):
+            ensure_tables(conn)
+
+    def _admin_affiliate_load_pii(self, conn: Any, login: str) -> dict[str, Any]:
+        try:
+            return AffiliatePII.load_pii(conn, login)
+        except Exception as exc:
+            if self._admin_is_missing_schema_error(exc):
+                return {
+                    "full_name": "",
+                    "email": "",
+                    "address_line1": "",
+                    "address_city": "",
+                    "address_zip": "",
+                    "address_country": "DE",
+                    "tax_id": "",
+                    "vat_id": "",
+                    "ust_status": "unknown",
+                    "updated_at": None,
+                }
+            raise
+
+    @staticmethod
+    def _admin_affiliate_gutschrift_download_path(gutschrift_id: int) -> str | None:
+        if gutschrift_id <= 0:
+            return None
+        return f"/twitch/api/admin/affiliates/gutschriften/{gutschrift_id}/pdf"
+
+    def _admin_affiliate_gutschriften_summary(
+        self,
+        conn: Any,
+        *,
+        affiliate_login: str | None = None,
+    ) -> dict[str, Any]:
+        where_clause = ""
+        params: list[Any] = []
+        if affiliate_login:
+            where_clause = "WHERE affiliate_twitch_login = ?"
+            params.append(affiliate_login)
+
+        try:
+            row = conn.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS total_gutschriften,
+                    COALESCE(SUM(gross_amount_cents), 0) AS total_gutschrift_amount_cents,
+                    COALESCE(
+                        SUM(
+                            CASE
+                                WHEN pdf_generated_at IS NOT NULL AND email_sent_at IS NULL
+                                THEN 1
+                                ELSE 0
+                            END
+                        ),
+                        0
+                    ) AS pending_email_gutschriften,
+                    MAX(pdf_generated_at) AS last_generated_at,
+                    MAX(email_sent_at) AS last_emailed_at
+                FROM affiliate_gutschriften
+                {where_clause}
+                """,
+                params,
+            ).fetchone()
+        except Exception as exc:
+            if self._admin_is_missing_schema_error(exc):
+                return {
+                    "total_gutschriften": 0,
+                    "total_gutschrift_amount_cents": 0,
+                    "total_gutschrift_amount": 0.0,
+                    "pending_email_gutschriften": 0,
+                    "last_generated_at": None,
+                    "last_emailed_at": None,
+                }
+            raise
+
+        total_gutschrift_amount_cents = _safe_int(
+            _row_get_value(row, "total_gutschrift_amount_cents", 1, 0),
+            default=0,
+        )
+        return {
+            "total_gutschriften": _safe_int(
+                _row_get_value(row, "total_gutschriften", 0, 0),
+                default=0,
+            ),
+            "total_gutschrift_amount_cents": total_gutschrift_amount_cents,
+            "total_gutschrift_amount": round(total_gutschrift_amount_cents / 100.0, 2),
+            "pending_email_gutschriften": _safe_int(
+                _row_get_value(row, "pending_email_gutschriften", 2, 0),
+                default=0,
+            ),
+            "last_generated_at": _row_get_value(row, "last_generated_at", 3, None),
+            "last_emailed_at": _row_get_value(row, "last_emailed_at", 4, None),
+        }
 
     @staticmethod
     def _admin_mask_secret(raw_value: Any) -> str:
@@ -738,7 +877,7 @@ class _AnalyticsAdminMixin:
                     """
                 ).fetchall()
         except Exception as exc:
-            return web.json_response({"error": str(exc)}, status=500)
+            return _admin_500(exc)
 
         payload = []
         for row in rows:
@@ -887,7 +1026,7 @@ class _AnalyticsAdminMixin:
                     (login,),
                 ).fetchall()
         except Exception as exc:
-            return web.json_response({"error": str(exc)}, status=500)
+            return _admin_500(exc)
 
         session_payload = []
         for session in sessions:
@@ -1196,7 +1335,7 @@ class _AnalyticsAdminMixin:
                         }
                     )
         except Exception as exc:
-            return web.json_response({"error": str(exc)}, status=500)
+            return _admin_500(exc)
 
         return web.json_response(
             {
@@ -1289,7 +1428,7 @@ class _AnalyticsAdminMixin:
                     scope=scope,
                 )
         except Exception as exc:
-            return web.json_response({"error": str(exc)}, status=500)
+            return _admin_500(exc)
 
         return web.json_response(
             {
@@ -1330,7 +1469,7 @@ class _AnalyticsAdminMixin:
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:
-            return web.json_response({"error": str(exc)}, status=500)
+            return _admin_500(exc)
 
         return web.json_response({"ok": True, "config": saved, "evaluation": evaluation})
 
@@ -1373,7 +1512,7 @@ class _AnalyticsAdminMixin:
                     updated_by=actor_label,
                 )
         except Exception as exc:
-            return web.json_response({"error": str(exc)}, status=500)
+            return _admin_500(exc)
 
         persisted_interval_seconds = _safe_int(
             saved.get("value", interval_seconds),
@@ -1481,7 +1620,7 @@ class _AnalyticsAdminMixin:
                     scope=scope,
                 )
         except Exception as exc:
-            return web.json_response({"error": str(exc)}, status=500)
+            return _admin_500(exc)
 
         return web.json_response(
             {
@@ -1556,7 +1695,7 @@ class _AnalyticsAdminMixin:
                     scope=scope,
                 )
         except Exception as exc:
-            return web.json_response({"error": str(exc)}, status=500)
+            return _admin_500(exc)
 
         return web.json_response(
             {
@@ -1602,7 +1741,7 @@ class _AnalyticsAdminMixin:
                     """
                 ).fetchall()
         except Exception as exc:
-            return web.json_response({"error": str(exc)}, status=500)
+            return _admin_500(exc)
 
         payload = [
             {
@@ -1643,7 +1782,7 @@ class _AnalyticsAdminMixin:
                     """
                 ).fetchall()
         except Exception as exc:
-            return web.json_response({"error": str(exc)}, status=500)
+            return _admin_500(exc)
 
         payload = []
         for row in rows:
@@ -1672,47 +1811,93 @@ class _AnalyticsAdminMixin:
 
         try:
             with storage.get_conn() as conn:
-                rows = conn.execute(
-                    f"""
-                    SELECT
-                        a.twitch_login,
-                        a.display_name,
-                        a.is_active,
-                        a.created_at,
-                        COALESCE(claim_stats.total_claims, 0)       AS total_claims,
-                        COALESCE(comm_stats.total_provision, 0)     AS total_provision,
-                        claim_stats.last_claim_at
-                    FROM affiliate_accounts a
-                    LEFT JOIN (
+                self._admin_affiliate_prepare_conn(conn)
+                try:
+                    rows = conn.execute(
+                        f"""
                         SELECT
-                            affiliate_twitch_login,
-                            COUNT(*) AS total_claims,
-                            MAX(claimed_at) AS last_claim_at
-                        FROM affiliate_streamer_claims
-                        GROUP BY affiliate_twitch_login
-                    ) claim_stats ON claim_stats.affiliate_twitch_login = a.twitch_login
-                    LEFT JOIN (
+                            a.twitch_login,
+                            a.display_name,
+                            a.is_active,
+                            a.created_at,
+                            COALESCE(claim_stats.total_claims, 0)       AS total_claims,
+                            COALESCE(comm_stats.total_provision, 0)     AS total_provision,
+                            claim_stats.last_claim_at,
+                            COALESCE(pii.ust_status, 'unknown')         AS ust_status,
+                            CASE WHEN pii.twitch_login IS NOT NULL THEN 1 ELSE 0 END AS has_pii
+                        FROM affiliate_accounts a
+                        LEFT JOIN affiliate_pii pii
+                          ON pii.twitch_login = a.twitch_login
+                        LEFT JOIN (
+                            SELECT
+                                affiliate_twitch_login,
+                                COUNT(*) AS total_claims,
+                                MAX(claimed_at) AS last_claim_at
+                            FROM affiliate_streamer_claims
+                            GROUP BY affiliate_twitch_login
+                        ) claim_stats ON claim_stats.affiliate_twitch_login = a.twitch_login
+                        LEFT JOIN (
+                            SELECT
+                                affiliate_twitch_login,
+                                SUM(
+                                    CASE
+                                        WHEN status IN ({_AFFILIATE_REVENUE_STATUS_PLACEHOLDERS})
+                                        THEN commission_cents
+                                        ELSE 0
+                                    END
+                                ) AS total_provision
+                            FROM affiliate_commissions
+                            GROUP BY affiliate_twitch_login
+                        ) comm_stats ON comm_stats.affiliate_twitch_login = a.twitch_login
+                        ORDER BY a.created_at DESC
+                        """,
+                        [*_AFFILIATE_REVENUE_STATUSES],
+                    ).fetchall()
+                except Exception as exc:
+                    if not self._admin_is_missing_schema_error(exc):
+                        raise
+                    rows = conn.execute(
+                        f"""
                         SELECT
-                            affiliate_twitch_login,
-                            SUM(
-                                CASE
-                                    WHEN status IN ({_AFFILIATE_REVENUE_STATUS_PLACEHOLDERS})
-                                    THEN commission_cents
-                                    ELSE 0
-                                END
-                            ) AS total_provision
-                        FROM affiliate_commissions
-                        GROUP BY affiliate_twitch_login
-                    ) comm_stats ON comm_stats.affiliate_twitch_login = a.twitch_login
-                    ORDER BY a.created_at DESC
-                    """,
-                    [*_AFFILIATE_REVENUE_STATUSES],
-                ).fetchall()
+                            a.twitch_login,
+                            a.display_name,
+                            a.is_active,
+                            a.created_at,
+                            COALESCE(claim_stats.total_claims, 0)       AS total_claims,
+                            COALESCE(comm_stats.total_provision, 0)     AS total_provision,
+                            claim_stats.last_claim_at,
+                            'unknown'                                   AS ust_status,
+                            0                                           AS has_pii
+                        FROM affiliate_accounts a
+                        LEFT JOIN (
+                            SELECT
+                                affiliate_twitch_login,
+                                COUNT(*) AS total_claims,
+                                MAX(claimed_at) AS last_claim_at
+                            FROM affiliate_streamer_claims
+                            GROUP BY affiliate_twitch_login
+                        ) claim_stats ON claim_stats.affiliate_twitch_login = a.twitch_login
+                        LEFT JOIN (
+                            SELECT
+                                affiliate_twitch_login,
+                                SUM(
+                                    CASE
+                                        WHEN status IN ({_AFFILIATE_REVENUE_STATUS_PLACEHOLDERS})
+                                        THEN commission_cents
+                                        ELSE 0
+                                    END
+                                ) AS total_provision
+                            FROM affiliate_commissions
+                            GROUP BY affiliate_twitch_login
+                        ) comm_stats ON comm_stats.affiliate_twitch_login = a.twitch_login
+                        ORDER BY a.created_at DESC
+                        """,
+                        [*_AFFILIATE_REVENUE_STATUSES],
+                    ).fetchall()
         except Exception as exc:
-            normalized = str(exc).strip().lower()
-            if any(m in normalized for m in ("does not exist", "no such table", "undefined table")):
+            if self._admin_is_missing_schema_error(exc):
                 return web.json_response({"affiliates": []})
-            return web.json_response({"error": str(exc)}, status=500)
+            return _admin_500(exc)
 
         affiliates = []
         for row in rows:
@@ -1734,9 +1919,298 @@ class _AnalyticsAdminMixin:
                     "total_provision": round(total_provision_cents / 100.0, 2),
                     "created_at": _row_get_value(row, "created_at", 3, None),
                     "last_claim_at": _row_get_value(row, "last_claim_at", 6, None),
+                    "ust_status": str(
+                        _row_get_value(row, "ust_status", 7, "unknown") or "unknown"
+                    ).strip()
+                    or "unknown",
+                    "has_pii": bool(_safe_int(_row_get_value(row, "has_pii", 8, 0), default=0)),
                 }
             )
         return web.json_response({"affiliates": affiliates})
+
+    async def _api_admin_affiliate_gutschriften(self, request: web.Request) -> web.Response:
+        """List all affiliate gutschriften for admins."""
+        auth_error = self._admin_auth_error(request, getattr(self, "_require_v2_admin_api", None))
+        if auth_error is not None:
+            return auth_error
+
+        try:
+            with storage.get_conn() as conn:
+                self._admin_affiliate_prepare_conn(conn)
+                try:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            g.id,
+                            g.affiliate_twitch_login,
+                            g.period_year,
+                            g.period_month,
+                            g.gutschrift_number,
+                            g.net_amount_cents,
+                            g.vat_amount_cents,
+                            g.gross_amount_cents,
+                            g.commission_ids,
+                            g.affiliate_ust_status,
+                            g.email_error,
+                            g.pdf_generated_at,
+                            g.email_sent_at,
+                            g.created_at,
+                            CASE WHEN g.pdf_blob IS NOT NULL THEN 1 ELSE NULL END AS pdf_blob,
+                            a.display_name,
+                            a.is_active,
+                            COALESCE(pii.ust_status, 'unknown') AS ust_status,
+                            CASE WHEN pii.twitch_login IS NOT NULL THEN 1 ELSE 0 END AS has_pii
+                        FROM affiliate_gutschriften g
+                        JOIN affiliate_accounts a
+                          ON a.twitch_login = g.affiliate_twitch_login
+                        LEFT JOIN affiliate_pii pii
+                          ON pii.twitch_login = g.affiliate_twitch_login
+                        ORDER BY g.period_year DESC, g.period_month DESC, g.id DESC
+                        """
+                    ).fetchall()
+                except Exception as exc:
+                    if not self._admin_is_missing_schema_error(exc):
+                        raise
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            g.id,
+                            g.affiliate_twitch_login,
+                            g.period_year,
+                            g.period_month,
+                            g.gutschrift_number,
+                            g.net_amount_cents,
+                            g.vat_amount_cents,
+                            g.gross_amount_cents,
+                            g.commission_ids,
+                            g.affiliate_ust_status,
+                            g.email_error,
+                            g.pdf_generated_at,
+                            g.email_sent_at,
+                            g.created_at,
+                            CASE WHEN g.pdf_blob IS NOT NULL THEN 1 ELSE NULL END AS pdf_blob,
+                            a.display_name,
+                            a.is_active,
+                            'unknown' AS ust_status,
+                            0 AS has_pii
+                        FROM affiliate_gutschriften g
+                        JOIN affiliate_accounts a
+                          ON a.twitch_login = g.affiliate_twitch_login
+                        ORDER BY g.period_year DESC, g.period_month DESC, g.id DESC
+                        """
+                    ).fetchall()
+        except Exception as exc:
+            if self._admin_is_missing_schema_error(exc):
+                return web.json_response({"gutschriften": [], "count": 0})
+            return _admin_500(exc)
+
+        documents = []
+        for row in rows:
+            payload = dict(AffiliateGutschriftService._row_to_metadata(row))
+            row_id = _safe_int(payload.get("id"), default=0)
+            payload["download_path"] = self._admin_affiliate_gutschrift_download_path(row_id)
+            payload["affiliate_login"] = str(
+                _row_get_value(row, "affiliate_twitch_login", 1, "") or ""
+            ).strip()
+            payload["display_name"] = _row_get_value(row, "display_name", 15, None)
+            payload["active"] = bool(_safe_int(_row_get_value(row, "is_active", 16, 1), default=1))
+            payload["ust_status"] = str(
+                _row_get_value(row, "ust_status", 17, "unknown") or "unknown"
+            ).strip() or "unknown"
+            payload["has_pii"] = bool(_safe_int(_row_get_value(row, "has_pii", 18, 0), default=0))
+            documents.append(payload)
+        return web.json_response({"gutschriften": documents, "count": len(documents)})
+
+    async def _api_admin_affiliate_gutschriften_for_login(
+        self,
+        request: web.Request,
+    ) -> web.Response:
+        """List all gutschriften for one affiliate."""
+        auth_error = self._admin_auth_error(request, getattr(self, "_require_v2_admin_api", None))
+        if auth_error is not None:
+            return auth_error
+
+        login = _normalize_login(request.match_info.get("login", ""))
+        if not login:
+            return web.json_response({"error": "invalid_login"}, status=400)
+
+        try:
+            with storage.get_conn() as conn:
+                self._admin_affiliate_prepare_conn(conn)
+                account_row = conn.execute(
+                    """
+                    SELECT twitch_login, display_name, is_active, created_at, updated_at
+                    FROM affiliate_accounts
+                    WHERE twitch_login = ?
+                    """,
+                    (login,),
+                ).fetchone()
+                if not account_row:
+                    return web.json_response({"error": "not_found"}, status=404)
+
+                pii = self._admin_affiliate_load_pii(conn, login)
+                readiness = AffiliateGutschriftService.build_readiness(pii)
+                summary = self._admin_affiliate_gutschriften_summary(
+                    conn,
+                    affiliate_login=login,
+                )
+                try:
+                    documents = AffiliateGutschriftService.list_for_affiliate(conn, login)
+                except Exception as exc:
+                    if not self._admin_is_missing_schema_error(exc):
+                        raise
+                    documents = []
+        except Exception as exc:
+            if self._admin_is_missing_schema_error(exc):
+                return web.json_response({"error": "not_found"}, status=404)
+            return _admin_500(exc)
+
+        items = []
+        for document in documents:
+            payload = dict(document)
+            row_id = _safe_int(payload.get("id"), default=0)
+            payload["download_path"] = self._admin_affiliate_gutschrift_download_path(row_id)
+            items.append(payload)
+
+        affiliate = {
+            "login": str(_row_get_value(account_row, "twitch_login", 0, "") or "").strip(),
+            "display_name": _row_get_value(account_row, "display_name", 1, None),
+            "active": bool(_safe_int(_row_get_value(account_row, "is_active", 2, 1), default=1)),
+            "created_at": _row_get_value(account_row, "created_at", 3, None),
+            "updated_at": _row_get_value(account_row, "updated_at", 4, None),
+        }
+        return web.json_response(
+            {
+                "affiliate": affiliate,
+                "ust_status": str(pii.get("ust_status") or "unknown"),
+                "readiness": readiness,
+                "gutschriften_summary": summary,
+                "gutschriften": items,
+            }
+        )
+
+    async def _api_admin_affiliate_gutschrift_pdf(self, request: web.Request) -> web.Response:
+        """Download a stored affiliate gutschrift PDF without ownership checks."""
+        auth_error = self._admin_auth_error(request, getattr(self, "_require_v2_admin_api", None))
+        if auth_error is not None:
+            return auth_error
+
+        try:
+            gutschrift_id = int(request.match_info.get("gutschrift_id", "0"))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "invalid_gutschrift_id"}, status=400)
+        if gutschrift_id <= 0:
+            return web.json_response({"error": "invalid_gutschrift_id"}, status=400)
+
+        try:
+            with storage.get_conn() as conn:
+                self._admin_affiliate_prepare_conn(conn)
+                row = conn.execute(
+                    """
+                    SELECT affiliate_twitch_login
+                    FROM affiliate_gutschriften
+                    WHERE id = ?
+                    """,
+                    (gutschrift_id,),
+                ).fetchone()
+                if not row:
+                    return web.json_response({"error": "not_found"}, status=404)
+
+                affiliate_login = _normalize_login(
+                    _row_get_value(row, "affiliate_twitch_login", 0, "")
+                )
+                if not affiliate_login:
+                    return web.json_response({"error": "not_found"}, status=404)
+
+                resolved = AffiliateGutschriftService.get_pdf(
+                    conn,
+                    affiliate_login=affiliate_login,
+                    gutschrift_id=gutschrift_id,
+                )
+        except Exception as exc:
+            if self._admin_is_missing_schema_error(exc):
+                return web.json_response({"error": "not_found"}, status=404)
+            return _admin_500(exc)
+
+        if resolved is None:
+            return web.json_response({"error": "not_found"}, status=404)
+
+        metadata, pdf_bytes = resolved
+        filename = str(
+            metadata.get("gutschrift_number") or f"gutschrift-{gutschrift_id}"
+        ).replace('"', "")
+        return web.Response(
+            body=pdf_bytes,
+            content_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}.pdf"',
+            },
+        )
+
+    async def _api_admin_affiliate_generate_gutschriften(
+        self,
+        request: web.Request,
+    ) -> web.Response:
+        """Trigger affiliate gutschrift generation as admin."""
+        auth_error = self._admin_auth_error(request, getattr(self, "_require_v2_admin_api", None))
+        if auth_error is not None:
+            return auth_error
+
+        csrf_token, payload = await self._admin_extract_csrf(request)
+        if not self._admin_verify_csrf(request, csrf_token):
+            return web.json_response({"error": "invalid_csrf"}, status=403)
+
+        affiliate_login = _normalize_login(
+            payload.get("affiliate_login")
+            or payload.get("twitch_login")
+            or payload.get("login")
+            or ""
+        )
+        raw_login = str(
+            payload.get("affiliate_login")
+            or payload.get("twitch_login")
+            or payload.get("login")
+            or ""
+        ).strip()
+        if raw_login and not affiliate_login:
+            return web.json_response({"error": "invalid_login"}, status=400)
+
+        force = str(payload.get("force") or "").strip().lower() in {"1", "true", "yes", "on"}
+        year_raw = payload.get("year")
+        month_raw = payload.get("month")
+        year = None
+        month = None
+        if year_raw not in (None, "") or month_raw not in (None, ""):
+            if year_raw in (None, "") or month_raw in (None, ""):
+                return web.json_response({"error": "invalid_period"}, status=400)
+            try:
+                year = int(year_raw)
+                month = int(month_raw)
+            except (TypeError, ValueError):
+                return web.json_response({"error": "invalid_period"}, status=400)
+            if year < 2000 or month < 1 or month > 12:
+                return web.json_response({"error": "invalid_period"}, status=400)
+
+        runner = getattr(self, "_affiliate_run_gutschrift_job", None)
+        if not callable(runner):
+            return web.json_response({"error": "gutschrift_job_unavailable"}, status=500)
+
+        try:
+            result = await asyncio.to_thread(
+                runner,
+                affiliate_login=affiliate_login or None,
+                year=year,
+                month=month,
+                force=force,
+            )
+        except Exception as exc:
+            return _admin_500(exc)
+        return web.json_response(
+            {
+                "ok": True,
+                "results": list(result.get("results") or []),
+            }
+        )
 
     async def _api_admin_affiliate_detail(self, request: web.Request) -> web.Response:
         """Get detailed info for a specific affiliate."""
@@ -1750,6 +2224,7 @@ class _AnalyticsAdminMixin:
 
         try:
             with storage.get_conn() as conn:
+                self._admin_affiliate_prepare_conn(conn)
                 # Fetch affiliate account
                 acct_row = conn.execute(
                     """
@@ -1807,11 +2282,17 @@ class _AnalyticsAdminMixin:
                     """,
                     (login, *_AFFILIATE_REVENUE_STATUSES),
                 ).fetchone()
+
+                pii = self._admin_affiliate_load_pii(conn, login)
+                readiness = AffiliateGutschriftService.build_readiness(pii)
+                gutschriften_summary = self._admin_affiliate_gutschriften_summary(
+                    conn,
+                    affiliate_login=login,
+                )
         except Exception as exc:
-            normalized = str(exc).strip().lower()
-            if any(m in normalized for m in ("does not exist", "no such table", "undefined table")):
+            if self._admin_is_missing_schema_error(exc):
                 return web.json_response({"error": "not_found"}, status=404)
-            return web.json_response({"error": str(exc)}, status=500)
+            return _admin_500(exc)
 
         stripe_id = str(_row_get_value(acct_row, "stripe_account_id", 6, "") or "")
         masked_stripe = (
@@ -1869,6 +2350,12 @@ class _AnalyticsAdminMixin:
             "affiliate": affiliate,
             "claims": claims,
             "stats": stats,
+            "ust_status": str(pii.get("ust_status") or "unknown"),
+            "pii_readiness": readiness,
+            "gutschriften_summary": {
+                "count": gutschriften_summary["total_gutschriften"],
+                "total_gross_cents": gutschriften_summary["total_gutschrift_amount_cents"],
+            },
         })
 
     async def _api_admin_affiliate_toggle(self, request: web.Request) -> web.Response:
@@ -1913,7 +2400,7 @@ class _AnalyticsAdminMixin:
             normalized = str(exc).strip().lower()
             if any(m in normalized for m in ("does not exist", "no such table", "undefined table")):
                 return web.json_response({"error": "not_found"}, status=404)
-            return web.json_response({"error": str(exc)}, status=500)
+            return _admin_500(exc)
 
         return web.json_response({"login": login, "active": bool(new_status)})
 
@@ -1930,6 +2417,7 @@ class _AnalyticsAdminMixin:
         )
         try:
             with storage.get_conn() as conn:
+                self._admin_affiliate_prepare_conn(conn)
                 acct_row = conn.execute(
                     """
                     SELECT
@@ -1973,9 +2461,9 @@ class _AnalyticsAdminMixin:
                     """,
                     (month_start_iso, *_AFFILIATE_REVENUE_STATUSES, *_AFFILIATE_REVENUE_STATUSES),
                 ).fetchone()
+                gutschrift_summary = self._admin_affiliate_gutschriften_summary(conn)
         except Exception as exc:
-            normalized = str(exc).strip().lower()
-            if any(m in normalized for m in ("does not exist", "no such table", "undefined table")):
+            if self._admin_is_missing_schema_error(exc):
                 return web.json_response({
                     "total_affiliates": 0,
                     "active_affiliates": 0,
@@ -1983,8 +2471,11 @@ class _AnalyticsAdminMixin:
                     "total_provision": 0.0,
                     "this_month_claims": 0,
                     "this_month_provision": 0.0,
+                    "total_gutschriften": 0,
+                    "total_gutschrift_amount": 0.0,
+                    "pending_email_gutschriften": 0,
                 })
-            return web.json_response({"error": str(exc)}, status=500)
+            return _admin_500(exc)
 
         total_provision_cents = _safe_int(
             _row_get_value(comm_row, "total_provision", 0, 0), default=0
@@ -2008,6 +2499,9 @@ class _AnalyticsAdminMixin:
                 _row_get_value(claim_row, "this_month_claims", 1, 0), default=0
             ),
             "this_month_provision": round(this_month_provision_cents / 100.0, 2),
+            "total_gutschriften": gutschrift_summary["total_gutschriften"],
+            "total_gutschrift_amount": gutschrift_summary["total_gutschrift_amount"],
+            "pending_email_gutschriften": gutschrift_summary["pending_email_gutschriften"],
         })
 
 
