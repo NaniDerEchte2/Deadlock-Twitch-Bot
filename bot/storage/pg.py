@@ -12,6 +12,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import time
 from collections.abc import Iterable, Sequence
 from urllib.parse import urlsplit
 
@@ -2690,4 +2691,60 @@ def ensure_schema(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_expires ON dashboard_sessions(expires_at)"
     )
 
+    # 21) Promo-Cooldown-Persistenz
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS twitch_promo_cooldowns (
+            login           TEXT NOT NULL,
+            cooldown_type   TEXT NOT NULL,
+            wall_ts         DOUBLE PRECISION NOT NULL,
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (login, cooldown_type)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_twitch_promo_cooldowns_wall_ts ON twitch_promo_cooldowns(wall_ts)"
+    )
+
     migrate_legacy_partner_registry(_CompatConnection(conn))
+
+
+def save_promo_cooldown(login: str, cooldown_type: str, wall_ts: float) -> None:
+    """Persist a promo cooldown timestamp. Non-fatal on failure."""
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                """INSERT INTO twitch_promo_cooldowns (login, cooldown_type, wall_ts, updated_at)
+                   VALUES (?, ?, ?, now())
+                   ON CONFLICT (login, cooldown_type)
+                   DO UPDATE SET wall_ts = EXCLUDED.wall_ts, updated_at = now()""",
+                (login.lower(), cooldown_type, wall_ts),
+            )
+    except Exception:
+        log.debug("Failed to persist promo cooldown for %s/%s", login, cooldown_type, exc_info=True)
+
+
+def load_promo_cooldowns() -> list[tuple[str, str, float]]:
+    """Load all promo cooldowns. Returns list of (login, cooldown_type, wall_ts)."""
+    try:
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT login, cooldown_type, wall_ts FROM twitch_promo_cooldowns"
+            ).fetchall()
+            return [(str(r["login"]), str(r["cooldown_type"]), float(r["wall_ts"])) for r in (rows or [])]
+    except Exception:
+        log.debug("Failed to load promo cooldowns", exc_info=True)
+        return []
+
+
+def cleanup_stale_promo_cooldowns(max_age_hours: int = 24) -> None:
+    """Delete cooldown entries older than max_age_hours."""
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                "DELETE FROM twitch_promo_cooldowns WHERE wall_ts < ?",
+                (time.time() - max_age_hours * 3600,),
+            )
+    except Exception:
+        log.debug("Failed to clean up stale promo cooldowns", exc_info=True)

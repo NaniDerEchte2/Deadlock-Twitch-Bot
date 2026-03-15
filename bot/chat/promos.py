@@ -650,6 +650,13 @@ class PromoMixin:
         if last_attempt is not None and now - last_attempt < (PROMO_ATTEMPT_COOLDOWN_MIN * 60):
             return False
         self._last_promo_attempt[login] = now
+        try:
+            from ..storage import save_promo_cooldown
+            wall_now = time.time()
+            mono_now = time.monotonic()
+            save_promo_cooldown(login, "attempt", wall_now - (mono_now - now))
+        except Exception:
+            pass
         return True
 
     @staticmethod
@@ -716,6 +723,53 @@ class PromoMixin:
                 viewer_spike_map = {}
                 self._last_promo_viewer_spike = viewer_spike_map
             viewer_spike_map[login] = now
+        # Persist to DB
+        try:
+            from ..storage import save_promo_cooldown
+            wall_now = time.time()
+            mono_now = time.monotonic()
+            wall_ts = wall_now - (mono_now - now)
+            save_promo_cooldown(login, "sent", wall_ts)
+            if reason == "viewer_spike":
+                save_promo_cooldown(login, "viewer_spike", wall_ts)
+        except Exception:
+            log.debug("Promo cooldown persist failed for %s", login, exc_info=True)
+
+    def _restore_promo_cooldowns(self) -> None:
+        """Load persisted promo cooldowns from DB and populate in-memory dicts."""
+        from ..storage import load_promo_cooldowns, cleanup_stale_promo_cooldowns
+
+        try:
+            cleanup_stale_promo_cooldowns(24)
+        except Exception:
+            pass
+
+        rows = load_promo_cooldowns()
+        if not rows:
+            return
+
+        wall_now = time.time()
+        mono_now = time.monotonic()
+        restored = 0
+
+        for login, cooldown_type, wall_ts in rows:
+            age_sec = wall_now - wall_ts
+            if age_sec > 24 * 3600 or age_sec < 0:
+                continue
+            mono_ts = mono_now - age_sec
+
+            if cooldown_type == "sent":
+                self._last_promo_sent.setdefault(login, mono_ts)
+            elif cooldown_type == "attempt":
+                self._last_promo_attempt.setdefault(login, mono_ts)
+            elif cooldown_type == "viewer_spike":
+                self._last_promo_viewer_spike.setdefault(login, mono_ts)
+            else:
+                continue
+            restored += 1
+
+        if restored:
+            log.info("Restored %d promo cooldown(s) from DB", restored)
 
     def _build_promo_text(self, login: str, invite: str) -> str | None:
         global_message = self._load_global_promo_message()
@@ -1049,6 +1103,7 @@ class PromoMixin:
     async def _periodic_promo_loop(self) -> None:
         """Hauptschleife: prüft alle X Sekunden, ob eine Promo gesendet werden soll."""
         loop_interval_sec = max(15, int(PROMO_LOOP_INTERVAL_SEC))
+        self._restore_promo_cooldowns()
         try:
             while True:
                 await asyncio.sleep(loop_interval_sec)
@@ -1092,6 +1147,11 @@ class PromoMixin:
             last = self._last_promo_sent.get(login)
             if last is None:
                 self._last_promo_sent[login] = now
+                try:
+                    from ..storage import save_promo_cooldown
+                    save_promo_cooldown(login, "sent", time.time())
+                except Exception:
+                    pass
                 continue
 
             if now - last < interval_sec:
