@@ -14,6 +14,63 @@ class _DummyMonitoring(TwitchMonitoringMixin):
 
 
 class LiveAnnouncementTransportTests(unittest.IsolatedAsyncioTestCase):
+    def test_live_announcement_retry_payload_reuses_first_snapshot_for_same_stream(self) -> None:
+        dummy = _DummyMonitoring()
+        first_stream = {
+            "id": "stream-1",
+            "started_at": "2026-03-15T11:40:00Z",
+            "title": "First Title",
+            "game_name": "Deadlock",
+            "viewer_count": 12,
+            "language": "de",
+            "tags": ["first"],
+        }
+
+        first_snapshot, first_token, _first_render_now = dummy._resolve_live_announcement_retry_payload(
+            login="Tester",
+            stream=first_stream,
+            previous_state={},
+            stream_id="stream-1",
+            started_at="2026-03-15T11:40:00Z",
+            message_id=None,
+            rendered_at="2026-03-15T11:40:05+00:00",
+        )
+
+        second_snapshot, second_token, second_render_now = dummy._resolve_live_announcement_retry_payload(
+            login="Tester",
+            stream={
+                "id": "stream-1",
+                "started_at": "2026-03-15T11:40:00Z",
+                "title": "Second Title",
+                "game_name": "Just Chatting",
+                "viewer_count": 99,
+                "language": "en",
+                "tags": ["second"],
+            },
+            previous_state={
+                "last_stream_id": "stream-1",
+                "last_started_at": "2026-03-15T11:40:00Z",
+                "last_title": "First Title",
+                "last_game": "Deadlock",
+                "last_viewer_count": 12,
+            },
+            stream_id="stream-1",
+            started_at="2026-03-15T11:40:00Z",
+            message_id=None,
+            rendered_at="2026-03-15T11:41:00+00:00",
+        )
+
+        self.assertEqual(first_token, second_token)
+        self.assertEqual(first_snapshot, second_snapshot)
+        self.assertEqual(second_snapshot["title"], "First Title")
+        self.assertEqual(second_snapshot["viewer_count"], 12)
+        self.assertEqual(second_snapshot["language"], "de")
+        self.assertEqual(second_snapshot["tags"], ["first"])
+        self.assertEqual(
+            second_render_now.isoformat(),
+            "2026-03-15T11:40:05+00:00",
+        )
+
     async def test_send_live_announcement_via_broker_forwards_rich_payload(self) -> None:
         dummy = _DummyMonitoring()
         captured: dict[str, object] = {}

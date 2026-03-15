@@ -94,6 +94,38 @@ class LiveAnnouncementIntegrationTests(unittest.IsolatedAsyncioTestCase):
         button = view.children[0]
         self.assertEqual(getattr(button, "label", ""), "Auf Twitch ansehen")
 
+    async def test_build_live_announcement_message_reuses_supplied_tracking_token(self) -> None:
+        dummy = _DummyEmbeds()
+        dummy._payload_override = None
+
+        (
+            _content,
+            embed,
+            _view,
+            _allowed_mentions,
+            tracking_token,
+        ) = await dummy._build_live_announcement_message(
+            login="tester",
+            stream={
+                "user_name": "Tester",
+                "user_login": "tester",
+                "title": "No Config",
+                "game_name": "Deadlock",
+                "viewer_count": 5,
+                "thumbnail_url": "https://cdn.example/thumb-{width}x{height}.jpg",
+                "started_at": "2026-03-15T11:30:00Z",
+            },
+            streamer_entry={"live_ping_enabled": 0},
+            notify_channel=None,
+            tracking_token="track-1",
+        )
+
+        self.assertEqual(tracking_token, "track-1")
+        self.assertEqual(
+            embed.to_dict()["image"]["url"],
+            "https://cdn.example/thumb-1280x720.jpg?rand=90953515094fab84",
+        )
+
     def test_config_rendering_uses_placeholders(self) -> None:
         class _ConfigDummy(_EmbedsMixin):
             def __init__(self) -> None:

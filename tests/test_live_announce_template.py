@@ -1,4 +1,5 @@
 import unittest
+from datetime import UTC, datetime
 
 from bot.live_announce.template import (
     AnnouncementField,
@@ -66,6 +67,36 @@ class LiveAnnouncementTemplateTests(unittest.TestCase):
         )
         payload = render_announcement_payload(cfg, context)
         self.assertEqual(payload["embed"]["title"], "EarlySalty ist LIVE in Deadlock!")
+
+    def test_render_announcement_payload_uses_stable_cache_buster_seed(self) -> None:
+        cfg = LiveAnnouncementConfig()
+        context = build_template_context(
+            "earlysalty",
+            {
+                "user_name": "EarlySalty",
+                "user_login": "earlysalty",
+                "title": "Deadlock Ranked Session",
+                "game_name": "Deadlock",
+                "viewer_count": 77,
+                "started_at": "2026-03-03T12:00:00+00:00",
+                "url": "https://www.twitch.tv/earlysalty",
+                "thumbnail_url": "https://static-cdn.jtvnw.net/previews/live_user_earlysalty-{width}x{height}.jpg",
+                "language": "de",
+            },
+            now=datetime(2026, 3, 15, 12, 0, tzinfo=UTC),
+        )
+
+        payload = render_announcement_payload(
+            cfg,
+            context,
+            now=datetime(2026, 3, 15, 12, 1, tzinfo=UTC),
+            cache_buster_seed="track-1",
+        )
+
+        self.assertEqual(
+            payload["embed"]["image"]["url"],
+            "https://static-cdn.jtvnw.net/previews/live_user_earlysalty-1280x720.jpg?cb=90953515094fab84",
+        )
 
 
 if __name__ == "__main__":

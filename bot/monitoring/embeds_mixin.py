@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import secrets
@@ -42,6 +43,13 @@ _ROLE_NAME_SAFE_RE = re.compile(r"[^A-Za-z0-9 _-]+")
 
 
 class _EmbedsMixin:
+    @staticmethod
+    def _stable_cache_buster_value(seed: str | None) -> str:
+        normalized_seed = str(seed or "").strip()
+        if not normalized_seed:
+            return str(int(datetime.now(tz=UTC).timestamp()))
+        return hashlib.sha256(normalized_seed.encode("utf-8")).hexdigest()[:16]
+
     @staticmethod
     def _default_live_announcement_config() -> dict:
         if callable(_default_live_announce_config):
@@ -306,6 +314,7 @@ class _EmbedsMixin:
         login: str,
         stream: dict,
         mention_text: str,
+        render_now: datetime | None = None,
     ) -> dict:
         if callable(_build_live_announce_stream_context):
             try:
@@ -313,6 +322,7 @@ class _EmbedsMixin:
                     login=login,
                     stream=stream,
                     mention_role=mention_text,
+                    now=render_now,
                 )
                 if isinstance(context, dict):
                     context["mention_role"] = mention_text
@@ -321,7 +331,8 @@ class _EmbedsMixin:
             except Exception:
                 log.debug("Could not build context via live_announce.template", exc_info=True)
         display_name = stream.get("user_name") or login
-        started_at = str(stream.get("started_at") or datetime.now(tz=UTC).isoformat(timespec="seconds"))
+        now_value = render_now.astimezone(UTC) if isinstance(render_now, datetime) else datetime.now(tz=UTC)
+        started_at = str(stream.get("started_at") or now_value.isoformat(timespec="seconds"))
         stream_login = str(stream.get("user_login") or login).strip()
         return {
             "channel": display_name,
@@ -343,11 +354,18 @@ class _EmbedsMixin:
         login: str,
         stream: dict,
         mention_text: str = "",
+        cache_buster_seed: str | None = None,
+        render_now: datetime | None = None,
     ) -> dict | None:
         config_data = self._normalize_live_announcement_config(
             self._load_live_announcement_config(login)
         )
-        context = self._build_live_announce_context(login=login, stream=stream, mention_text=mention_text)
+        context = self._build_live_announce_context(
+            login=login,
+            stream=stream,
+            mention_text=mention_text,
+            render_now=render_now,
+        )
         context["url"] = self._build_referral_url(login)
         if callable(_render_live_announce_payload):
             try:
@@ -358,7 +376,12 @@ class _EmbedsMixin:
                     and callable(getattr(_LiveAnnouncementConfig, "from_dict", None))
                 ):
                     render_config = _LiveAnnouncementConfig.from_dict(render_config)
-                rendered = _render_live_announce_payload(config=render_config, context=context)
+                rendered = _render_live_announce_payload(
+                    config=render_config,
+                    context=context,
+                    now=render_now,
+                    cache_buster_seed=cache_buster_seed,
+                )
                 if isinstance(rendered, dict):
                     button = rendered.get("button")
                     if isinstance(button, dict):
@@ -444,7 +467,10 @@ class _EmbedsMixin:
             image_url = image_url.replace("{width}", width).replace("{height}", height)
             if image_url and bool(images_cfg.get("cache_buster", False)):
                 separator = "&" if "?" in image_url else "?"
-                image_url = f"{image_url}{separator}rand={int(datetime.now(tz=UTC).timestamp())}"
+                image_url = (
+                    f"{image_url}{separator}rand="
+                    f"{self._stable_cache_buster_value(cache_buster_seed)}"
+                )
         elif image_mode == "custom":
             image_url = _render_text(str(images_cfg.get("image_url_template") or ""))
 
@@ -553,6 +579,8 @@ class _EmbedsMixin:
         stream: dict,
         *,
         rendered_payload: dict | None = None,
+        cache_buster_seed: str | None = None,
+        render_now: datetime | None = None,
     ) -> discord.Embed:
         """Erzeuge ein Discord-Embed für das Go-Live-Posting mit Stream-Vorschau."""
 
@@ -561,7 +589,11 @@ class _EmbedsMixin:
         title = stream.get("title") or "Live!"
         viewer_count = int(stream.get("viewer_count") or 0)
 
-        timestamp = datetime.now(tz=UTC)
+        timestamp = (
+            render_now.astimezone(UTC)
+            if isinstance(render_now, datetime)
+            else datetime.now(tz=UTC)
+        )
         started_at_raw = stream.get("started_at")
         if isinstance(started_at_raw, str) and started_at_raw:
             try:
@@ -678,12 +710,17 @@ class _EmbedsMixin:
                     image_url = str(image_cfg.get("custom_url") or "").strip()
             if image_url and bool(image_cfg.get("cache_buster", False)):
                 separator = "&" if "?" in image_url else "?"
-                image_url = f"{image_url}{separator}rand={int(datetime.now(tz=UTC).timestamp())}"
+                image_url = (
+                    f"{image_url}{separator}rand="
+                    f"{self._stable_cache_buster_value(cache_buster_seed)}"
+                )
         else:
             image_url = (stream.get("thumbnail_url") or "").strip()
             if image_url:
                 image_url = image_url.replace("{width}", "1280").replace("{height}", "720")
-                image_url = f"{image_url}?rand={int(datetime.now(tz=UTC).timestamp())}"
+                image_url = (
+                    f"{image_url}?rand={self._stable_cache_buster_value(cache_buster_seed)}"
+                )
         if image_url:
             embed.set_image(url=image_url)
 
@@ -810,7 +847,10 @@ class _EmbedsMixin:
         stream: dict,
         streamer_entry: dict | None,
         notify_channel: discord.TextChannel | None,
+        tracking_token: str | None = None,
+        render_now: datetime | None = None,
     ) -> tuple[str, discord.Embed, _TwitchLiveAnnouncementView | None, discord.AllowedMentions, str]:
+        tracking_token_value = str(tracking_token or "").strip() or self._generate_tracking_token()
         mention_text = ""
         streamer_role_id: int | None = None
         allowed_role_ids: list[int] = []
@@ -827,6 +867,8 @@ class _EmbedsMixin:
             login=login,
             stream=stream,
             mention_text=mention_text,
+            cache_buster_seed=tracking_token_value,
+            render_now=render_now,
         )
         mention_cfg = (
             rendered_payload.get("allowed_mentions")
@@ -872,14 +914,15 @@ class _EmbedsMixin:
             login,
             stream,
             rendered_payload=rendered_payload if isinstance(rendered_payload, dict) else None,
+            cache_buster_seed=tracking_token_value,
+            render_now=render_now,
         )
-        tracking_token = self._generate_tracking_token()
         referral_url = self._build_referral_url(login)
         view = (
             self._build_live_view(
                 login,
                 referral_url,
-                tracking_token,
+                tracking_token_value,
                 button_label=button_label,
             )
             if button_enabled
@@ -891,7 +934,7 @@ class _EmbedsMixin:
             roles=[discord.Object(id=role_id) for role_id in allowed_role_ids] if allowed_role_ids else False,
             replied_user=False,
         )
-        return content, embed, view, allowed_mentions, tracking_token
+        return content, embed, view, allowed_mentions, tracking_token_value
 
     async def _register_persistent_live_views(self) -> None:
         """Re-register live announcement views after a restart."""

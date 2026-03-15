@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+import hashlib
 import json
 from typing import Any, Mapping
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -314,12 +315,20 @@ def _fmt_uptime(started_at: datetime | None, now: datetime) -> str:
     return f"{minutes}m"
 
 
+def _stable_cache_buster_value(seed: str | None, *, now: datetime) -> str:
+    normalized_seed = _coerce_str(seed)
+    if not normalized_seed:
+        return str(int(now.timestamp()))
+    return hashlib.sha256(normalized_seed.encode("utf-8")).hexdigest()[:16]
+
+
 def _stream_thumbnail_url(
     raw_url: str,
     *,
     ratio: str,
     cache_buster: bool,
     now: datetime,
+    cache_buster_seed: str | None = None,
 ) -> str:
     if not raw_url:
         return ""
@@ -329,7 +338,7 @@ def _stream_thumbnail_url(
         return resolved
     parts = urlsplit(resolved)
     query = dict(parse_qsl(parts.query, keep_blank_values=True))
-    query["cb"] = str(int(now.timestamp()))
+    query["cb"] = _stable_cache_buster_value(cache_buster_seed, now=now)
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
@@ -374,6 +383,7 @@ def render_announcement_payload(
     context: Mapping[str, Any],
     *,
     now: datetime | None = None,
+    cache_buster_seed: str | None = None,
 ) -> dict[str, Any]:
     now_utc = now.astimezone(UTC) if isinstance(now, datetime) else datetime.now(tz=UTC)
     ctx = {k: str(v) if not isinstance(v, str) else v for k, v in context.items()}
@@ -414,6 +424,7 @@ def render_announcement_payload(
             ratio=config.images.image_ratio,
             cache_buster=config.images.cache_buster,
             now=now_utc,
+            cache_buster_seed=cache_buster_seed,
         )
 
     button_url = (

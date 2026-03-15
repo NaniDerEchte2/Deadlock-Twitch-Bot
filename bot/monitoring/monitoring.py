@@ -154,6 +154,139 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:48]
         return f"twitch-{action}-{digest}"
 
+    @staticmethod
+    def _build_live_announcement_tracking_token(
+        *,
+        login: str,
+        stream_id: str | None,
+        started_at: str | None,
+        fallback_title: str | None = None,
+    ) -> str:
+        raw = (
+            f"{str(login or '').strip().lower()}|{str(stream_id or '').strip()}|"
+            f"{str(started_at or '').strip()}|{str(fallback_title or '').strip()}"
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _is_same_live_announcement_stream(
+        previous_state: dict[str, object],
+        *,
+        stream_id: str | None,
+        started_at: str | None,
+    ) -> bool:
+        previous_stream_id = str(previous_state.get("last_stream_id") or "").strip()
+        if stream_id and previous_stream_id:
+            return previous_stream_id == stream_id
+        previous_started_at = str(previous_state.get("last_started_at") or "").strip()
+        if started_at and previous_started_at:
+            return previous_started_at == started_at
+        return False
+
+    def _live_announcement_retry_cache(self) -> dict[str, dict[str, object]]:
+        cache = getattr(self, "_live_announcement_retry_state", None)
+        if isinstance(cache, dict):
+            return cache
+        cache = {}
+        self._live_announcement_retry_state = cache
+        return cache
+
+    def _clear_live_announcement_retry_payload(self, login: str) -> None:
+        login_key = str(login or "").strip().lower()
+        if not login_key:
+            return
+        self._live_announcement_retry_cache().pop(login_key, None)
+
+    @staticmethod
+    def _parse_live_announcement_render_now(value: str | None) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+    def _resolve_live_announcement_retry_payload(
+        self,
+        *,
+        login: str,
+        stream: dict[str, object],
+        previous_state: dict[str, object],
+        stream_id: str | None,
+        started_at: str | None,
+        message_id: str | None,
+        rendered_at: str,
+    ) -> tuple[dict[str, object], str, datetime | None]:
+        login_key = str(login or "").strip().lower()
+        marker_raw = (
+            f"{login_key}|{str(stream_id or '').strip()}|{str(started_at or '').strip()}"
+        )
+        marker = hashlib.sha256(marker_raw.encode("utf-8")).hexdigest()[:32]
+        cached_state = self._live_announcement_retry_cache().get(login_key)
+        if not message_id and isinstance(cached_state, dict):
+            cached_marker = str(cached_state.get("marker") or "").strip()
+            cached_stream = cached_state.get("stream")
+            cached_token = str(cached_state.get("tracking_token") or "").strip()
+            cached_rendered_at = str(cached_state.get("rendered_at") or "").strip()
+            if cached_marker == marker and isinstance(cached_stream, dict) and cached_token:
+                return (
+                    dict(cached_stream),
+                    cached_token,
+                    self._parse_live_announcement_render_now(cached_rendered_at),
+                )
+
+        announcement_stream = dict(stream)
+        render_now_value = str(rendered_at or "").strip()
+        if (
+            not message_id
+            and self._is_same_live_announcement_stream(
+                previous_state,
+                stream_id=stream_id,
+                started_at=started_at,
+            )
+        ):
+            previous_title = str(previous_state.get("last_title") or "").strip()
+            if previous_title:
+                announcement_stream["title"] = previous_title
+            previous_game = str(previous_state.get("last_game") or "").strip()
+            if previous_game:
+                announcement_stream["game_name"] = previous_game
+            if previous_state.get("last_viewer_count") is not None:
+                try:
+                    announcement_stream["viewer_count"] = int(
+                        previous_state.get("last_viewer_count") or 0
+                    )
+                except (TypeError, ValueError):
+                    pass
+            previous_started_at = str(previous_state.get("last_started_at") or "").strip()
+            if previous_started_at:
+                announcement_stream["started_at"] = previous_started_at
+            previous_rendered_at = str(previous_state.get("last_seen_at") or "").strip()
+            if previous_rendered_at:
+                render_now_value = previous_rendered_at
+
+        tracking_token = self._build_live_announcement_tracking_token(
+            login=login_key,
+            stream_id=stream_id,
+            started_at=str(announcement_stream.get("started_at") or started_at or ""),
+            fallback_title=str(announcement_stream.get("title") or ""),
+        )
+        self._live_announcement_retry_cache()[login_key] = {
+            "marker": marker,
+            "stream": dict(announcement_stream),
+            "tracking_token": tracking_token,
+            "rendered_at": render_now_value,
+        }
+        return (
+            announcement_stream,
+            tracking_token,
+            self._parse_live_announcement_render_now(render_now_value),
+        )
+
     async def _post_master_broker_json(
         self,
         *,
@@ -1142,19 +1275,22 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                 except Exception:
                     log.debug("Konnte alte Session nicht bereinigen: %s", login, exc_info=True)
 
-            if not was_live:
-                had_deadlock_prev = False
-            elif (
+            stream_restarted = (
                 is_live
                 and previous_stream_id
                 and current_stream_id
                 and previous_stream_id != current_stream_id
-            ):
+            )
+            if not was_live:
+                had_deadlock_prev = False
+            elif stream_restarted:
                 had_deadlock_prev = False
                 if twitch_user_id:
                     partner_score_refreshes.append(
                         (twitch_user_id, login_lower, "poll_stream_restarted")
                     )
+            if not is_live or stream_restarted:
+                self._clear_live_announcement_retry_payload(login_lower)
 
             message_id_previous = (
                 str(previous_state.get("last_discord_message_id") or "").strip() or None
@@ -1227,12 +1363,31 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
             )
 
             if should_post:
+                announcement_stream, announcement_tracking_token, announcement_render_now = (
+                    self._resolve_live_announcement_retry_payload(
+                        login=login_lower,
+                        stream=stream,
+                        previous_state=previous_state,
+                        stream_id=stream_id_value,
+                        started_at=stream_started_at_value,
+                        message_id=message_id_previous,
+                        rendered_at=now_iso,
+                    )
+                )
+                last_title_value = str(announcement_stream.get("title") or "").strip() or None
+                last_game_value = str(announcement_stream.get("game_name") or "").strip() or None
+                try:
+                    last_viewer_count_value = int(announcement_stream.get("viewer_count") or 0)
+                except (TypeError, ValueError):
+                    last_viewer_count_value = 0
                 content, embed, view, allowed_mentions, new_tracking_token = (
                     await self._build_live_announcement_message(
                         login=login,
-                        stream=stream,
+                        stream=announcement_stream,
                         streamer_entry=entry,
                         notify_channel=notify_ch,
+                        tracking_token=announcement_tracking_token,
+                        render_now=announcement_render_now,
                     )
                 )
                 if self._alert_mention:
@@ -1288,6 +1443,7 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                     if message_id_result is None:
                         log.warning("Konnte Go-Live-Posting nicht via Master-Broker senden: %s", login)
                     else:
+                        self._clear_live_announcement_retry_payload(login_lower)
                         message_id_to_store = message_id_result
                         tracking_token_to_store = (
                             new_tracking_token if live_view_spec is not None else None
@@ -1303,6 +1459,7 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                     except Exception:
                         log.exception("Konnte Go-Live-Posting nicht senden: %s", login)
                     else:
+                        self._clear_live_announcement_retry_payload(login_lower)
                         message_id_to_store = str(message.id)
                         tracking_token_to_store = new_tracking_token if view is not None else None
                         if view is not None:
