@@ -978,28 +978,36 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
         except Exception:
             log.exception("Konnte Twitch-Kategorie-ID nicht ermitteln")
 
-    async def _tick(self):
-        """Ein Tick: tracked Streamer + Kategorie-Streams prüfen, Postings/DB aktualisieren, Stats loggen."""
-        if self.api is None:
-            return
-        if self.api.is_auth_blocked():
-            return
+    def _load_tracked_streamers(self) -> tuple[list[dict[str, object]], set[str]]:
+        """Load all channels the monitoring pipeline is responsible for tracking.
 
-        if not self._category_id:
-            await self._ensure_category_id()
-            if self.api.is_auth_blocked():
-                return
-
+        Session writes stay centralized in monitoring/sessions_mixin. This loader
+        therefore includes monitored-only channels here instead of opening
+        sessions from any secondary path such as the chat bot.
+        """
         partner_logins: set[str] = set()
+        tracked: list[dict[str, object]] = []
         try:
             with storage.get_conn() as c:
                 rows = c.execute(
-                    "SELECT twitch_login, twitch_user_id, require_discord_link, "
-                    "       archived_at, is_partner, discord_user_id, live_ping_role_id, "
-                    "       COALESCE(live_ping_enabled, 1) AS live_ping_enabled "
-                    "FROM twitch_streamers_partner_state"
+                    """
+                    SELECT twitch_login, twitch_user_id, require_discord_link,
+                           archived_at, is_partner, discord_user_id,
+                           live_ping_role_id, COALESCE(live_ping_enabled, 1) AS live_ping_enabled
+                      FROM twitch_streamers_partner_state
+                    UNION ALL
+                    SELECT s.twitch_login, s.twitch_user_id, s.require_discord_link,
+                           s.archived_at::text AS archived_at, 0 AS is_partner, s.discord_user_id,
+                           s.live_ping_role_id, COALESCE(s.live_ping_enabled, 1) AS live_ping_enabled
+                      FROM twitch_streamers s
+                     WHERE COALESCE(s.is_monitored_only, 0) = 1
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM twitch_streamers_partner_state ps
+                            WHERE LOWER(ps.twitch_login) = LOWER(s.twitch_login)
+                       )
+                    """
                 ).fetchall()
-            tracked: list[dict[str, object]] = []
             for row in rows:
                 row_dict = dict(row)
                 login = str(row_dict.get("twitch_login") or "").strip()
@@ -1037,6 +1045,21 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
             log.exception("Konnte tracked Streamer nicht aus DB lesen")
             tracked = []
             partner_logins = set()
+        return tracked, partner_logins
+
+    async def _tick(self):
+        """Ein Tick: tracked Streamer + Kategorie-Streams prüfen, Postings/DB aktualisieren, Stats loggen."""
+        if self.api is None:
+            return
+        if self.api.is_auth_blocked():
+            return
+
+        if not self._category_id:
+            await self._ensure_category_id()
+            if self.api.is_auth_blocked():
+                return
+
+        tracked, partner_logins = self._load_tracked_streamers()
 
         logins = [str(entry.get("login") or "") for entry in tracked if entry.get("login")]
         language_filters = self._language_filter_values()
@@ -1198,9 +1221,11 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
             was_live = bool(previous_state.get("is_live", 0))
             is_live = bool(stream)
             twitch_user_id = str(entry.get("twitch_user_id") or "").strip() or None
+            need_link = bool(entry.get("require_link"))
+            is_verified = bool(entry.get("is_verified"))
 
             # Go-Live Detection: Subscribe stream.offline für raid-enabled Streamer
-            if not was_live and is_live and twitch_user_id:
+            if not was_live and is_live and twitch_user_id and is_verified:
                 # Stream ist gerade live gegangen!
                 handler = getattr(self, "_handle_stream_went_live", None)
                 if handler:
@@ -1285,7 +1310,7 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                 had_deadlock_prev = False
             elif stream_restarted:
                 had_deadlock_prev = False
-                if twitch_user_id:
+                if twitch_user_id and is_verified and not is_archived:
                     partner_score_refreshes.append(
                         (twitch_user_id, login_lower, "poll_stream_restarted")
                     )
@@ -1300,9 +1325,6 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                 str(previous_state.get("last_tracking_token") or "").strip() or None
             )
             tracking_token_to_store = tracking_token_previous
-
-            need_link = bool(entry.get("require_link"))
-            is_verified = bool(entry.get("is_verified"))
 
             game_name = (stream.get("game_name") or "").strip() if stream else ""
             game_name_lower = game_name.lower()
@@ -1612,7 +1634,7 @@ class TwitchMonitoringMixin(_EventSubMixin, _ExpSessionsMixin, _SessionsMixin, _
                 )
             )
 
-            if twitch_user_id:
+            if twitch_user_id and is_verified and not is_archived:
                 if not was_live and is_live:
                     partner_score_refreshes.append((twitch_user_id, login_lower, "poll_stream_online"))
                 elif was_live and not is_live:

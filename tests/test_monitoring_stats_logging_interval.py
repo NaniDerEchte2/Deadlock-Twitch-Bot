@@ -14,6 +14,17 @@ class _PartnerStateConnection:
         return []
 
 
+class _TrackedStreamerConnection:
+    def __init__(self, rows) -> None:
+        self._rows = list(rows)
+
+    def execute(self, sql: str, params=(), *args, **kwargs):
+        return self
+
+    def fetchall(self):
+        return list(self._rows)
+
+
 class _ApiStub:
     def is_auth_blocked(self) -> bool:
         return False
@@ -55,6 +66,49 @@ class _MonitoringHarness(TwitchMonitoringMixin):
 
 
 class MonitoringStatsLoggingIntervalTests(unittest.IsolatedAsyncioTestCase):
+    def test_load_tracked_streamers_includes_monitored_only_without_new_session_writer(self) -> None:
+        harness = _MonitoringHarness()
+        conn = _TrackedStreamerConnection(
+            [
+                {
+                    "twitch_login": "partner_one",
+                    "twitch_user_id": "100",
+                    "require_discord_link": 1,
+                    "archived_at": None,
+                    "is_partner": 1,
+                    "discord_user_id": "200",
+                    "live_ping_role_id": 300,
+                    "live_ping_enabled": 1,
+                },
+                {
+                    "twitch_login": "revivelovesyou",
+                    "twitch_user_id": "186111693",
+                    "require_discord_link": 0,
+                    "archived_at": None,
+                    "is_partner": 0,
+                    "discord_user_id": None,
+                    "live_ping_role_id": None,
+                    "live_ping_enabled": 1,
+                },
+            ]
+        )
+
+        with patch(
+            "bot.monitoring.monitoring.storage.get_conn",
+            side_effect=lambda: contextlib.nullcontext(conn),
+        ):
+            tracked, partner_logins = harness._load_tracked_streamers()
+
+        self.assertEqual(
+            [entry["login"] for entry in tracked],
+            ["partner_one", "revivelovesyou"],
+        )
+        self.assertEqual(
+            [bool(entry["is_verified"]) for entry in tracked],
+            [True, False],
+        )
+        self.assertEqual(partner_logins, {"partner_one"})
+
     async def test_default_stats_logging_runs_every_poll_tick(self) -> None:
         harness = _MonitoringHarness()
         conn = _PartnerStateConnection()

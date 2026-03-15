@@ -555,6 +555,28 @@ class TwitchBaseCog(commands.Cog):
                 if to_remove:
                     with storage.get_conn() as conn:
                         for login in to_remove:
+                            # Finalize open sessions before deleting
+                            try:
+                                conn.execute(
+                                    """
+                                    UPDATE twitch_stream_sessions
+                                    SET ended_at = CURRENT_TIMESTAMP,
+                                        duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - started_at))::int,
+                                        notes = COALESCE(notes || '; ', '') || 'auto-closed: scout-removed'
+                                    WHERE streamer_login = ? AND ended_at IS NULL
+                                    """,
+                                    (login,),
+                                )
+                            except Exception:
+                                log.debug("Scout: session cleanup failed for %s", login, exc_info=True)
+                            # Clean up stale live_state
+                            try:
+                                conn.execute(
+                                    "DELETE FROM twitch_live_state WHERE streamer_login = ?",
+                                    (login,),
+                                )
+                            except Exception:
+                                log.debug("Scout: live_state cleanup failed for %s", login, exc_info=True)
                             storage.delete_streamer(conn, login)
                         conn.commit()
                     log.info(
